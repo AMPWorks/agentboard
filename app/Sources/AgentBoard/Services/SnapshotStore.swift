@@ -1,0 +1,177 @@
+import Foundation
+import OSLog
+
+/// Owns the current snapshot, polling loop, directory watcher, and the
+/// background link-refresh / backfill timers. All state lives on MainActor;
+/// CLI calls hop off to the cooperative pool via `CLIRunner`.
+@MainActor
+final class SnapshotStore: ObservableObject {
+    @Published private(set) var snapshot: Snapshot = .empty
+    @Published private(set) var lastUpdated: Date?
+    @Published private(set) var lastError: String?
+    @Published var showAll: Bool = false
+    /// Set by the popover when it needs the dashboard to open with a
+    /// specific session selected; the dashboard clears it after reading it.
+    @Published var pendingSelection: String?
+
+    private let cli: AgentBoardCLI
+    private let watcher = DirectoryWatcher()
+    private var pollTask: Task<Void, Never>?
+    private var linksTask: Task<Void, Never>?
+    private var pathsTask: Task<Void, Never>?
+    /// How many surfaces (the popover, the dashboard window) are currently
+    /// showing sessions. A count rather than a flag: closing the popover
+    /// while the dashboard is still open must not drop polling back to
+    /// the slow background interval.
+    private var visibleCount = 0
+    private var isVisible: Bool { visibleCount > 0 }
+    private let log = Logger(subsystem: "io.github.agentboard", category: "store")
+
+    /// Fallback used only if `agentboard paths --json` can't be called (not
+    /// found, fixture mode, non-zero exit, or unparseable output): the
+    /// AGENTBOARD_HOME override, then the same default agentboard.db itself
+    /// falls back to.
+    private static func fallbackDataDirectory() -> String {
+        if let override = ProcessInfo.processInfo.environment["AGENTBOARD_HOME"], !override.isEmpty {
+            return (override as NSString).expandingTildeInPath
+        }
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        return base?.appendingPathComponent("AgentBoard").path
+            ?? ("~/Library/Application Support/AgentBoard" as NSString).expandingTildeInPath
+    }
+
+    init(cli: AgentBoardCLI = .shared) {
+        self.cli = cli
+    }
+
+    /// Resolves the directory the watcher should watch by calling `agentboard
+    /// paths --json` once -- the CLI is the one source of truth for where it
+    /// actually reads/writes (it alone knows about a baked-in AGENTBOARD_HOME
+    /// from install time), so this must never be computed independently here.
+    private func resolveDataDirectory() async -> String {
+        do {
+            return try await cli.paths().home
+        } catch {
+            log.error("agentboard paths --json failed, falling back: \(error.localizedDescription, privacy: .public)")
+            return Self.fallbackDataDirectory()
+        }
+    }
+
+    func start() {
+        guard pollTask == nil else { return }
+        pathsTask = Task { [weak self] in
+            guard let self else { return }
+            let directory = await self.resolveDataDirectory()
+            guard !Task.isCancelled else { return }
+            self.watcher.start(path: directory) { [weak self] in
+                Task { await self?.refresh() }
+            }
+        }
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refresh()
+                let seconds = (self?.isVisible ?? false) ? 3 : 15
+                try? await Task.sleep(for: .seconds(seconds))
+            }
+        }
+        linksTask = Task { [weak self] in
+            await self?.runInitialBackfill()
+            guard !Task.isCancelled else { return }
+            await self?.refreshLinks()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(600))
+                guard !Task.isCancelled else { return }
+                await self?.refreshLinks()
+            }
+        }
+    }
+
+    func stop() {
+        pollTask?.cancel(); pollTask = nil
+        linksTask?.cancel(); linksTask = nil
+        pathsTask?.cancel(); pathsTask = nil
+        watcher.stop()
+    }
+
+    func setVisible(_ visible: Bool) {
+        visibleCount = max(0, visibleCount + (visible ? 1 : -1))
+        if visible { Task { await refresh() } }
+    }
+
+    func refresh() async {
+        do {
+            let snapshot = try await cli.snapshot(all: showAll)
+            self.snapshot = snapshot
+            self.lastUpdated = Date()
+            self.lastError = nil
+        } catch {
+            self.lastError = error.localizedDescription
+            log.error("snapshot refresh failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func refreshLinks() async {
+        do {
+            try await cli.refreshLinks()
+        } catch {
+            log.error("refresh-links failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func runInitialBackfill() async {
+        do {
+            try await cli.backfill(days: 30)
+        } catch {
+            log.error("backfill failed: \(error.localizedDescription, privacy: .public)")
+        }
+        await refresh()
+    }
+
+    // MARK: - Actions
+
+    func markDone(_ session: Session) async {
+        await perform { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "done") }
+    }
+
+    func markOpen(_ session: Session) async {
+        await perform { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "open") }
+    }
+
+    func snooze(_ session: Session, hours: Int) async {
+        await perform { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "snooze", hours: hours) }
+    }
+
+    func focus(_ session: Session) async {
+        await perform { try await cli.focus(tool: session.tool, sessionId: session.sessionId) }
+    }
+
+    /// Actually resumes the session (opens a new terminal tab running the resume command).
+    func resume(_ session: Session) async {
+        await perform { try await cli.resume(tool: session.tool, sessionId: session.sessionId, printOnly: false) }
+    }
+
+    /// Fetches the resume command text for copying, without launching anything.
+    func resumeCommand(for session: Session) async -> String {
+        (try? await cli.resume(tool: session.tool, sessionId: session.sessionId, printOnly: true)) ?? session.resumeCommand
+    }
+
+    func requestSelection(_ key: String) {
+        pendingSelection = key
+    }
+
+    func setShowAll(_ showAll: Bool) {
+        guard showAll != self.showAll else { return }
+        self.showAll = showAll
+        Task { await refresh() }
+    }
+
+    private func perform(_ action: () async throws -> Void) async {
+        do {
+            try await action()
+            await refresh()
+        } catch {
+            self.lastError = error.localizedDescription
+            log.error("action failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+}

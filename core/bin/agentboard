@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+# Must be set before any `agentboard` import below: this copy is pinned
+# into the signed .app bundle (see build-app.sh) as well as the installed
+# core dir, and a stray __pycache__/ written into either one at first run
+# (e.g. the app's CLIRunner calling `paths --json`) invalidates the
+# bundle's code signature.
+sys.dont_write_bytecode = True
+
+# Baked in by install.sh's staged copy / build-app.sh's bundled copy when a
+# non-default AGENTBOARD_HOME was used at install time, so hooks, the app,
+# and backfill all agree on one database. This checked-out copy is never
+# rewritten, so it always falls through to agentboard.db's own default.
+_BAKED_AGENTBOARD_HOME = None
+if _BAKED_AGENTBOARD_HOME:
+    os.environ.setdefault("AGENTBOARD_HOME", _BAKED_AGENTBOARD_HOME)
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+
+argv = sys.argv[1:]
+
+if argv and argv[0] == "hook":
+    # Fast path: hook calls are latency-sensitive, skip argparse / cli.py's
+    # heavier import graph.
+    if sys.version_info < (3, 11):
+        # agentboard.db (imported below, via agentboard.hook) uses `Path |
+        # None` syntax that raises TypeError at import time on Python < 3.10
+        # -- before hook.run()'s own try/except can catch it. A shebang of
+        # `env python3` can resolve to an old system python3 at hook run
+        # time even though install.sh validated a newer one, so guard here
+        # too and keep the hook's "always exit 0" contract instead of
+        # letting that traceback escape to the caller.
+        try:
+            from datetime import datetime, timezone
+
+            home = os.environ.get("AGENTBOARD_HOME") or os.path.join(
+                os.path.expanduser("~"), "Library", "Application Support", "AgentBoard"
+            )
+            os.makedirs(home, exist_ok=True)
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            version = sys.version.split()[0]
+            with open(os.path.join(home, "hook-errors.log"), "a", encoding="utf-8") as fh:
+                fh.write(
+                    f"{now} [hook] python3 at {sys.executable} is {version}; "
+                    "AgentBoard requires >= 3.11, skipping this event\n"
+                )
+        except Exception:
+            pass
+        sys.exit(0)
+
+    tool = None
+    if "--tool" in argv:
+        idx = argv.index("--tool")
+        if idx + 1 < len(argv):
+            tool = argv[idx + 1]
+    from agentboard import hook
+
+    hook.run(tool)
+    sys.exit(0)
+
+from agentboard.cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())

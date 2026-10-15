@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {"type": "command", "command": "python3 ~/.claude/iterm-tab.py --hook codex", "timeout": 15}
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {"type": "command", "command": "python3 ~/.claude/iterm-tab.py --hook codex", "timeout": 15}
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {"type": "command", "command": "~/.claude/notify.py 'Codex needs input' 'Codex'", "timeout": 15},
+          {"type": "command", "command": "python3 ~/.claude/iterm-tab.py --hook codex --waiting", "timeout": 15}
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {"type": "command", "command": "~/.claude/notify.py 'Codex is done' 'Codex'", "timeout": 15},
+          {"type": "command", "command": "python3 ~/.claude/iterm-tab.py --hook codex --waiting", "timeout": 15}
+        ]
+      }
+    ]
+  }
+}
