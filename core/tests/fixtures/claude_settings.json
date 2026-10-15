@@ -1,0 +1,54 @@
+{
+  "env": {
+    "SOME_EXISTING_VAR": "1"
+  },
+  "permissions": {
+    "allow": ["Bash"],
+    "additionalDirectories": ["/Users/example/.claude/some-state"]
+  },
+  "model": "opus",
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {"type": "command", "command": "~/.claude/notify.py 'Claude needs input' 'Claude Code'", "timeout": 15},
+          {"type": "command", "command": "python3 ~/.claude/iterm-tab.py --hook claude --waiting", "timeout": 15}
+        ]
+      },
+      {
+        "hooks": [
+          {"type": "command", "command": "/Users/example/.config/iterm2/cc-status"}
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {"type": "command", "command": "/Users/example/.config/iterm2/cc-status"}
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {"type": "command", "command": "python3 ~/.claude/iterm-tab.py --hook claude", "timeout": 15}
+        ]
+      },
+      {
+        "hooks": [
+          {"type": "command", "command": "/Users/example/.config/iterm2/cc-status"}
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {"type": "command", "command": "~/.claude/notify.py 'Claude is done' 'Claude Code'", "timeout": 15},
+          {"type": "command", "command": "python3 ~/.claude/iterm-tab.py --hook claude --waiting", "timeout": 15}
+        ]
+      }
+    ]
+  },
+  "statusLine": {"type": "command", "command": "~/.claude/statusline.py"},
+  "mcpServers": {"comment": "Only ~/.claude.json can be used to configure MCP servers."}
+}

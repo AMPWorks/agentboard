@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Example AgentBoard provider: finds ticket refs in git commit trailers.
+
+Not tied to any specific team or ticket system. Reads the open sessions as a
+JSON array on stdin (as described in SPEC.md's "Links & integrations"
+section), looks at the last few commits on each session's branch for a
+trailer line like "Refs: ABC-123" or "Ticket: ABC-123", and prints links for
+whatever it finds as a JSON array on stdout.
+
+Wire it up in $AGENTBOARD_HOME/config.json:
+
+    {
+      "providers": [
+        {
+          "name": "git-trailers",
+          "command": ["python3", "/path/to/examples/providers/git-trailer-provider"],
+          "interval_minutes": 10
+        }
+      ]
+    }
+
+Adjust TRAILER_KEYS and TICKET_URL_TEMPLATE below for your own ticket system,
+or copy this file as a starting point for a richer provider (e.g. one that
+calls out to a real ticket API).
+"""
+
+import json
+import re
+import subprocess
+import sys
+
+TRAILER_KEYS = ("Refs", "Ticket", "Closes", "Fixes")
+TICKET_REF_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+")
+# Replace with your own ticket system's URL shape, or leave refs url-less.
+TICKET_URL_TEMPLATE = None  # e.g. "https://example.atlassian.net/browse/{ref}"
+COMMITS_TO_CHECK = 10
+
+
+def trailer_refs(cwd: str, branch: str) -> list:
+    if not cwd or not branch:
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "log", branch, f"-{COMMITS_TO_CHECK}", "--format=%B"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+
+    refs = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not any(line.startswith(f"{key}:") for key in TRAILER_KEYS):
+            continue
+        for match in TICKET_REF_RE.findall(line):
+            if match not in refs:
+                refs.append(match)
+    return refs
+
+
+def main():
+    try:
+        sessions = json.load(sys.stdin)
+    except ValueError:
+        sessions = []
+
+    output = []
+    for session in sessions:
+        refs = trailer_refs(session.get("cwd"), session.get("branch"))
+        if not refs:
+            continue
+        links = [
+            {
+                "kind": "ticket",
+                "ref": ref,
+                "url": TICKET_URL_TEMPLATE.format(ref=ref) if TICKET_URL_TEMPLATE else None,
+                "state": None,
+            }
+            for ref in refs
+        ]
+        output.append({"session": session["session"], "links": links})
+
+    json.dump(output, sys.stdout)
+
+
+if __name__ == "__main__":
+    main()
