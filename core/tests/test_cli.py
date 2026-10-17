@@ -1943,6 +1943,268 @@ class FocusResumeTests(AgentBoardTestCase):
         fake.assert_called_once_with(["open", "-a", "Warp"], capture_output=True, text=True)
 
 
+class _LogLevelMixin:
+    """Run with a given AGENTBOARD_LOG_LEVEL (None = unset) and read back
+    $AGENTBOARD_HOME/agentboard.log."""
+
+    log_level = None
+
+    def setUp(self):
+        super().setUp()
+        self._old_level = os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        if self.log_level:
+            os.environ["AGENTBOARD_LOG_LEVEL"] = self.log_level
+
+    def tearDown(self):
+        os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        if self._old_level is not None:
+            os.environ["AGENTBOARD_LOG_LEVEL"] = self._old_level
+        super().tearDown()
+
+    def _log_lines(self):
+        path = self.agentboard_home / "agentboard.log"
+        return path.read_text().splitlines() if path.exists() else []
+
+
+class MainWrapperTests(_LogLevelMixin, AgentBoardTestCase):
+    log_level = "debug"
+
+    def test_start_and_end_lines_with_redacted_argv(self):
+        insert_session(self.conn, session_id="s1")
+        rc = cli.main(["mark", "claude", "s1", "done", "--note", "private words"])
+        self.assertEqual(rc, 0)
+        lines = self._log_lines()
+        start = [l for l in lines if " cli.start " in l]
+        end = [l for l in lines if " cli.end " in l]
+        self.assertEqual(len(start), 1)
+        self.assertIn("DEBUG cli.start cmd=mark", start[0])
+        self.assertIn("<redacted:13 chars>", start[0])
+        self.assertNotIn("private words", "\n".join(lines))
+        self.assertEqual(len(end), 1)
+        self.assertIn("INFO cli.end cmd=mark exit=0 ms=", end[0])
+        mark = [l for l in lines if " cli.mark " in l]
+        self.assertEqual(len(mark), 1)
+        self.assertIn("status=done", mark[0])
+
+    def test_uncaught_exception_logs_error_and_propagates(self):
+        def boom(args):
+            raise RuntimeError("database on fire")
+
+        parser = cli.build_parser()
+        args = parser.parse_args(["prune"])
+        args.func = boom
+        with mock.patch.object(cli, "build_parser") as build:
+            build.return_value.parse_args.return_value = args
+            with self.assertRaises(RuntimeError):
+                cli.main(["prune"])
+        errors = [l for l in self._log_lines() if " cli.error " in l]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ERROR cli.error cmd=prune exc=RuntimeError", errors[0])
+        self.assertIn('msg="database on fire"', errors[0])
+
+    def test_nonzero_exit_is_logged_at_info(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = cli.main(["backfill", "--session", "nope"])
+        self.assertEqual(rc, 1)
+        lines = self._log_lines()
+        self.assertTrue(any("ERROR cli.backfill" in l and "--session must be TOOL:ID" in l for l in lines))
+        self.assertTrue(any("INFO cli.end cmd=backfill exit=1" in l for l in lines))
+        self.assertIn("--session must be TOOL:ID", err.getvalue())
+
+
+class QuietSnapshotTests(_LogLevelMixin, AgentBoardTestCase):
+    log_level = None  # the default, info
+
+    def _run_snapshot(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return cli.main(["snapshot", "--json"])
+
+    def test_fast_snapshot_leaves_no_info_line(self):
+        self.assertEqual(self._run_snapshot(), 0)
+        self.assertEqual([l for l in self._log_lines() if " INFO " in l], [])
+
+    def test_slow_snapshot_is_logged_at_info(self):
+        with mock.patch.object(cli.diag, "ms_since", return_value=1500):
+            self._run_snapshot()
+        lines = self._log_lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("INFO cli.end cmd=snapshot exit=0 ms=1500", lines[0])
+
+    def test_failed_snapshot_is_logged(self):
+        with mock.patch.object(cli, "build_snapshot", side_effect=RuntimeError("bad row")):
+            with self.assertRaises(RuntimeError):
+                self._run_snapshot()
+        self.assertTrue(any("ERROR cli.error cmd=snapshot" in l for l in self._log_lines()))
+
+    def test_paths_is_quiet_too(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["paths", "--json"])
+        self.assertEqual(self._log_lines(), [])
+
+
+def _ts(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
+class LogsCommandTests(_LogLevelMixin, AgentBoardTestCase):
+    def setUp(self):
+        super().setUp()
+        self.now = datetime(2026, 10, 17, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _write(self, name, entries):
+        path = self.agentboard_home / name
+        with path.open("a") as fh:
+            for minutes_ago, text in entries:
+                if minutes_ago is None:
+                    fh.write(text + "\n")
+                else:
+                    fh.write(f"{_ts(self.now - timedelta(minutes=minutes_ago))} {text}\n")
+
+    def _logs(self, argv, run=None):
+        args = cli.build_parser().parse_args(["logs"] + argv)
+        out, err = io.StringIO(), io.StringIO()
+        run = run or mock.Mock(side_effect=AssertionError("log show must not run"))
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.cmd_logs(args, run=run, now=self.now)
+        return rc, out.getvalue().splitlines(), err.getvalue()
+
+    def test_reads_rotated_file_first_then_live(self):
+        self._write("agentboard.log.1", [(30, "INFO old.one"), (20, "INFO old.two")])
+        self._write("agentboard.log", [(10, "INFO new.one")])
+        rc, lines, _ = self._logs([])
+        self.assertEqual(rc, 0)
+        self.assertEqual([l.split(" ", 2)[2] for l in lines], ["old.one", "old.two", "new.one"])
+
+    def test_since_window_spanning_the_rotation(self):
+        self._write("agentboard.log.1", [(90, "INFO too.old"), (45, "INFO in.rotated")])
+        self._write("agentboard.log", [(5, "INFO in.live")])
+        rc, lines, _ = self._logs(["--since", "1h"])
+        self.assertEqual([l.split(" ", 2)[2] for l in lines], ["in.rotated", "in.live"])
+
+    def test_since_iso_timestamp(self):
+        self._write("agentboard.log", [(30, "INFO a"), (10, "INFO b")])
+        cutoff = _ts(self.now - timedelta(minutes=20))
+        _, lines, _ = self._logs(["--since", cutoff])
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].endswith("INFO b"))
+
+    def test_unparseable_lines_pass_the_since_filter(self):
+        self._write("agentboard.log", [(90, "INFO old"), (None, "garbage without a timestamp"), (1, "INFO new")])
+        _, lines, _ = self._logs(["--since", "30m"])
+        self.assertEqual(lines[0], "garbage without a timestamp")
+        self.assertTrue(lines[1].endswith("INFO new"))
+
+    def test_grep_is_a_plain_substring(self):
+        self._write("agentboard.log", [
+            (3, "INFO cli.focus key=claude:a outcome=matched_tty"),
+            (2, "INFO cli.end cmd=mark exit=0"),
+            (1, "INFO cli.focus key=claude:b outcome=activated_only"),
+        ])
+        _, lines, _ = self._logs(["--grep", "cli.focus"])
+        self.assertEqual(len(lines), 2)
+        _, lines, _ = self._logs(["--grep", "outcome=activated_only"])
+        self.assertEqual(len(lines), 1)
+        _, lines, _ = self._logs(["--grep", "cli.f.cus"])
+        self.assertEqual(lines, [])
+
+    def test_default_is_last_200_lines(self):
+        self._write("agentboard.log", [(300 - i, f"INFO n.{i}") for i in range(300)])
+        _, lines, _ = self._logs([])
+        self.assertEqual(len(lines), 200)
+        self.assertTrue(lines[0].endswith("INFO n.100"))
+        _, lines, _ = self._logs(["--lines", "5"])
+        self.assertEqual(len(lines), 5)
+
+    def test_bad_since_is_an_error(self):
+        rc, _, err = self._logs(["--since", "yesterday"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--since", err)
+
+    def test_missing_log_prints_nothing(self):
+        rc, lines, err = self._logs([])
+        self.assertEqual((rc, lines, err), (0, [], ""))
+
+    def _app_run(self, stdout="", returncode=0, stderr=""):
+        return mock.Mock(return_value=subprocess.CompletedProcess(["log"], returncode, stdout, stderr))
+
+    def _start_arg(self, run):
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[:6], ["log", "show", "--style", "compact", "--info", "--debug"])
+        self.assertIn("--predicate", argv)
+        self.assertEqual(argv[argv.index("--predicate") + 1], 'subsystem == "io.github.agentboard"')
+        self.assertNotIn("--last", argv)
+        return argv[argv.index("--start") + 1]
+
+    def _local(self, dt):
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+    def test_app_with_relative_since_uses_absolute_start(self):
+        run = self._app_run()
+        self._logs(["--app", "--since", "1h"], run=run)
+        self.assertEqual(self._start_arg(run), self._local(self.now - timedelta(hours=1)))
+
+    def test_app_with_iso_since_uses_absolute_start(self):
+        run = self._app_run()
+        self._logs(["--app", "--since", "2026-10-17T11:15:00Z"], run=run)
+        self.assertEqual(
+            self._start_arg(run), self._local(datetime(2026, 10, 17, 11, 15, tzinfo=timezone.utc))
+        )
+
+    def test_app_without_since_starts_at_oldest_shown_line(self):
+        self._write("agentboard.log", [(42, "INFO first"), (2, "INFO second")])
+        run = self._app_run()
+        self._logs(["--app"], run=run)
+        oldest = (self.now - timedelta(minutes=42)).replace(microsecond=0)
+        self.assertEqual(self._start_arg(run), self._local(oldest))
+
+    def test_app_without_since_or_lines_defaults_to_one_hour(self):
+        run = self._app_run()
+        self._logs(["--app"], run=run)
+        self.assertEqual(self._start_arg(run), self._local(self.now - timedelta(hours=1)))
+
+    def test_app_lines_are_merged_by_timestamp(self):
+        self._write("agentboard.log", [(10, "INFO cli.focus outcome=matched_tty"), (1, "INFO later")])
+        app_ts = (self.now - timedelta(minutes=5)).astimezone().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        stdout = (
+            "Timestamp               Ty Process[PID:TID]\n"
+            f"{app_ts} N  AgentBoard[1:2] [io.github.agentboard:cli] args=\"focus claude s1\" exit=0 ms=400\n"
+        )
+        _, lines, err = self._logs(["--app", "--since", "1h"], run=self._app_run(stdout))
+        self.assertEqual(err, "")
+        self.assertEqual(len(lines), 3)
+        self.assertIn("cli.focus", lines[0])
+        self.assertIn(" APP ", lines[1])
+        self.assertIn('args="focus claude s1"', lines[1])
+        self.assertTrue(lines[1].startswith(_ts(self.now - timedelta(minutes=5))[:19]))
+        self.assertTrue(lines[2].endswith("INFO later"))
+
+    def test_app_log_show_failure_warns_and_prints_file_lines(self):
+        self._write("agentboard.log", [(1, "INFO still.here")])
+        rc, lines, err = self._logs(
+            ["--app", "--since", "1h"], run=self._app_run(returncode=64, stderr="log: bad predicate")
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("warning:", err)
+        self.assertIn("bad predicate", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+
+    def test_app_missing_log_binary_warns_and_prints_file_lines(self):
+        self._write("agentboard.log", [(1, "INFO still.here")])
+        run = mock.Mock(side_effect=FileNotFoundError(2, "No such file", "log"))
+        rc, lines, err = self._logs(["--app", "--since", "1h"], run=run)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("warning:", err)
+
+    def test_logs_itself_adds_nothing_at_info(self):
+        self._write("agentboard.log", [(1, "INFO x")])
+        before = self._log_lines()
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["logs"])
+        self.assertEqual(self._log_lines(), before)
+
+
 class BackfillCommandTests(AgentBoardTestCase):
     def test_single_session_backfill_via_cli(self):
         path = self.tmp_path / "sess1.jsonl"
