@@ -2247,6 +2247,8 @@ class PurgeDataSafetyTests(unittest.TestCase):
         (data_home / "agentboard.db-wal").write_text("wal")
         (data_home / "agentboard.db-shm").write_text("shm")
         (data_home / "hook-errors.log").write_text("log")
+        (data_home / "agentboard.log").write_text("diag log")
+        (data_home / "agentboard.log.1").write_text("rotated diag log")
         (data_home / "install-manifest.json").write_text("{}")
         (data_home / "config.json").write_text("{}")
         (data_home / "inbox").mkdir()
@@ -2261,6 +2263,18 @@ class PurgeDataSafetyTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(data_home.exists(), "the now-empty data dir must be removed too")
+
+    def test_purge_data_files_list_names_the_diag_log_and_its_rotation(self):
+        # diag.py owns these names; uninstall.sh must list both or
+        # --purge-data refuses a data dir that has ever been logged to.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from agentboard import diag
+
+        text = UNINSTALL_SH.read_text()
+        start = text.index("AGENTBOARD_DATA_FILES=(")
+        listed = text[start:text.index(")", start)].split("(", 1)[1].split()
+        self.assertIn(diag.LOG_FILENAME, listed)
+        self.assertIn(diag.ROTATED_FILENAME, listed)
 
     def test_purge_leaves_a_preexisting_non_pattern_file_in_inbox_and_reparse_locks_alone(self):
         # Round-6 finding 4: inbox/ and reparse-locks/ must never be
