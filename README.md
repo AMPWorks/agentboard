@@ -176,6 +176,9 @@ The schema (see `core/agentboard/db.py`) has four tables:
 
 Migrations are tracked with `PRAGMA user_version`; `db.connect()` applies any pending ones.
 
+Next to the database live `agentboard.log` and `agentboard.log.1`, the diagnostic log (see
+Diagnostics below), and `hook-errors.log`, the hook's own failure log.
+
 ## Hooks
 
 `agentboard hook --tool claude|codex` is registered for every lifecycle event in both tools. It
@@ -359,7 +362,77 @@ agentboard enable-codex-hooks [--dry-run]
 agentboard focus <tool> <session_id>
 agentboard resume <tool> <session_id> [--print]
 agentboard prune [--days 90]
+agentboard logs [--since 1h|ISO-8601] [--grep TEXT] [--lines N] [--app]
 ```
+
+## Diagnostics
+
+Everything AgentBoard does is recorded in one plain-text log, so a misbehaving click or a
+skipped hook can be explained after the fact:
+
+```
+~/Library/Application Support/AgentBoard/agentboard.log      ($AGENTBOARD_HOME/agentboard.log)
+```
+
+One line per event, `key=value` pairs, UTC timestamps, greppable and `tail -f` friendly:
+
+```
+2026-10-17T05:40:12.123Z INFO cli.focus key=claude:abc123 term=iTerm.app tty=ttys016 iterm_id=w0t1p0:9F2C... strategy=iterm_script osa_rc=0 osa_out=found:tty osa_err="" outcome=matched_tty ms=412
+```
+
+**What is logged.** Every CLI subcommand (`cli.start` at debug, `cli.end cmd= exit= ms=` at info,
+`cli.error` with the exception on a crash); every error the CLI prints to stderr; each focus
+attempt (below); resume (the terminal command and how it was opened), mark (the triage written;
+notes are redacted), refresh-links (each provider's name, exit code, row count and duration,
+each `gh pr list` outcome, inbox files dropped), backfill (per-file parse failures and a summary),
+prune, map-codex, and what install-hooks / uninstall-hooks / enable-codex-hooks changed or left
+alone. Hooks log one `hook.event` line per event at debug (tool, event, session, pid, tty, daemon,
+subagent) and an info `hook.drop` line only when an event is really dropped (no `session_id`,
+empty or unparseable payload). `hook-errors.log` is unchanged and still records hook failures.
+
+**Levels.** `debug`, `info` (the default), `warn`, `error`. Set the level with the
+`AGENTBOARD_LOG_LEVEL` environment variable, or `"log_level": "debug"` in
+`$AGENTBOARD_HOME/config.json` (the variable wins). Because the app runs `snapshot` every 3 to
+15 seconds, `snapshot` and `paths` log at debug; at the default level they add a line only when
+they fail or take longer than a second. Free text passed with `--note`, `--text` or `--title` is
+logged as `<redacted:N chars>`.
+
+**Rotation.** Growth is bounded: before a write would push `agentboard.log` past 2 MB it is
+renamed over `agentboard.log.1`, replacing it. There is never a `.2`, so the log never takes more
+than about 4 MB however long AgentBoard runs. `uninstall.sh --purge-data` removes both files.
+
+**Reading it back.** `agentboard logs` prints the last 200 lines of `agentboard.log.1` followed by
+`agentboard.log`. `--since 10m` (or `30s`, `2h`, `1d`, or an ISO-8601 time) limits the window,
+`--grep TEXT` keeps lines containing TEXT, `--lines N` changes the tail length. `--app` also
+merges the app's own OSLog lines (subsystem `io.github.agentboard`) from `log show` for the same
+window, sorted by time, so a row click can be followed from the app's CLI invocation to the
+AppleScript result.
+
+**The app.** Every CLI call the app makes is logged to the macOS unified log (category `cli`):
+redacted arguments, exit code, duration and the tail of stderr. Actions log at `notice`, failures
+at `error`, and the background `snapshot`/`paths` polling at `debug`. macOS only keeps `debug`
+lines while something is streaming them (`log stream --level debug --predicate 'subsystem ==
+"io.github.agentboard"'`), so Settings → Diagnostics → **Verbose logging** promotes the polling
+to `notice` and passes `AGENTBOARD_LOG_LEVEL=debug` to every CLI call: one switch turns on both
+sides. **Open log** in the same section reveals `agentboard.log` in Finder.
+
+**Debugging a click that focused the wrong tab.** Click the row, then run
+`agentboard logs --grep cli.focus --lines 5`. The `outcome` says what happened:
+
+- `matched_uuid`: iTerm found the session by its recorded unique id. A wrong tab here means the
+  recorded `iterm_id` is stale.
+- `matched_tty`: no session had that id, so the first session on the recorded `tty` was chosen. A
+  tty reused by a newer tab is the usual cause of a wrong tab.
+- `matched_unknown`: an older focus script matched without saying how.
+- `activated_only`: nothing matched; the terminal app was only brought to the front (exit code is
+  still 0). `osa_out`/`osa_err` show what the AppleScript said, e.g. a missing Automation
+  permission.
+- `not_found`: the Apple Terminal script failed outright (see `osa_err`).
+- `no_terminal` / `unsupported_terminal`: the session has no recorded terminal, or one AgentBoard
+  cannot drive.
+
+For more detail turn on Verbose logging (or set `AGENTBOARD_LOG_LEVEL=debug`): each strategy is
+then logged as a `cli.focus.try` line.
 
 ## Testing
 

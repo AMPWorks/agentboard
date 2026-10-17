@@ -97,7 +97,14 @@ may be hard-coded. `snapshot` must never touch the network; only `refresh-links`
 - A new hook event name goes in `CLAUDE_EVENTS`/`CODEX_EVENTS` in `cli.py` (what `install-hooks`
   registers) and must be classified in `hook.py` (`ACTIVITY_EVENTS` etc.) and `reconcile.py`.
 - Any new file AgentBoard writes directly under `$AGENTBOARD_HOME` must be listed in
-  `AGENTBOARD_DATA_FILES`/`AGENTBOARD_DATA_DIRS` in `uninstall.sh`, or `--purge-data` refuses.
+  `AGENTBOARD_DATA_FILES`/`AGENTBOARD_DATA_DIRS` in `uninstall.sh`, or `--purge-data` refuses
+  (`agentboard.log` and `agentboard.log.1` are already there).
+- Diagnostics go through `core/agentboard/diag.py` (`diag.info("component", "event", key=...)`),
+  which writes `$AGENTBOARD_HOME/agentboard.log`, caps it at 2 MB with one rotation to `.1`, and
+  never raises. Never add a bare `print` for diagnostics: a CLI error that goes to stderr uses
+  `cli._report()`, which prints and logs the same text. `snapshot`/`paths` must stay quiet at
+  `info` (debug lines only). `hook.py` imports `diag` lazily inside `_diag()`, never at module
+  top. App-side logging uses `OSLog` (subsystem `io.github.agentboard`) with `privacy: .public`.
 - `install.sh`, `uninstall.sh`, and `build-app.sh` deliberately duplicate their helper functions
   (`normalize_path`, `safe_remove_in_store`, `find_python3`, ...) so each works standalone. Change
   every copy together; the tests extract them by name from each script.
