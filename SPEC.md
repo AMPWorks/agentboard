@@ -234,8 +234,13 @@ then updated_at desc. Default excludes done older than 7 days and non-interactiv
 ## Mac app (SwiftUI, `app/`)
 
 - `MenuBarExtra` with `.window` style. Label: SF Symbol (e.g. `square.stack.3d.up`) plus count
-  of needs_you+interrupted when > 0 (and a subtle second count for review). Icon tinted /
-  filled variant when needs_you > 0.
+  of needs_you+interrupted when > 0 (and a subtle second count for review). Menu bar icon
+  color: the most urgent session's color (needs_you red, interrupted orange, alive review teal,
+  running green, closed amber; template glyph otherwise), rendered as a non-template image
+  resolved for the system light/dark setting; filled variant when needs_you+interrupted > 0.
+  Red flashes at 1 Hz when a session newly enters needs_you, until the popover opens / the
+  dashboard becomes key / the session leaves needs_you (per-session acknowledgement; timeout
+  and "never" options in Settings); Reduce motion shows an exclamation badge instead.
 - Popover: compact grouped list (Needs you, Review, Running; Unconcluded collapsed with count),
   each row: tool badge (C / X), title, project · branch, relative time, waiting_reason.
   Row click = focus; context menu & hover buttons: Focus, Resume, Copy resume cmd, Mark done,

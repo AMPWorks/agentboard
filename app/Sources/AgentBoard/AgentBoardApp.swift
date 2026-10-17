@@ -4,12 +4,13 @@ import SwiftUI
 struct AgentBoardApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = SnapshotStore()
+    @StateObject private var attention = AttentionController()
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView(store: store)
+            MenuBarView(store: store, attention: attention)
         } label: {
-            MenuBarLabel(store: store)
+            MenuBarLabel(store: store, attention: attention)
         }
         .menuBarExtraStyle(.window)
 

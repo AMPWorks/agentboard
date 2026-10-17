@@ -3,6 +3,9 @@ import SwiftUI
 struct SettingsView: View {
     @AppStorage("appearance") private var appearance: String = Appearance.system.rawValue
     @AppStorage("notifyOnNeedsYou") private var notifyOnNeedsYou: Bool = false
+    @AppStorage(MenuBarIconSettings.coloredKey) private var menuBarIconColored: Bool = true
+    @AppStorage(MenuBarIconSettings.flashKey) private var menuBarIconFlash: Bool = true
+    @AppStorage(MenuBarIconSettings.flashStopKey) private var menuBarIconFlashStop: String = FlashStopPolicy.onOpen.rawValue
     @AppStorage(AgentBoardCLI.pathDefaultsKey) private var cliPath: String = ""
     @AppStorage(AgentBoardCLI.useFixtureDefaultsKey) private var useFixture: Bool = false
     @AppStorage(AgentBoardCLI.fixturePathDefaultsKey) private var fixturePath: String = ""
@@ -20,6 +23,21 @@ struct SettingsView: View {
                 .onChange(of: appearance) { _, newValue in
                     (Appearance(rawValue: newValue) ?? .system).apply()
                 }
+            }
+
+            Section("Menu bar icon") {
+                Toggle("Color the menu bar icon by session state", isOn: $menuBarIconColored)
+                Toggle("Flash when a session needs you", isOn: $menuBarIconFlash)
+                    .disabled(!menuBarIconColored)
+                Picker("Stop flashing", selection: $menuBarIconFlashStop) {
+                    ForEach(FlashStopPolicy.allCases) { policy in
+                        Text(policy.label).tag(policy.rawValue)
+                    }
+                }
+                .disabled(!menuBarIconColored || !menuBarIconFlash)
+                Text("The icon takes the color of the most urgent session. With Reduce motion on, it shows an exclamation badge instead of flashing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Notifications") {

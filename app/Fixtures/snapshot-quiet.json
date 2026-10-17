@@ -1,0 +1,161 @@
+{
+  "generated_at": "2026-10-12T19:32:00Z",
+  "counts": {
+    "needs_you": 0,
+    "interrupted": 0,
+    "running": 0,
+    "review": 0,
+    "unconcluded": 0,
+    "snoozed": 2,
+    "done": 2
+  },
+  "sessions": [
+    {
+      "key": "claude:sess-snoozed-1",
+      "tool": "claude",
+      "session_id": "sess-snoozed-1",
+      "state": "snoozed",
+      "waiting_reason": null,
+      "status_text": null,
+      "title": "Memory-sanitizer sweep of allocator call sites",
+      "cwd": "/Users/dev/projects/billing-api",
+      "project": "billing-api",
+      "branch": "asan-sweep",
+      "first_prompt": "Sweep the custom allocator call sites for heap overflows under ASan.",
+      "last_prompt": "Snooze this until the allocator-aware ASan shim lands, no point rerunning until then.",
+      "last_assistant": "Snoozing until tomorrow morning \u2014 a clean ASan run here doesn't prove anything since the custom allocator routes through a pool allocator, which ASan can't see into without the shim.",
+      "started_at": "2026-10-12T15:30:00Z",
+      "updated_at": "2026-10-12T16:00:00Z",
+      "ended_at": null,
+      "alive": false,
+      "interactive": true,
+      "can_focus": false,
+      "resume_command": "cd /Users/dev/projects/billing-api && claude --resume sess-snoozed-1",
+      "links": [
+        {
+          "kind": "ticket",
+          "ref": "ABC-170",
+          "url": "https://example.atlassian.net/browse/ABC-170",
+          "state": null,
+          "title": "ASan sweep of allocator call sites"
+        }
+      ],
+      "triage": {
+        "status": "snoozed",
+        "until": "2026-10-13T09:00:00Z",
+        "note": "waiting on allocator-aware ASan shim"
+      }
+    },
+    {
+      "key": "codex:sess-snoozed-2",
+      "tool": "codex",
+      "session_id": "sess-snoozed-2",
+      "state": "snoozed",
+      "waiting_reason": null,
+      "status_text": null,
+      "title": "Outage API client cleanup",
+      "cwd": "/Users/dev/projects/ops-tools",
+      "project": "ops-tools",
+      "branch": "codex/outage-api-cleanup",
+      "first_prompt": "Clean up the outage API client, one endpoint returns 200 with docs HTML instead of 404 which is confusing the retry logic.",
+      "last_prompt": "Snooze two days, I want to confirm with the platform team whether that 200 is intentional before changing the client's error handling.",
+      "last_assistant": "Snoozed for two days pending confirmation from the platform team on whether that endpoint returning 200 + docs HTML is intentional.",
+      "started_at": "2026-10-12T08:45:00Z",
+      "updated_at": "2026-10-12T09:15:00Z",
+      "ended_at": null,
+      "alive": false,
+      "interactive": true,
+      "can_focus": false,
+      "resume_command": "cd /Users/dev/projects/ops-tools && codex resume sess-snoozed-2",
+      "links": [],
+      "triage": {
+        "status": "snoozed",
+        "until": "2026-10-14T08:00:00Z",
+        "note": "confirm 200-with-docs-HTML behavior with platform team"
+      }
+    },
+    {
+      "key": "claude:sess-done-1",
+      "tool": "claude",
+      "session_id": "sess-done-1",
+      "state": "done",
+      "waiting_reason": null,
+      "status_text": null,
+      "title": "Terminal focus helper via AppleScript",
+      "cwd": "/Users/dev/projects/agentboard/core",
+      "project": "core",
+      "branch": "terminal-focus-helper",
+      "first_prompt": "Write the AppleScript helper that matches a terminal session id to a tab and activates it.",
+      "last_prompt": "Looks good, merged. Mark this done.",
+      "last_assistant": "Merged. The helper matches the session id against each terminal window's tabs, selects the owning tab and window, then activates the terminal app.",
+      "started_at": "2026-10-11T18:30:00Z",
+      "updated_at": "2026-10-11T20:00:00Z",
+      "ended_at": "2026-10-11T20:00:00Z",
+      "alive": false,
+      "interactive": true,
+      "can_focus": false,
+      "resume_command": "cd /Users/dev/projects/agentboard/core && claude --resume sess-done-1",
+      "auto_done": false,
+      "done_reason": "manual",
+      "links": [
+        {
+          "kind": "ticket",
+          "ref": "ABC-190",
+          "url": "https://example.atlassian.net/browse/ABC-190",
+          "state": "DONE",
+          "title": "agentboard focus: terminal AppleScript helper"
+        },
+        {
+          "kind": "pr",
+          "ref": "#39",
+          "url": "https://github.com/example/agentboard/pull/39",
+          "state": "MERGED",
+          "title": "Add terminal focus helper via AppleScript"
+        }
+      ],
+      "triage": {
+        "status": "done",
+        "until": null,
+        "note": null
+      }
+    },
+    {
+      "key": "codex:sess-done-2",
+      "tool": "codex",
+      "session_id": "sess-done-2",
+      "state": "done",
+      "waiting_reason": null,
+      "status_text": null,
+      "title": "Ticket comment hygiene cleanup",
+      "cwd": "/Users/dev/projects/ai-skills",
+      "project": "ai-skills",
+      "branch": "codex/comment-hygiene",
+      "first_prompt": "The team wants investigation comments consolidated to a brief summary + one detailed reply at the end, not a comment per step.",
+      "last_prompt": "Ship it once CI is green.",
+      "last_assistant": "CI is green and the PR merged; the poller now batches investigation notes and only posts the brief summary plus a single detailed reply.",
+      "started_at": "2026-10-10T14:00:00Z",
+      "updated_at": "2026-10-10T15:30:00Z",
+      "ended_at": "2026-10-10T15:30:00Z",
+      "alive": false,
+      "interactive": true,
+      "can_focus": false,
+      "resume_command": "cd /Users/dev/projects/ai-skills && codex resume sess-done-2",
+      "auto_done": true,
+      "done_reason": "pr merged",
+      "links": [
+        {
+          "kind": "pr",
+          "ref": "#87",
+          "url": "https://github.com/example/ai-skills/pull/87",
+          "state": "MERGED",
+          "title": "Consolidate ticket investigation comments"
+        }
+      ],
+      "triage": {
+        "status": "open",
+        "until": null,
+        "note": null
+      }
+    }
+  ]
+}

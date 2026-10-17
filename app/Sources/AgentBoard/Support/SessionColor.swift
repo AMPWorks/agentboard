@@ -4,21 +4,27 @@ import AppKit
 /// Maps a session's state (and liveness) to a color, shared by every row and
 /// legend in the app so the mapping only lives in one place.
 enum SessionColor {
-    static let needsYou = Color(nsColor: .systemRed)
-    static let interrupted = Color(nsColor: .systemOrange)
-    static let running = Color(nsColor: .systemGreen)
-    static let reviewOpen = Color(nsColor: .systemTeal)
+    /// AppKit sources for the colors below. The menu bar icon resolves these
+    /// under the menu bar's appearance before rendering, so they are kept as
+    /// (dynamic) NSColors rather than only as SwiftUI Colors.
+    static let needsYouNSColor: NSColor = .systemRed
+    static let interruptedNSColor: NSColor = .systemOrange
+    static let runningNSColor: NSColor = .systemGreen
+    static let reviewOpenNSColor: NSColor = .systemTeal
 
     /// Review/unconcluded once the process is gone. systemYellow reads fine
     /// on a dark background but is too pale as text on light backgrounds, so
     /// resolve to a darker amber there.
-    static let closed: Color = {
-        let dynamic = NSColor(name: nil) { appearance in
-            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return isDark ? NSColor.systemYellow : NSColor(red: 0.58, green: 0.44, blue: 0.0, alpha: 1.0)
-        }
-        return Color(nsColor: dynamic)
-    }()
+    static let closedNSColor = NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return isDark ? NSColor.systemYellow : NSColor(red: 0.58, green: 0.44, blue: 0.0, alpha: 1.0)
+    }
+
+    static let needsYou = Color(nsColor: needsYouNSColor)
+    static let interrupted = Color(nsColor: interruptedNSColor)
+    static let running = Color(nsColor: runningNSColor)
+    static let reviewOpen = Color(nsColor: reviewOpenNSColor)
+    static let closed = Color(nsColor: closedNSColor)
 
     static func color(for session: Session) -> Color {
         switch session.state {
@@ -60,6 +66,10 @@ enum SessionColor {
         LegendItem(id: "snoozed_done", label: "Snoozed / Done", colorName: "gray", color: .secondary),
     ]
 
+    /// Explains the colored menu bar icon, which reuses these colors.
+    static let menuBarIconCaption = "Menu bar icon takes the most urgent color"
+
     /// Plain-text form of the legend for tooltips, which can't render colored views.
     static let legendTooltip = legend.map { "\($0.label) (\($0.colorName))" }.joined(separator: " · ")
+        + ". " + menuBarIconCaption + "."
 }

@@ -9,7 +9,6 @@ final class NotificationManager {
     static let shared = NotificationManager()
 
     private var authorized = false
-    private var previousNeedsYouKeys: Set<String> = []
     private let log = Logger(subsystem: "io.github.agentboard", category: "notifications")
 
     func requestAuthorizationIfNeeded() {
@@ -18,14 +17,11 @@ final class NotificationManager {
         }
     }
 
-    func noteTransitions(in snapshot: Snapshot, enabled: Bool) {
-        let currentNeedsYou = Set(snapshot.sessions.filter { $0.state == .needsYou }.map(\.key))
-        defer { previousNeedsYouKeys = currentNeedsYou }
-        guard enabled else { return }
-
-        let newlyNeedingYou = currentNeedsYou.subtracting(previousNeedsYouKeys)
-        guard !newlyNeedingYou.isEmpty else { return }
-
+    /// Posts one notification per session that newly entered needs_you.
+    /// The diff itself lives in `AttentionController.note(snapshot:)`, which
+    /// also drives the menu bar flash, so the two never disagree.
+    func notify(newlyNeedingYou: Set<String>, in snapshot: Snapshot, enabled: Bool) {
+        guard enabled, !newlyNeedingYou.isEmpty else { return }
         for session in snapshot.sessions where newlyNeedingYou.contains(session.key) {
             post(for: session)
         }

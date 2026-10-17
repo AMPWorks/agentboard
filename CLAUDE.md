@@ -28,11 +28,18 @@ core/bin/agentboard snapshot                                    # CLI from the c
 AGENTBOARD_HOME=/tmp/ab core/bin/agentboard backfill --days 7   # against a throwaway data dir
 
 cd app && swift build -c release                                # compile the app only
+cd app && F=/Library/Developer/CommandLineTools/Library/Developer/Frameworks && \
+  swift test -Xswiftc -F -Xswiftc $F -Xlinker -rpath -Xlinker $F  # app tests (Swift Testing); see note below
 scripts/build-app.sh --no-install                               # assemble app/build/AgentBoard.app
 AGENTBOARD_USE_FIXTURE=1 app/.build/release/AgentBoard          # run the app on the bundled fixture, no CLI
 bash -n scripts/*.sh
 scripts/install.sh --dry-run                                    # preview against the real ~/.claude and ~/.codex
 ```
+
+With only the Command Line Tools installed (no Xcode), plain `cd app && swift test` builds,
+runs zero tests, and exits 0, because SwiftPM leaves Testing.framework off the search paths;
+the `-Xswiftc -F`/`-Xlinker -rpath` form above is the working command. The app tests live in
+`app/Tests/AgentBoardTests` and use Swift Testing, not XCTest.
 
 There is no linter configured. `scripts/install.sh` runs the full install (core copy, app build,
 hooks, backfill) and relaunches the app; `--no-app` skips the Swift build.

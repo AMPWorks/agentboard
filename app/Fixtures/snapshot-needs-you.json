@@ -1,0 +1,50 @@
+{
+  "generated_at": "2026-10-12T19:32:00Z",
+  "counts": {
+    "needs_you": 1,
+    "interrupted": 0,
+    "running": 0,
+    "review": 0,
+    "unconcluded": 0,
+    "snoozed": 0,
+    "done": 0
+  },
+  "sessions": [
+    {
+      "key": "claude:sess-needsyou-1",
+      "tool": "claude",
+      "session_id": "sess-needsyou-1",
+      "state": "needs_you",
+      "waiting_reason": "Bash",
+      "status_text": null,
+      "title": "Fix flaky retry logic in reconcile loop",
+      "cwd": "/Users/dev/projects/widget-service",
+      "project": "widget-service",
+      "branch": "fix-retry-flake",
+      "first_prompt": "The reconcile tests fail about 1 in 20 runs on the liveness check. Can you dig in?",
+      "last_prompt": "Can you add exponential backoff to the retry and a regression test for it?",
+      "last_assistant": "I'm about to run `pytest tests -k retry -x` which needs Bash permission since it shells out to a helper script.",
+      "started_at": "2026-10-12T18:05:00Z",
+      "updated_at": "2026-10-12T19:30:10Z",
+      "ended_at": null,
+      "alive": true,
+      "interactive": true,
+      "can_focus": true,
+      "resume_command": "cd /Users/dev/projects/widget-service && claude --resume sess-needsyou-1",
+      "links": [
+        {
+          "kind": "ticket",
+          "ref": "ABC-123",
+          "url": "https://example.atlassian.net/browse/ABC-123",
+          "state": null,
+          "title": "Flaky retry logic in reconcile liveness check"
+        }
+      ],
+      "triage": {
+        "status": "open",
+        "until": null,
+        "note": null
+      }
+    }
+  ]
+}

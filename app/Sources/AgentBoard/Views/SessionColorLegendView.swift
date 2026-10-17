@@ -14,6 +14,10 @@ struct SessionColorLegendView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Text(SessionColor.menuBarIconCaption)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
         }
         .help(SessionColor.legendTooltip)
     }
