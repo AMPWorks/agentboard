@@ -8,12 +8,14 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import backfill as backfill_mod
 from . import codexmap
 from . import db
+from . import diag
 from . import hook as hook_mod
 from . import links
 from . import reconcile
@@ -54,6 +56,13 @@ def _bin_path() -> Path:
     # same install showed, and a dry-run run afterwards would show a
     # spurious diff rewriting every hook command.
     return Path(__file__).parent.parent / "bin" / "agentboard"
+
+
+def _report(level, event, message, **fields):
+    """Print `message` to stderr and log the same text, so stderr and
+    agentboard.log always agree about what went wrong."""
+    print(message, file=sys.stderr)
+    diag.log(level, "cli", event, msg=message, **fields)
 
 
 def _now_iso(now=None):
@@ -310,7 +319,7 @@ def cmd_backfill(args):
         if args.session:
             tool, _, session_id = args.session.partition(":")
             if not tool or not session_id:
-                print(f"error: --session must be TOOL:ID, got {args.session!r}", file=sys.stderr)
+                _report("error", "backfill", f"error: --session must be TOOL:ID, got {args.session!r}")
                 return 1
             result = backfill_mod.backfill_single_session(
                 conn, tool, session_id, transcript_path=args.transcript
@@ -342,7 +351,8 @@ def cmd_link(args):
     try:
         resolved = links.resolve_session(conn, explicit=args.session)
         if not resolved:
-            print("agentboard link: could not resolve a session", file=sys.stderr)
+            _report("warn", "link", "agentboard link: could not resolve a session",
+                    explicit=args.session)
             return 0
         tool, session_id = resolved
         link = {
@@ -366,7 +376,8 @@ def cmd_status(args):
     try:
         resolved = links.resolve_session(conn, explicit=args.session)
         if not resolved:
-            print("agentboard status: could not resolve a session", file=sys.stderr)
+            _report("warn", "status", "agentboard status: could not resolve a session",
+                    explicit=args.session)
             return 0
         tool, session_id = resolved
         until = None
@@ -1249,12 +1260,15 @@ def cmd_enable_codex_hooks(args):
     try:
         old_text = _read_text_no_newline_translation(config_path) if existed_before else ""
     except (OSError, UnicodeDecodeError):
-        print(f"error: could not read {config_path} as UTF-8; skipping feature check", file=sys.stderr)
+        _report(
+            "error", "enable_codex_hooks",
+            f"error: could not read {config_path} as UTF-8; skipping feature check",
+        )
         return 1
     try:
         new_text, changed = _patch_codex_hooks_feature(old_text)
     except CodexTomlPatchError as exc:
-        print(f"error: {config_path}: {exc}", file=sys.stderr)
+        _report("error", "enable_codex_hooks", f"error: {config_path}: {exc}")
         _print_codex_manual_hint(old_text)
         return 1
     if not changed:
@@ -1293,7 +1307,7 @@ def cmd_install_hooks(args):
         try:
             old_text, new_text, changed = install_claude_hooks(settings_path, command, args.dry_run)
         except MalformedConfigError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            _report("error", "install_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(settings_path))
         else:
             if args.dry_run:
@@ -1310,7 +1324,7 @@ def cmd_install_hooks(args):
         try:
             old_text, new_text, changed = install_codex_hooks(hooks_path, command, args.dry_run)
         except MalformedConfigError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            _report("error", "install_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(hooks_path))
         else:
             if args.dry_run:
@@ -1323,10 +1337,10 @@ def cmd_install_hooks(args):
             _print_codex_hooks_reminder(hooks_path, command)
 
     if failed_paths:
-        print(
+        _report(
+            "error", "install_hooks",
             f"error: {len(failed_paths)} file(s) skipped due to invalid JSON: "
             + ", ".join(failed_paths),
-            file=sys.stderr,
         )
         return 1
     return 0
@@ -1397,7 +1411,7 @@ def cmd_uninstall_hooks(args):
         try:
             old_text, new_text, changed = uninstall_claude_hooks(settings_path, command, dry_run)
         except MalformedConfigError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            _report("error", "uninstall_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(settings_path))
         else:
             if dry_run:
@@ -1412,7 +1426,7 @@ def cmd_uninstall_hooks(args):
         try:
             old_text, new_text, changed = uninstall_codex_hooks(hooks_path, command, dry_run)
         except MalformedConfigError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            _report("error", "uninstall_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(hooks_path))
         else:
             if dry_run:
@@ -1429,10 +1443,10 @@ def cmd_uninstall_hooks(args):
             _maybe_remove_created_dir(hooks_path.parent)
 
     if failed_paths:
-        print(
+        _report(
+            "error", "uninstall_hooks",
             f"error: {len(failed_paths)} file(s) skipped due to invalid JSON: "
             + ", ".join(failed_paths),
-            file=sys.stderr,
         )
         return 1
     return 0
@@ -1635,7 +1649,8 @@ def cmd_resume(args, run_osascript=subprocess.run):
     finally:
         conn.close()
     if not row:
-        print(f"unknown session {args.tool}:{args.session_id}", file=sys.stderr)
+        _report("error", "resume", f"unknown session {args.tool}:{args.session_id}",
+                key=f"{args.tool}:{args.session_id}")
         return 1
     command = _resume_command(args.tool, row["cwd"], args.session_id)
     if args.print:
@@ -1803,10 +1818,39 @@ def build_parser():
     return parser
 
 
+# Subcommands the app calls every few seconds (or that only read state):
+# their start/end lines are debug, so a quiet `info` log isn't one line per
+# poll. A failure or a slow run (SLOW_QUIET_MS) is still logged at info.
+QUIET_COMMANDS = {"snapshot", "paths", "hook", "logs"}
+SLOW_QUIET_MS = 1000
+
+
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
-    return args.func(args)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
+    command = args.command
+    quiet = command in QUIET_COMMANDS
+    diag.debug("cli", "start", cmd=command, argv=diag.redact(raw_argv))
+    started = time.monotonic()
+    try:
+        rc = args.func(args)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        diag.log("debug" if quiet and code == 0 else "info", "cli", "end",
+                 cmd=command, exit=code, ms=diag.ms_since(started))
+        raise
+    except BaseException as exc:
+        diag.error("cli", "error", cmd=command, exc=type(exc).__name__,
+                   msg=str(exc), ms=diag.ms_since(started))
+        raise
+    elapsed = diag.ms_since(started)
+    exit_code = rc if isinstance(rc, int) else (0 if rc is None else 1)
+    level = "info"
+    if quiet and exit_code == 0 and (elapsed is None or elapsed <= SLOW_QUIET_MS):
+        level = "debug"
+    diag.log(level, "cli", "end", cmd=command, exit=exit_code, ms=elapsed)
+    return rc
 
 
 if __name__ == "__main__":
