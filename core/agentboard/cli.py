@@ -1874,6 +1874,165 @@ def cmd_paths(args):
     return 0
 
 
+# -- logs -------------------------------------------------------------------------
+#
+# Reads agentboard.log back (the rotated .1 first, so a --since window right
+# after a rotation is complete) and, only with --app, merges the app's own
+# OSLog lines from `log show`. Never called by snapshot or the app's polling.
+
+DEFAULT_LOG_LINES = 200
+APP_LOG_SUBSYSTEM = "io.github.agentboard"
+APP_LOG_DEFAULT_WINDOW = timedelta(hours=1)
+APP_LOG_TIMEOUT_SECS = 60
+_SINCE_RELATIVE_RE = re.compile(r"^(\d+)([smhd])$")
+_SINCE_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
+_APP_LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(.*)$")
+
+
+def _parse_since(value: str, now: datetime) -> datetime:
+    """`<n>s|m|h|d` before `now`, or an ISO-8601 timestamp (naive = local
+    time). Returns an aware UTC datetime; raises ValueError otherwise."""
+    text = value.strip()
+    match = _SINCE_RELATIVE_RE.match(text)
+    if match:
+        delta = timedelta(**{_SINCE_UNITS[match.group(2)]: int(match.group(1))})
+        return now - delta
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed.astimezone(timezone.utc)
+
+
+def _log_line_timestamp(line: str):
+    head = line.split(" ", 1)[0]
+    if len(head) < 20 or "T" not in head:
+        return None
+    try:
+        parsed = datetime.fromisoformat(head)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _read_log_lines(home: Path) -> list:
+    lines = []
+    for name in (diag.ROTATED_FILENAME, diag.LOG_FILENAME):
+        path = home / name
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                lines.extend(line.rstrip("\n") for line in fh)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            print(f"warning: could not read {path}: {exc}", file=sys.stderr)
+    return lines
+
+
+def _format_utc(ts: datetime) -> str:
+    return ts.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ts.microsecond // 1000:03d}Z"
+
+
+def _app_log_show_argv(start: datetime) -> list:
+    """`log show` for the app's OSLog lines since `start`. `--start` takes
+    an absolute local time, which works for both a relative and an ISO
+    --since (`--last` takes only m/h/d durations)."""
+    return [
+        "log", "show", "--style", "compact", "--info", "--debug",
+        "--start", start.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+        "--predicate", f'subsystem == "{APP_LOG_SUBSYSTEM}"',
+    ]
+
+
+def _read_app_log_lines(start: datetime, run) -> list:
+    """[(utc datetime, rendered line)] from `log show`, or [] with a
+    one-line warning on stderr if it is missing or fails."""
+    argv = _app_log_show_argv(start)
+    try:
+        result = run(argv, capture_output=True, text=True, timeout=APP_LOG_TIMEOUT_SECS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"warning: could not read app logs ({type(exc).__name__}: {exc}); "
+              "showing agentboard.log only", file=sys.stderr)
+        return []
+    rc = _returncode(result)
+    if rc not in (None, 0):
+        detail = _first_line(_stderr_text(result), 200) or f"exit {rc}"
+        print(f"warning: `log show` failed ({detail}); showing agentboard.log only",
+              file=sys.stderr)
+        return []
+    entries = []
+    for raw in _stdout_text(result).splitlines():
+        match = _APP_LINE_RE.match(raw)
+        if not match:
+            continue  # header row, or a continuation without a timestamp
+        try:
+            local = datetime.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        ts = local.astimezone().astimezone(timezone.utc)
+        entries.append((ts, f"{_format_utc(ts)} APP {match.group(2)}"))
+    return entries
+
+
+def cmd_logs(args, run=subprocess.run, now=None):
+    now = now or datetime.now(timezone.utc)
+    cutoff = None
+    if args.since:
+        try:
+            cutoff = _parse_since(args.since, now)
+        except ValueError:
+            print(
+                f"error: --since must be <n>s, <n>m, <n>h, <n>d or an ISO-8601 time, got {args.since!r}",
+                file=sys.stderr,
+            )
+            return 2
+
+    lines = _read_log_lines(db.home_dir())
+    stamped = []
+    previous = None
+    for line in lines:
+        ts = _log_line_timestamp(line)
+        if cutoff is not None and ts is not None and ts < cutoff:
+            previous = ts
+            continue
+        if args.grep and args.grep not in line:
+            previous = ts or previous
+            continue
+        stamped.append((ts or previous, line))
+        previous = ts or previous
+
+    limit = args.lines if args.lines is not None else (None if args.since else DEFAULT_LOG_LINES)
+    if limit is not None:
+        stamped = stamped[-limit:] if limit > 0 else []
+
+    output = stamped
+    if args.app:
+        start = cutoff
+        if start is None:
+            known = [ts for ts, _ in stamped if ts is not None]
+            start = min(known) if known else now - APP_LOG_DEFAULT_WINDOW
+        app_entries = [
+            entry for entry in _read_app_log_lines(start, run)
+            if not args.grep or args.grep in entry[1]
+        ]
+        floor = datetime.min.replace(tzinfo=timezone.utc)
+        output = sorted(stamped + app_entries, key=lambda entry: entry[0] or floor)
+
+    text = "".join(f"{line}\n" for _, line in output)
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # `agentboard logs | head`: stop quietly instead of a traceback.
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except (OSError, ValueError, AttributeError):
+            pass
+    return 0
+
+
 # -- argparse wiring --------------------------------------------------------------
 
 def build_parser():
@@ -1966,6 +2125,15 @@ def build_parser():
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_paths)
 
+    p = sub.add_parser("logs", help="print the diagnostic log (agentboard.log.1 + agentboard.log)")
+    p.add_argument("--since", default=None, help="<n>s|m|h|d, or an ISO-8601 time")
+    p.add_argument("--grep", default=None, help="plain substring filter")
+    p.add_argument("--lines", "-n", type=int, default=None,
+                   help=f"show only the last N matching lines (default {DEFAULT_LOG_LINES} without --since)")
+    p.add_argument("--app", action="store_true",
+                   help="also merge the app's OSLog lines from `log show`")
+    p.set_defaults(func=cmd_logs)
+
     return parser
 
 
@@ -1974,6 +2142,8 @@ def build_parser():
 # poll. A failure or a slow run (SLOW_QUIET_MS) is still logged at info.
 QUIET_COMMANDS = {"snapshot", "paths", "hook", "logs"}
 SLOW_QUIET_MS = 1000
+# The polled subset: a slow run of one of these is worth an info line.
+SLOW_WATCHED_COMMANDS = {"snapshot", "paths", "hook"}
 
 
 def main(argv=None):
@@ -1998,7 +2168,8 @@ def main(argv=None):
     elapsed = diag.ms_since(started)
     exit_code = rc if isinstance(rc, int) else (0 if rc is None else 1)
     level = "info"
-    if quiet and exit_code == 0 and (elapsed is None or elapsed <= SLOW_QUIET_MS):
+    slow = command in SLOW_WATCHED_COMMANDS and elapsed is not None and elapsed > SLOW_QUIET_MS
+    if quiet and exit_code == 0 and not slow:
         level = "debug"
     diag.log(level, "cli", "end", cmd=command, exit=exit_code, ms=elapsed)
     return rc
