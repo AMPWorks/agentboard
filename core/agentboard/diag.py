@@ -201,7 +201,7 @@ def _write(data, cap):
         os.close(fd)
 
 
-def log(level, component, event, **fields):
+def log(level, component, event, /, **fields):
     """Append one line if `level` passes the configured threshold. Never raises."""
     try:
         level = _normalize_level(level) or "info"
@@ -214,19 +214,19 @@ def log(level, component, event, **fields):
         pass
 
 
-def debug(component, event, **fields):
+def debug(component, event, /, **fields):
     log("debug", component, event, **fields)
 
 
-def info(component, event, **fields):
+def info(component, event, /, **fields):
     log("info", component, event, **fields)
 
 
-def warn(component, event, **fields):
+def warn(component, event, /, **fields):
     log("warn", component, event, **fields)
 
 
-def error(component, event, **fields):
+def error(component, event, /, **fields):
     log("error", component, event, **fields)
 
 
