@@ -308,6 +308,11 @@ def cmd_mark(args):
         conn.execute("COMMIT")
     finally:
         conn.close()
+    diag.info(
+        "cli", "mark", key=f"{args.tool}:{args.session_id}", action=args.action,
+        status=status, until=until,
+        note=None if args.note is None else f"<redacted:{len(args.note)} chars>",
+    )
     return 0
 
 
@@ -323,6 +328,10 @@ def cmd_backfill(args):
                 return 1
             result = backfill_mod.backfill_single_session(
                 conn, tool, session_id, transcript_path=args.transcript
+            )
+            diag.log(
+                "debug" if result == "updated" else "info", "backfill", "session",
+                key=args.session, transcript=args.transcript, result=result,
             )
             print(f"session={args.session} result={result}")
             return 0
@@ -1272,9 +1281,11 @@ def cmd_enable_codex_hooks(args):
         _print_codex_manual_hint(old_text)
         return 1
     if not changed:
+        diag.info("cli", "enable_codex_hooks", file=config_path, outcome="already_set")
         print(f"{config_path}: hooks = true already set under [features]")
         return 0
     if args.dry_run:
+        diag.info("cli", "enable_codex_hooks", file=config_path, outcome="dry_run")
         print(_diff(old_text, new_text, str(config_path)))
         return 0
     if existed_before:
@@ -1285,6 +1296,10 @@ def cmd_enable_codex_hooks(args):
     _record_codex_config_action(config_path, "created" if not existed_before else "patched")
     if created_dir:
         _record_created_dir(config_path.parent)
+    diag.info(
+        "cli", "enable_codex_hooks", file=config_path,
+        outcome="patched" if existed_before else "created",
+    )
     print(f"Set hooks = true under [features] in {config_path}")
     return 0
 
@@ -1310,6 +1325,11 @@ def cmd_install_hooks(args):
             _report("error", "install_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(settings_path))
         else:
+            diag.info(
+                "cli", "install_hooks", tool="claude", file=settings_path,
+                outcome="dry_run" if args.dry_run else ("changed" if changed else "unchanged"),
+                would_change=changed if args.dry_run else None,
+            )
             if args.dry_run:
                 diff = _diff(old_text, new_text, str(settings_path))
                 print(diff if diff else f"{settings_path}: no changes (already installed)")
@@ -1327,6 +1347,11 @@ def cmd_install_hooks(args):
             _report("error", "install_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(hooks_path))
         else:
+            diag.info(
+                "cli", "install_hooks", tool="codex", file=hooks_path,
+                outcome="dry_run" if args.dry_run else ("changed" if changed else "unchanged"),
+                would_change=changed if args.dry_run else None,
+            )
             if args.dry_run:
                 diff = _diff(old_text, new_text, str(hooks_path))
                 print(diff if diff else f"{hooks_path}: no changes (already installed)")
@@ -1414,6 +1439,12 @@ def cmd_uninstall_hooks(args):
             _report("error", "uninstall_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(settings_path))
         else:
+            diag.info(
+                "cli", "uninstall_hooks", tool="claude", file=settings_path,
+                outcome="dry_run" if dry_run else ("changed" if changed else "unchanged"),
+                would_change=changed if dry_run else None,
+                removed_file=(not dry_run and changed and not settings_path.exists()) or None,
+            )
             if dry_run:
                 diff = _diff(old_text, new_text, str(settings_path))
                 print(diff if diff else f"{settings_path}: no changes (no agentboard hooks installed)")
@@ -1429,6 +1460,12 @@ def cmd_uninstall_hooks(args):
             _report("error", "uninstall_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(hooks_path))
         else:
+            diag.info(
+                "cli", "uninstall_hooks", tool="codex", file=hooks_path,
+                outcome="dry_run" if dry_run else ("changed" if changed else "unchanged"),
+                would_change=changed if dry_run else None,
+                removed_file=(not dry_run and changed and not hooks_path.exists()) or None,
+            )
             if dry_run:
                 diff = _diff(old_text, new_text, str(hooks_path))
                 print(diff if diff else f"{hooks_path}: no changes (no agentboard hooks installed)")
@@ -1467,6 +1504,7 @@ def cmd_map_codex(args):
         mapped = codexmap.map_codex_session(conn, args.session, args.cwd, at=args.at)
     finally:
         conn.close()
+    diag.debug("cli", "map_codex", session=args.session, mapped=bool(mapped))
     print("mapped" if mapped else "unmapped")
     return 0
 
@@ -1743,6 +1781,8 @@ def cmd_focus(args, run_osascript=subprocess.run):
 
 
 def cmd_resume(args, run_osascript=subprocess.run):
+    key = f"{args.tool}:{args.session_id}"
+    started = time.monotonic()
     conn = db.connect()
     try:
         row = conn.execute(
@@ -1752,28 +1792,35 @@ def cmd_resume(args, run_osascript=subprocess.run):
     finally:
         conn.close()
     if not row:
-        _report("error", "resume", f"unknown session {args.tool}:{args.session_id}",
-                key=f"{args.tool}:{args.session_id}")
+        _report("error", "resume", f"unknown session {key}", key=key)
         return 1
     command = _resume_command(args.tool, row["cwd"], args.session_id)
     if args.print:
+        diag.debug("cli", "resume", key=key, strategy="print", command=command)
         print(command)
         return 0
 
     term_program = row["term_program"]
     if term_program == "Apple_Terminal":
-        run_osascript(
+        strategy = "terminal_script"
+        result = run_osascript(
             ["osascript", "-e", _TERMINAL_RESUME_APPLESCRIPT, command],
             capture_output=True, text=True,
         )
-        return 0
-    if term_program == "iTerm.app" or not term_program:
-        run_osascript(
+    elif term_program == "iTerm.app" or not term_program:
+        strategy = "iterm_script"
+        result = run_osascript(
             ["osascript", "-e", _ITERM_RESUME_APPLESCRIPT, command],
             capture_output=True, text=True,
         )
-        return 0
-    _activate_app(term_program, run_osascript)
+    else:
+        strategy = "open_a"
+        result = _activate_app(term_program, run_osascript)
+    diag.info(
+        "cli", "resume", key=key, term=term_program, strategy=strategy, command=command,
+        rc=_returncode(result), stderr=diag.tail_text(_stderr_text(result), 300) or None,
+        ms=diag.ms_since(started),
+    )
     return 0
 
 
@@ -1798,6 +1845,7 @@ def cmd_prune(args):
         conn.execute("COMMIT")
     finally:
         conn.close()
+    diag.info("cli", "prune", days=args.days, cutoff=cutoff, sessions=len(rows))
     print(f"pruned {len(rows)} session(s)")
     return 0
 

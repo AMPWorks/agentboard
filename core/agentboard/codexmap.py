@@ -19,6 +19,7 @@ import re
 import subprocess
 import time
 
+from . import diag
 from .reconcile import is_pid_alive, parse_ts
 
 PS_TIMEOUT_SECS = 2
@@ -189,6 +190,11 @@ def map_codex_session(
         stat_fn=stat_fn, is_pid_alive_fn=is_pid_alive_fn,
     )
     if chosen is None:
+        diag.info(
+            "codexmap", "map", session=session_id, cwd=cwd, candidates=len(candidates),
+            candidate_pids=",".join(str(c["pid"]) for c in candidates) or None,
+            outcome="no_candidates" if not candidates else "ambiguous",
+        )
         return False
 
     pid, tty = chosen["pid"], chosen["tty"]
@@ -214,4 +220,8 @@ def map_codex_session(
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    diag.info(
+        "codexmap", "map", session=session_id, cwd=cwd, candidates=len(candidates),
+        pid=pid, tty=tty, term=term_program, iterm_id=iterm_session_id, outcome="mapped",
+    )
     return True
