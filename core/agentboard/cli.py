@@ -1489,7 +1489,7 @@ on run argv
             delay 0.15
             tell t to select
             tell s to select
-            return "found"
+            return "found:uuid"
           end if
         end repeat
       end repeat
@@ -1507,7 +1507,7 @@ on run argv
                 delay 0.15
                 tell t to select
                 tell s to select
-                return "found"
+                return "found:tty"
               end if
             end try
           end repeat
@@ -1587,16 +1587,102 @@ def _tty_path(tty):
     return tty if tty.startswith("/dev/") else f"/dev/{tty}"
 
 
+def _returncode(result):
+    """A subprocess result's exit code, or None if it doesn't have a real one."""
+    code = getattr(result, "returncode", None)
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def _stdout_text(result):
+    out = getattr(result, "stdout", None)
+    if isinstance(out, bytes):
+        out = out.decode("utf-8", "replace")
+    return out.strip() if isinstance(out, str) else ""
+
+
+def _stderr_text(result):
+    err = getattr(result, "stderr", None)
+    if isinstance(err, bytes):
+        err = err.decode("utf-8", "replace")
+    return err.strip() if isinstance(err, str) else ""
+
+
 def _activate_app(term_program, run_osascript):
-    """Last resort: bring a mapped terminal app to front, no tab match."""
+    """Last resort: bring a mapped terminal app to front, no tab match.
+
+    Returns the `open -a` result, or None if `term_program` has no app.
+    """
     app_name = TERM_PROGRAM_APP_NAMES.get(term_program)
     if not app_name:
-        return False
-    run_osascript(["open", "-a", app_name], capture_output=True, text=True)
-    return True
+        return None
+    return run_osascript(["open", "-a", app_name], capture_output=True, text=True)
+
+
+# What the focus AppleScripts print, mapped to the logged `outcome`. A bare
+# "found" is what the iTerm script returned before it said which strategy
+# matched; an older script can't misreport which one ran.
+_ITERM_FOCUS_RESULTS = {
+    "found:uuid": "matched_uuid",
+    "found:tty": "matched_tty",
+    "found": "matched_unknown",
+}
+_TERMINAL_FOCUS_RESULTS = {
+    "found": "matched_tty",
+    "activated": "activated_only",
+}
+
+
+class _FocusTrace:
+    """Collects one focus attempt into a single `cli.focus` info line: the
+    recorded identity, each strategy tried, the AppleScript's exit code and
+    output, and the final outcome. Each step is also logged at debug."""
+
+    def __init__(self, key):
+        self.key = key
+        self.started = time.monotonic()
+        self.fields = {"key": key}
+        self.strategies = []
+
+    def identity(self, row):
+        self.fields.update(
+            term=row["term_program"] if row else None,
+            tty=row["tty"] if row else None,
+            iterm_id=row["iterm_session_id"] if row else None,
+        )
+
+    def tried(self, strategy, result, **extra):
+        self.strategies.append(strategy)
+        rc = _returncode(result)
+        out = _stdout_text(result)
+        err = _stderr_text(result)
+        diag.debug(
+            "cli", "focus.try", key=self.key, strategy=strategy, rc=rc,
+            stdout=diag.tail_text(out), stderr=diag.tail_text(err), **extra,
+        )
+        if strategy != "open_a":
+            self.fields.update(
+                osa_rc=rc, osa_out=diag.tail_text(out, 200), osa_err=diag.tail_text(err, 300),
+            )
+        else:
+            self.fields["open_rc"] = rc
+        return rc, out
+
+    def finish(self, outcome, level="info"):
+        diag.log(
+            level, "cli", "focus", **self.fields,
+            strategy=",".join(self.strategies) or None, outcome=outcome,
+            ms=diag.ms_since(self.started),
+        )
+
+
+def _open_a_outcome(result):
+    rc = _returncode(result)
+    return "not_found" if rc not in (None, 0) else "activated_only"
 
 
 def cmd_focus(args, run_osascript=subprocess.run):
+    key = f"{args.tool}:{args.session_id}"
+    trace = _FocusTrace(key)
     conn = db.connect()
     try:
         row = conn.execute(
@@ -1606,8 +1692,11 @@ def cmd_focus(args, run_osascript=subprocess.run):
         ).fetchone()
     finally:
         conn.close()
+    trace.identity(row)
     if not row or row["term_program"] not in TERM_PROGRAM_APP_NAMES:
-        print(f"no terminal recorded for {args.tool}:{args.session_id}", file=sys.stderr)
+        outcome = "unsupported_terminal" if row and row["term_program"] else "no_terminal"
+        trace.finish(outcome)
+        print(f"no terminal recorded for {key}", file=sys.stderr)
         return 1
 
     term_program = row["term_program"]
@@ -1619,23 +1708,37 @@ def cmd_focus(args, run_osascript=subprocess.run):
             ["osascript", "-e", _ITERM_FOCUS_APPLESCRIPT, unique_id, tty or ""],
             capture_output=True, text=True,
         )
-        if "found" in (result.stdout or "") and "not_found" not in (result.stdout or ""):
+        rc, out = trace.tried("iterm_script", result, unique_id=unique_id or None, tty=tty)
+        outcome = _ITERM_FOCUS_RESULTS.get(out) if rc in (None, 0) else None
+        if outcome:
+            trace.finish(outcome)
             return 0
-        if _activate_app(term_program, run_osascript):
+        fallback = _activate_app(term_program, run_osascript)
+        if fallback is not None:
+            trace.tried("open_a", fallback, app=TERM_PROGRAM_APP_NAMES[term_program])
+            trace.finish(_open_a_outcome(fallback))
             return 0
-        print(f"iTerm session for {args.tool}:{args.session_id} not found", file=sys.stderr)
+        trace.finish("not_found")
+        print(f"iTerm session for {key} not found", file=sys.stderr)
         return 1
 
     if term_program == "Apple_Terminal":
-        run_osascript(
+        result = run_osascript(
             ["osascript", "-e", _TERMINAL_FOCUS_APPLESCRIPT, tty or ""],
             capture_output=True, text=True,
         )
+        rc, out = trace.tried("terminal_script", result, tty=tty)
+        outcome = _TERMINAL_FOCUS_RESULTS.get(out) if rc in (None, 0) else None
+        trace.finish(outcome or "not_found")
         return 0
 
-    if _activate_app(term_program, run_osascript):
+    fallback = _activate_app(term_program, run_osascript)
+    if fallback is not None:
+        trace.tried("open_a", fallback, app=TERM_PROGRAM_APP_NAMES[term_program])
+        trace.finish(_open_a_outcome(fallback))
         return 0
-    print(f"no way to focus terminal for {args.tool}:{args.session_id}", file=sys.stderr)
+    trace.finish("unsupported_terminal")
+    print(f"no way to focus terminal for {key}", file=sys.stderr)
     return 1
 
 
