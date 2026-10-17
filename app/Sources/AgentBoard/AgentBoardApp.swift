@@ -23,7 +23,7 @@ struct AgentBoardApp: App {
         .defaultSize(width: 900, height: 560)
 
         Settings {
-            SettingsView()
+            SettingsView(store: store)
         }
     }
 }

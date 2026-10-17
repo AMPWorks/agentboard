@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import OSLog
 
 /// When the flash on the menu bar icon stops, beyond "the session left
 /// needs_you", which always stops it. Backs the Settings picker.
@@ -87,6 +88,7 @@ final class AttentionController: ObservableObject {
     private var isAttended: Bool { popoverVisible || dashboardIsKey }
 
     private let sleeper: Sleeper
+    private let log = Logger(subsystem: "io.github.agentboard", category: "attention")
     /// Flash time since the flash last (re)started, for the timeout policies.
     private var elapsed: Duration = .zero
     /// Holds the phase loop and the notification observers, and tears them
@@ -142,6 +144,10 @@ final class AttentionController: ObservableObject {
     /// The user has seen the board. Ignored by the `.never` policy.
     func acknowledge() {
         guard policy.honorsAcknowledgement else { return }
+        let newlyAcknowledged = needsYouKeys.subtracting(acknowledgedKeys)
+        if !newlyAcknowledged.isEmpty {
+            log.debug("flash ack keys=\(newlyAcknowledged.sorted().joined(separator: ","), privacy: .public)")
+        }
         acknowledgedKeys.formUnion(needsYouKeys)
         update()
     }
@@ -179,7 +185,14 @@ final class AttentionController: ObservableObject {
 
     private func update() {
         let shouldFlash = flashEnabled && !pendingKeys.isEmpty
-        if isFlashing != shouldFlash { isFlashing = shouldFlash }
+        if isFlashing != shouldFlash {
+            isFlashing = shouldFlash
+            if shouldFlash {
+                log.debug("flash start pending=\(self.pendingKeys.sorted().joined(separator: ","), privacy: .public) policy=\(self.policy.rawValue, privacy: .public)")
+            } else {
+                log.debug("flash stop")
+            }
+        }
 
         // The loop is needed for the phase toggle, and under Reduce motion
         // only to count down a timeout policy.
