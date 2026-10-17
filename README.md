@@ -244,6 +244,43 @@ and `auto_done: false` means a human marked it done. `agentboard mark <tool> <id
 clean exit rejects the auto-done call for that session until it genuinely resumes (a new prompt
 clears the exit marker and makes it live again).
 
+## Menu bar icon
+
+The menu bar icon takes the color of the most urgent session, so you can tell whether an agent
+is waiting on you without opening the popover. One color for the whole board, first match wins:
+
+| Board contains (first match)                | Icon                                   |
+|---------------------------------------------|----------------------------------------|
+| any `needs_you`                             | red, flashing until you have seen it   |
+| any `interrupted`                           | orange                                 |
+| any `review` whose process is still alive   | teal                                   |
+| any `running`                               | green                                  |
+| only `unconcluded` / closed `review`        | amber                                  |
+| nothing, or only `done` / `snoozed`         | the plain monochrome (template) glyph  |
+
+These are the same colors as the row dots and the dashboard legend. The counts next to the icon
+are unchanged: needs_you + interrupted, then a dimmer review count.
+
+Flashing: when a session *enters* `needs_you` the glyph alternates at 1 Hz between solid red and
+a dimmed red outline. It stops when you open the popover, when the dashboard window becomes key,
+or when the session leaves `needs_you`; the icon then stays solid red while anything still needs
+you. Acknowledgement is per session, so a second session (or the same one needing you again
+later) flashes again. Sessions already waiting when AgentBoard launches flash once. With
+System Settings → Accessibility → Display → Reduce motion on, the icon does not flash; it shows
+a static red glyph with an exclamation badge until you have seen it.
+
+Settings → Menu bar icon:
+
+- **Color the menu bar icon by session state** (default on). Off restores the monochrome icon.
+- **Flash when a session needs you** (default on).
+- **Stop flashing**: *When I open AgentBoard* (default), *After 30 seconds* / *After 2 minutes*
+  (also stops on its own after that long), or *Never (until handled)*, which ignores opening
+  AgentBoard and stops only when every flashing session has left `needs_you`.
+
+The colors are resolved for the system's light/dark setting, which is what the menu bar follows,
+not AgentBoard's own Appearance setting. The icon reacts within the 15 s background poll when
+nothing is open (usually sooner, via the data directory watcher).
+
 ## Links & integrations
 
 AgentBoard has no built-in knowledge of any specific ticket system, team, or host — it's meant
@@ -339,3 +376,19 @@ none of them ever read or write the real `~/Library/Application Support/AgentBoa
 `~/.claude/settings.json`, or `~/.codex/hooks.json`. Tests that run `core/bin/agentboard` or the
 scripts as a subprocess also put a `python3` stub on `PATH` that execs the suite's own
 interpreter, so the shim's `#!/usr/bin/env python3` can't drift to a different one.
+
+The app has a Swift Testing target (`app/Tests/AgentBoardTests`; Swift Testing because the
+Command Line Tools ship no XCTest). With Xcode selected, `cd app && swift test` runs it. With only
+the Command Line Tools, SwiftPM leaves their Testing.framework off the search paths and plain
+`swift test` silently runs zero tests, so pass the path explicitly:
+
+```
+cd app
+F=/Library/Developer/CommandLineTools/Library/Developer/Frameworks
+swift test -Xswiftc -F -Xswiftc $F -Xlinker -rpath -Xlinker $F
+```
+
+`app/Fixtures/` holds snapshots for running the app without the CLI:
+`AGENTBOARD_FIXTURE_PATH=app/Fixtures/snapshot-needs-you.json app/.build/release/AgentBoard`
+(one session needing you), `snapshot-quiet.json` (only done/snoozed), or `snapshot.json` (a bit of
+everything; also what `AGENTBOARD_USE_FIXTURE=1` loads from the app bundle).

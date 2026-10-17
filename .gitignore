@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+todo.md
+todo_plans/
+.todo-handler/

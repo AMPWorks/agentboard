@@ -3,6 +3,8 @@ import AppKit
 
 struct MenuBarView: View {
     @ObservedObject var store: SnapshotStore
+    /// Not observed: the popover only reports that it is showing.
+    let attention: AttentionController
     @Environment(\.openWindow) private var openWindow
 
     private var needsYou: [Session] {
@@ -41,8 +43,15 @@ struct MenuBarView: View {
             Divider()
             footer
         }
-        .onAppear { store.setVisible(true) }
-        .onDisappear { store.setVisible(false) }
+        .onAppear {
+            store.setVisible(true)
+            // Every popover open counts as seeing the board.
+            attention.popoverDidAppear()
+        }
+        .onDisappear {
+            store.setVisible(false)
+            attention.popoverDidDisappear()
+        }
     }
 
     @ViewBuilder
