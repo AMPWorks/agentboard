@@ -3,8 +3,10 @@
 import json
 import os
 from datetime import datetime, timedelta, timezone
+import time
 from pathlib import Path
 
+from . import diag
 from .hook import EXIT_COMMANDS, clean_prompt_text, is_untrusted_daemon_pid, normalize_branch
 from .reconcile import is_pid_alive
 
@@ -680,7 +682,8 @@ def backfill_single_session(conn, tool, session_id, transcript_path=None):
             fields = parse_codex_rollout(path)
         else:
             return "unknown-tool"
-    except Exception:
+    except Exception as exc:
+        diag.warn("backfill", "parse_error", file=path, exc=type(exc).__name__, msg=str(exc))
         return "parse-error"
 
     conn.execute("BEGIN IMMEDIATE")
@@ -695,6 +698,7 @@ def backfill_single_session(conn, tool, session_id, transcript_path=None):
 
 def run_backfill(conn, days=30):
     stats = {"claude": 0, "codex": 0, "errors": 0, "daemon_pid_corrected": 0}
+    started = time.monotonic()
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -703,8 +707,10 @@ def run_backfill(conn, days=30):
         for session_id, path in iter_claude_transcripts(days):
             try:
                 fields = parse_claude_transcript(path)
-            except Exception:
+            except Exception as exc:
                 stats["errors"] += 1
+                diag.warn("backfill", "parse_error", tool="claude", file=path,
+                          exc=type(exc).__name__, msg=str(exc))
                 continue
             upsert_backfill_session(conn, "claude", session_id, fields)
             stats["claude"] += 1
@@ -712,12 +718,16 @@ def run_backfill(conn, days=30):
         for path in iter_codex_rollouts(days):
             try:
                 fields = parse_codex_rollout(path)
-            except Exception:
+            except Exception as exc:
                 stats["errors"] += 1
+                diag.warn("backfill", "parse_error", tool="codex", file=path,
+                          exc=type(exc).__name__, msg=str(exc))
                 continue
             session_id = fields.get("session_id")
             if not session_id:
                 stats["errors"] += 1
+                diag.warn("backfill", "parse_error", tool="codex", file=path,
+                          msg="no session id in rollout")
                 continue
             upsert_backfill_session(conn, "codex", session_id, fields)
             stats["codex"] += 1
@@ -726,4 +736,5 @@ def run_backfill(conn, days=30):
         conn.execute("ROLLBACK")
         raise
 
+    diag.info("backfill", "done", days=days, ms=diag.ms_since(started), **stats)
     return stats
