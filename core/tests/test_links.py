@@ -275,6 +275,55 @@ class ProviderTests(AgentBoardTestCase):
         self.assertEqual(checked, 0)
 
 
+class LinksDiagTests(AgentBoardTestCase):
+    """refresh-links decisions land in agentboard.log."""
+
+    def _lines(self):
+        path = self.agentboard_home / "agentboard.log"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def test_provider_outcomes_are_logged_with_name_rc_rows_and_ms(self):
+        config = {"providers": [
+            {"name": "good", "command": ["echo"]},
+            {"name": "broken", "command": ["false"]},
+        ]}
+        outputs = [
+            mock.Mock(returncode=0, stdout=json.dumps([]).encode(), stderr=b""),
+            mock.Mock(returncode=3, stdout=b"", stderr=b"provider exploded"),
+        ]
+        with mock.patch("agentboard.links.subprocess.run", side_effect=outputs):
+            links.run_providers(self.conn, config, "2026-01-01T00:00:00.000000Z")
+        lines = self._lines()
+        good = [l for l in lines if "name=good" in l]
+        broken = [l for l in lines if "name=broken" in l]
+        self.assertEqual(len(good), 1)
+        self.assertIn("INFO links.provider name=good outcome=ok", good[0])
+        self.assertIn("rows=0", good[0])
+        self.assertIn("ms=", good[0])
+        self.assertEqual(len(broken), 1)
+        self.assertIn("WARN links.provider name=broken outcome=nonzero", broken[0])
+        self.assertIn("rc=3", broken[0])
+        self.assertIn("provider exploded", broken[0])
+
+    def test_gh_failure_is_logged(self):
+        def fake_run(args, cwd, timeout=links.GH_TIMEOUT_SECS):
+            return mock.Mock(returncode=1, stdout="", stderr="gh: not logged in")
+        self.assertIsNone(links.fetch_generic_pr("feature-x", "/tmp", run_gh=fake_run))
+        [line] = self._lines()
+        self.assertIn("WARN links.gh branch=feature-x", line)
+        self.assertIn("outcome=nonzero", line)
+        self.assertIn("rc=1", line)
+        self.assertIn("not logged in", line)
+
+    def test_unparseable_inbox_file_is_logged(self):
+        inbox = self.agentboard_home / "inbox"
+        inbox.mkdir()
+        (inbox / "bad.json").write_text("{nope")
+        links.ingest_inbox(self.conn, self.agentboard_home, "2026-01-01T00:00:00.000000Z")
+        [line] = self._lines()
+        self.assertIn("WARN links.inbox_drop file=bad.json reason=unreadable", line)
+
+
 class UpsertLinkTests(AgentBoardTestCase):
     def test_partial_update_preserves_existing_fields(self):
         now = "2026-01-01T00:00:00.000000Z"

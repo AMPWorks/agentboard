@@ -1674,53 +1674,214 @@ class PathsCommandTests(AgentBoardTestCase):
         self.assertIn("core:", out)
 
 
+def _completed(stdout="", returncode=0, stderr="", args=None):
+    """A real CompletedProcess for run_osascript mocks, so cmd_focus's
+    branching on returncode and its logging never see a bare Mock."""
+    return subprocess.CompletedProcess(args or ["osascript"], returncode, stdout, stderr)
+
+
 class FocusResumeTests(AgentBoardTestCase):
+    def setUp(self):
+        super().setUp()
+        self._old_level = os.environ.get("AGENTBOARD_LOG_LEVEL")
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+
+    def tearDown(self):
+        if self._old_level is None:
+            os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        else:
+            os.environ["AGENTBOARD_LOG_LEVEL"] = self._old_level
+        super().tearDown()
+
+    def _log_text(self):
+        path = self.agentboard_home / "agentboard.log"
+        return path.read_text() if path.exists() else ""
+
+    def _focus_lines(self):
+        return [line for line in self._log_text().splitlines() if " cli.focus " in line]
+
+    def _assert_outcome(self, outcome):
+        lines = self._focus_lines()
+        self.assertEqual(len(lines), 1, self._log_text())
+        self.assertIn(" INFO cli.focus ", lines[0])
+        self.assertIn(f"outcome={outcome}", lines[0])
+        return lines[0]
+
     def test_focus_iterm_found(self):
         insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
-        fake = mock.Mock(return_value=mock.Mock(stdout="found"))
+        fake = mock.Mock(return_value=_completed("found:uuid\n"))
         args = cli.build_parser().parse_args(["focus", "claude", "s1"])
         result = cli.cmd_focus(args, run_osascript=fake)
         self.assertEqual(result, 0)
         called_args = fake.call_args[0][0]
         self.assertIn("ABCD", called_args)
+        line = self._assert_outcome("matched_uuid")
+        self.assertIn("key=claude:s1", line)
+        self.assertIn("term=iTerm.app", line)
+        self.assertIn("iterm_id=w0t1p0:ABCD", line)
+        self.assertIn("strategy=iterm_script", line)
+        self.assertIn("osa_rc=0", line)
+        self.assertIn("osa_out=found:uuid", line)
 
     def test_focus_iterm_not_found_falls_back_to_activating_app(self):
         insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
-        fake = mock.Mock(return_value=mock.Mock(stdout="not_found"))
+        fake = mock.Mock(side_effect=[_completed("not_found\n"), _completed("", args=["open"])])
         args = cli.build_parser().parse_args(["focus", "claude", "s1"])
         result = cli.cmd_focus(args, run_osascript=fake)
         self.assertEqual(result, 0)
         self.assertEqual(fake.call_count, 2)
         self.assertEqual(fake.call_args_list[-1][0][0], ["open", "-a", "iTerm"])
+        line = self._assert_outcome("activated_only")
+        self.assertIn("strategy=iterm_script,open_a", line)
+        self.assertIn("osa_out=not_found", line)
+
+    def test_focus_iterm_script_error_is_logged_and_falls_back(self):
+        insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
+        fake = mock.Mock(side_effect=[
+            _completed("", returncode=1, stderr="execution error: Not authorized (-1743)"),
+            _completed("", args=["open"]),
+        ])
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
+        line = self._assert_outcome("activated_only")
+        self.assertIn("osa_rc=1", line)
+        self.assertIn("Not authorized", line)
 
     def test_focus_iterm_falls_back_to_tty_when_unique_id_misses(self):
         insert_session(
             self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD",
             term_program="iTerm.app", tty="ttys003",
         )
-        fake = mock.Mock(return_value=mock.Mock(stdout="found"))
+        fake = mock.Mock(return_value=_completed("found:tty\n"))
         args = cli.build_parser().parse_args(["focus", "claude", "s1"])
         result = cli.cmd_focus(args, run_osascript=fake)
         self.assertEqual(result, 0)
         script_args = fake.call_args[0][0]
         self.assertIn("ABCD", script_args)
         self.assertIn("/dev/ttys003", script_args)
+        line = self._assert_outcome("matched_tty")
+        self.assertIn("tty=ttys003", line)
+
+    def test_focus_iterm_legacy_bare_found_is_matched_unknown(self):
+        insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
+        fake = mock.Mock(return_value=_completed("found\n"))
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
+        fake.assert_called_once()
+        self._assert_outcome("matched_unknown")
 
     def test_focus_apple_terminal(self):
         insert_session(self.conn, session_id="s1", term_program="Apple_Terminal")
-        fake = mock.Mock(return_value=mock.Mock(stdout=""))
+        fake = mock.Mock(return_value=_completed(""))
         args = cli.build_parser().parse_args(["focus", "claude", "s1"])
         result = cli.cmd_focus(args, run_osascript=fake)
         self.assertEqual(result, 0)
         fake.assert_called_once()
+        # rc 0 with an answer the CLI does not recognise is not a failure.
+        line = self._assert_outcome("matched_unknown")
+        self.assertIn("osa_rc=0", line)
+
+    def test_focus_apple_terminal_script_error_is_not_found(self):
+        insert_session(self.conn, session_id="s1", term_program="Apple_Terminal", tty="ttys009")
+        fake = mock.Mock(return_value=_completed("", returncode=1, stderr="execution error"))
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
+        line = self._assert_outcome("not_found")
+        self.assertIn("osa_rc=1", line)
+
+    def test_focus_apple_terminal_found_is_matched_tty(self):
+        insert_session(self.conn, session_id="s1", term_program="Apple_Terminal", tty="ttys009")
+        fake = mock.Mock(return_value=_completed("found\n"))
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
+        self.assertIn("/dev/ttys009", fake.call_args[0][0])
+        line = self._assert_outcome("matched_tty")
+        self.assertIn("strategy=terminal_script", line)
+
+    def test_focus_apple_terminal_activated_is_activated_only(self):
+        insert_session(self.conn, session_id="s1", term_program="Apple_Terminal", tty="ttys009")
+        fake = mock.Mock(return_value=_completed("activated\n"))
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
+        self._assert_outcome("activated_only")
 
     def test_focus_generic_terminal_activates_app(self):
         insert_session(self.conn, session_id="s1", term_program="WarpTerminal")
-        fake = mock.Mock(return_value=mock.Mock(stdout=""))
+        fake = mock.Mock(return_value=_completed("", args=["open"]))
         args = cli.build_parser().parse_args(["focus", "claude", "s1"])
         result = cli.cmd_focus(args, run_osascript=fake)
         self.assertEqual(result, 0)
-        fake.assert_called_once_with(["open", "-a", "Warp"], capture_output=True, text=True)
+        fake.assert_called_once_with(
+            ["open", "-a", "Warp"], capture_output=True, text=True,
+            timeout=cli.OSASCRIPT_TIMEOUT_SECS,
+        )
+        line = self._assert_outcome("activated_only")
+        self.assertIn("strategy=open_a", line)
+        self.assertIn("open_rc=0", line)
+
+    def test_focus_open_a_failure_is_activate_failed(self):
+        insert_session(self.conn, session_id="s1", term_program="WarpTerminal")
+        fake = mock.Mock(return_value=_completed("", returncode=1, args=["open"]))
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
+        line = self._assert_outcome("activate_failed")
+        self.assertIn("open_rc=1", line)
+
+    def test_focus_iterm_fallback_failure_is_activate_failed(self):
+        insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
+        fake = mock.Mock(side_effect=[
+            _completed("", returncode=1, stderr="boom"),
+            _completed("", returncode=1, args=["open"]),
+        ])
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
+        self._assert_outcome("activate_failed")
+
+    def test_focus_every_call_is_bounded_by_a_timeout(self):
+        insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
+        fake = mock.Mock(side_effect=[_completed("not_found\n"), _completed("", args=["open"])])
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        cli.cmd_focus(args, run_osascript=fake)
+        for call in fake.call_args_list:
+            self.assertEqual(call.kwargs.get("timeout"), cli.OSASCRIPT_TIMEOUT_SECS)
+
+    def test_focus_logs_begin_before_running_any_script(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "info"
+        insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD",
+                       term_program="iTerm.app", tty="ttys004")
+        seen = {}
+
+        def run(argv, **kwargs):
+            seen["log"] = self._log_text()
+            return _completed("found:uuid\n")
+
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        self.assertEqual(cli.cmd_focus(args, run_osascript=run), 0)
+        self.assertIn("INFO cli.focus.begin key=claude:s1 term=iTerm.app tty=ttys004", seen["log"])
+        self.assertNotIn(" cli.focus key=", seen["log"])
+        self._assert_outcome("matched_uuid")
+
+    def test_focus_timeout_is_logged_and_exits_1(self):
+        insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
+        fake = mock.Mock(side_effect=subprocess.TimeoutExpired(["osascript"], cli.OSASCRIPT_TIMEOUT_SECS))
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 1)
+        fake.assert_called_once()  # no open -a fallback after a hang
+        lines = self._focus_lines()
+        self.assertEqual(len(lines), 1, self._log_text())
+        self.assertIn(" WARN cli.focus ", lines[0])
+        self.assertIn("outcome=timeout", lines[0])
+        self.assertIn("timed out after", lines[0])
+        self.assertIn("timed out", err.getvalue())
+
+    def test_focus_apple_terminal_timeout(self):
+        insert_session(self.conn, session_id="s1", term_program="Apple_Terminal", tty="ttys009")
+        fake = mock.Mock(side_effect=subprocess.TimeoutExpired(["osascript"], 10))
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 1)
+        self.assertIn("outcome=timeout", self._focus_lines()[0])
 
     def test_focus_unmapped_term_program_fails(self):
         insert_session(self.conn, session_id="s1", term_program="SomeRandomTerminal")
@@ -1729,6 +1890,8 @@ class FocusResumeTests(AgentBoardTestCase):
         result = cli.cmd_focus(args, run_osascript=fake)
         self.assertEqual(result, 1)
         fake.assert_not_called()
+        line = self._assert_outcome("unsupported_terminal")
+        self.assertIn("term=SomeRandomTerminal", line)
 
     def test_focus_no_terminal_recorded(self):
         insert_session(self.conn, session_id="s1")
@@ -1737,6 +1900,25 @@ class FocusResumeTests(AgentBoardTestCase):
         result = cli.cmd_focus(args, run_osascript=fake)
         self.assertEqual(result, 1)
         fake.assert_not_called()
+        self._assert_outcome("no_terminal")
+
+    def test_focus_unknown_session_is_no_terminal(self):
+        fake = mock.Mock()
+        args = cli.build_parser().parse_args(["focus", "claude", "nope"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 1)
+        self._assert_outcome("no_terminal")
+
+    def test_focus_logs_each_strategy_at_debug(self):
+        insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
+        fake = mock.Mock(side_effect=[_completed("not_found\n"), _completed("", args=["open"])])
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        cli.cmd_focus(args, run_osascript=fake)
+        tries = [l for l in self._log_text().splitlines() if "DEBUG cli.focus.try" in l]
+        self.assertEqual(len(tries), 2)
+        self.assertIn("strategy=iterm_script", tries[0])
+        self.assertIn("unique_id=ABCD", tries[0])
+        self.assertIn("strategy=open_a", tries[1])
 
     def _ordered_lines(self, script):
         return [line.strip() for line in script.strip().splitlines() if line.strip()]
@@ -1764,13 +1946,19 @@ class FocusResumeTests(AgentBoardTestCase):
             "delay 0.15",
             "tell t to select",
             "tell s to select",
-            'return "found"',
         ]
         lines = self._ordered_lines(cli._ITERM_FOCUS_APPLESCRIPT)
+        # Once for the unique-id path and once for the tty fallback, each
+        # reporting which strategy matched.
         self.assertEqual(
-            self._count_contiguous_runs(lines, expected), 2,
-            "expected this exact sequence once for the unique-id path and once for the tty fallback",
+            self._count_contiguous_runs(lines, expected + ['return "found:uuid"']), 1,
+            "expected this exact sequence once for the unique-id path",
         )
+        self.assertEqual(
+            self._count_contiguous_runs(lines, expected + ['return "found:tty"']), 1,
+            "expected this exact sequence once for the tty fallback",
+        )
+        self.assertNotIn('return "found"', lines)
 
     def test_apple_terminal_focus_reasserts_selected_after_activate(self):
         expected = [
@@ -1816,7 +2004,7 @@ class FocusResumeTests(AgentBoardTestCase):
     def test_resume_apple_terminal_runs_do_script(self):
         insert_session(self.conn, session_id="s1", cwd="/tmp/proj", term_program="Apple_Terminal")
         args = cli.build_parser().parse_args(["resume", "claude", "s1"])
-        fake = mock.Mock(return_value=mock.Mock(stdout=""))
+        fake = mock.Mock(return_value=_completed(""))
         result = cli.cmd_resume(args, run_osascript=fake)
         self.assertEqual(result, 0)
         script_args = fake.call_args[0][0]
@@ -1826,10 +2014,379 @@ class FocusResumeTests(AgentBoardTestCase):
     def test_resume_generic_terminal_just_activates(self):
         insert_session(self.conn, session_id="s1", cwd="/tmp/proj", term_program="WarpTerminal")
         args = cli.build_parser().parse_args(["resume", "claude", "s1"])
-        fake = mock.Mock(return_value=mock.Mock(stdout=""))
+        fake = mock.Mock(return_value=_completed(""))
         result = cli.cmd_resume(args, run_osascript=fake)
         self.assertEqual(result, 0)
-        fake.assert_called_once_with(["open", "-a", "Warp"], capture_output=True, text=True)
+        fake.assert_called_once_with(
+            ["open", "-a", "Warp"], capture_output=True, text=True,
+            timeout=cli.OSASCRIPT_TIMEOUT_SECS,
+        )
+
+    def test_resume_timeout_is_logged_and_exits_1(self):
+        insert_session(self.conn, session_id="s1", cwd="/tmp/proj", term_program="iTerm.app")
+        args = cli.build_parser().parse_args(["resume", "claude", "s1"])
+        fake = mock.Mock(side_effect=subprocess.TimeoutExpired(["osascript"], 10))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(cli.cmd_resume(args, run_osascript=fake), 1)
+        self.assertEqual(fake.call_args.kwargs.get("timeout"), cli.OSASCRIPT_TIMEOUT_SECS)
+        lines = [l for l in self._log_text().splitlines() if " cli.resume " in l]
+        self.assertEqual(len(lines), 1)
+        self.assertIn(" WARN cli.resume ", lines[0])
+        self.assertIn("outcome=timeout", lines[0])
+        self.assertIn("timed out", err.getvalue())
+
+
+class _LogLevelMixin:
+    """Run with a given AGENTBOARD_LOG_LEVEL (None = unset) and read back
+    $AGENTBOARD_HOME/agentboard.log."""
+
+    log_level = None
+
+    def setUp(self):
+        super().setUp()
+        self._old_level = os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        if self.log_level:
+            os.environ["AGENTBOARD_LOG_LEVEL"] = self.log_level
+
+    def tearDown(self):
+        os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        if self._old_level is not None:
+            os.environ["AGENTBOARD_LOG_LEVEL"] = self._old_level
+        super().tearDown()
+
+    def _log_lines(self):
+        path = self.agentboard_home / "agentboard.log"
+        return path.read_text().splitlines() if path.exists() else []
+
+
+class MainWrapperTests(_LogLevelMixin, AgentBoardTestCase):
+    log_level = "debug"
+
+    def test_start_and_end_lines_with_redacted_argv(self):
+        insert_session(self.conn, session_id="s1")
+        rc = cli.main(["mark", "claude", "s1", "done", "--note", "private words"])
+        self.assertEqual(rc, 0)
+        lines = self._log_lines()
+        start = [l for l in lines if " cli.start " in l]
+        end = [l for l in lines if " cli.end " in l]
+        self.assertEqual(len(start), 1)
+        self.assertIn("DEBUG cli.start cmd=mark", start[0])
+        self.assertIn("<redacted:13 chars>", start[0])
+        self.assertNotIn("private words", "\n".join(lines))
+        self.assertEqual(len(end), 1)
+        self.assertIn("INFO cli.end cmd=mark exit=0 ms=", end[0])
+        mark = [l for l in lines if " cli.mark " in l]
+        self.assertEqual(len(mark), 1)
+        self.assertIn("status=done", mark[0])
+
+    def test_abbreviated_redacted_flag_is_rejected_before_logging(self):
+        # `--not` would be argparse's abbreviation of `--note`, which redact()
+        # only recognises verbatim; allow_abbrev=False rejects it up front.
+        insert_session(self.conn, session_id="s1")
+        for flag in ("--not", "--no"):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    cli.main(["mark", "claude", "s1", "done", flag, "private words"])
+            self.assertEqual(ctx.exception.code, 2)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                cli.main(["link", "--kind", "pr", "--ref", "1", "--titl", "private words"])
+        self.assertNotIn("private words", "\n".join(self._log_lines()))
+
+    def test_full_flags_still_parse_everywhere(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["status", "--text", "hi", "--ttl", "5"])
+        self.assertEqual(args.text, "hi")
+
+    def test_uncaught_exception_logs_error_and_propagates(self):
+        def boom(args):
+            raise RuntimeError("database on fire")
+
+        parser = cli.build_parser()
+        args = parser.parse_args(["prune"])
+        args.func = boom
+        with mock.patch.object(cli, "build_parser") as build:
+            build.return_value.parse_args.return_value = args
+            with self.assertRaises(RuntimeError):
+                cli.main(["prune"])
+        errors = [l for l in self._log_lines() if " cli.error " in l]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ERROR cli.error cmd=prune exc=RuntimeError", errors[0])
+        self.assertIn('msg="database on fire"', errors[0])
+
+    def test_nonzero_exit_is_logged_at_info(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = cli.main(["backfill", "--session", "nope"])
+        self.assertEqual(rc, 1)
+        lines = self._log_lines()
+        self.assertTrue(any("ERROR cli.backfill" in l and "--session must be TOOL:ID" in l for l in lines))
+        self.assertTrue(any("INFO cli.end cmd=backfill exit=1" in l for l in lines))
+        self.assertIn("--session must be TOOL:ID", err.getvalue())
+
+
+class QuietSnapshotTests(_LogLevelMixin, AgentBoardTestCase):
+    log_level = None  # the default, info
+
+    def _run_snapshot(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return cli.main(["snapshot", "--json"])
+
+    def test_fast_snapshot_leaves_no_info_line(self):
+        self.assertEqual(self._run_snapshot(), 0)
+        self.assertEqual([l for l in self._log_lines() if " INFO " in l], [])
+
+    def test_slow_snapshot_is_logged_at_info(self):
+        with mock.patch.object(cli.diag, "ms_since", return_value=1500):
+            self._run_snapshot()
+        lines = self._log_lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("INFO cli.end cmd=snapshot exit=0 ms=1500", lines[0])
+
+    def test_failed_snapshot_is_logged(self):
+        with mock.patch.object(cli, "build_snapshot", side_effect=RuntimeError("bad row")):
+            with self.assertRaises(RuntimeError):
+                self._run_snapshot()
+        self.assertTrue(any("ERROR cli.error cmd=snapshot" in l for l in self._log_lines()))
+
+    def test_paths_is_quiet_too(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["paths", "--json"])
+        self.assertEqual(self._log_lines(), [])
+
+
+class HookSpawnedQuietTests(_LogLevelMixin, AgentBoardTestCase):
+    """`backfill --session` and `map-codex` run once per assistant turn
+    (spawned by hook.py): a routine success adds no info line."""
+
+    log_level = None  # the default, info
+
+    def _transcript(self):
+        path = self.tmp_path / "sess1.jsonl"
+        path.write_text(json.dumps({
+            "type": "user", "message": {"role": "user", "content": "fix it"},
+            "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/tmp", "gitBranch": "main",
+        }) + "\n")
+        return path
+
+    def test_successful_session_backfill_is_quiet(self):
+        path = self._transcript()
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.main(["backfill", "--session", "claude:sess1", "--transcript", str(path)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._log_lines(), [])
+
+    def test_failed_session_backfill_is_still_info(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["backfill", "--session", "nope"])
+        self.assertTrue(any("INFO cli.end cmd=backfill exit=1" in l for l in self._log_lines()))
+
+    def test_slow_session_backfill_is_info(self):
+        path = self._transcript()
+        with mock.patch.object(cli.diag, "ms_since", return_value=1500):
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.main(["backfill", "--session", "claude:sess1", "--transcript", str(path)])
+        self.assertTrue(any("INFO cli.end cmd=backfill exit=0 ms=1500" in l for l in self._log_lines()))
+
+    def test_full_backfill_still_ends_at_info(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["backfill", "--days", "1"])
+        self.assertTrue(any("INFO cli.end cmd=backfill exit=0" in l for l in self._log_lines()))
+
+    def test_successful_map_codex_is_quiet(self):
+        with mock.patch("agentboard.cli.codexmap.map_codex_session", return_value=True):
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.main(["map-codex", "--session", "s1", "--cwd", "/tmp/proj"])
+        self.assertEqual(self._log_lines(), [])
+
+
+def _ts(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
+class LogsCommandTests(_LogLevelMixin, AgentBoardTestCase):
+    def setUp(self):
+        super().setUp()
+        self.now = datetime(2026, 10, 17, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _write(self, name, entries):
+        path = self.agentboard_home / name
+        with path.open("a") as fh:
+            for minutes_ago, text in entries:
+                if minutes_ago is None:
+                    fh.write(text + "\n")
+                else:
+                    fh.write(f"{_ts(self.now - timedelta(minutes=minutes_ago))} {text}\n")
+
+    def _logs(self, argv, run=None):
+        args = cli.build_parser().parse_args(["logs"] + argv)
+        out, err = io.StringIO(), io.StringIO()
+        run = run or mock.Mock(side_effect=AssertionError("log show must not run"))
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.cmd_logs(args, run=run, now=self.now)
+        return rc, out.getvalue().splitlines(), err.getvalue()
+
+    def test_reads_rotated_file_first_then_live(self):
+        self._write("agentboard.log.1", [(30, "INFO old.one"), (20, "INFO old.two")])
+        self._write("agentboard.log", [(10, "INFO new.one")])
+        rc, lines, _ = self._logs([])
+        self.assertEqual(rc, 0)
+        self.assertEqual([l.split(" ", 2)[2] for l in lines], ["old.one", "old.two", "new.one"])
+
+    def test_since_window_spanning_the_rotation(self):
+        self._write("agentboard.log.1", [(90, "INFO too.old"), (45, "INFO in.rotated")])
+        self._write("agentboard.log", [(5, "INFO in.live")])
+        rc, lines, _ = self._logs(["--since", "1h"])
+        self.assertEqual([l.split(" ", 2)[2] for l in lines], ["in.rotated", "in.live"])
+
+    def test_since_iso_timestamp(self):
+        self._write("agentboard.log", [(30, "INFO a"), (10, "INFO b")])
+        cutoff = _ts(self.now - timedelta(minutes=20))
+        _, lines, _ = self._logs(["--since", cutoff])
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].endswith("INFO b"))
+
+    def test_unparseable_lines_pass_the_since_filter(self):
+        self._write("agentboard.log", [(90, "INFO old"), (None, "garbage without a timestamp"), (1, "INFO new")])
+        _, lines, _ = self._logs(["--since", "30m"])
+        self.assertEqual(lines[0], "garbage without a timestamp")
+        self.assertTrue(lines[1].endswith("INFO new"))
+
+    def test_grep_is_a_plain_substring(self):
+        self._write("agentboard.log", [
+            (3, "INFO cli.focus key=claude:a outcome=matched_tty"),
+            (2, "INFO cli.end cmd=mark exit=0"),
+            (1, "INFO cli.focus key=claude:b outcome=activated_only"),
+        ])
+        _, lines, _ = self._logs(["--grep", "cli.focus"])
+        self.assertEqual(len(lines), 2)
+        _, lines, _ = self._logs(["--grep", "outcome=activated_only"])
+        self.assertEqual(len(lines), 1)
+        _, lines, _ = self._logs(["--grep", "cli.f.cus"])
+        self.assertEqual(lines, [])
+
+    def test_default_is_last_200_lines(self):
+        self._write("agentboard.log", [(300 - i, f"INFO n.{i}") for i in range(300)])
+        _, lines, _ = self._logs([])
+        self.assertEqual(len(lines), 200)
+        self.assertTrue(lines[0].endswith("INFO n.100"))
+        _, lines, _ = self._logs(["--lines", "5"])
+        self.assertEqual(len(lines), 5)
+
+    def test_bad_since_is_an_error(self):
+        rc, _, err = self._logs(["--since", "yesterday"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--since", err)
+
+    def test_missing_log_prints_nothing(self):
+        rc, lines, err = self._logs([])
+        self.assertEqual((rc, lines, err), (0, [], ""))
+
+    def _app_run(self, stdout="", returncode=0, stderr=""):
+        return mock.Mock(return_value=subprocess.CompletedProcess(["log"], returncode, stdout, stderr))
+
+    def _start_arg(self, run):
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[:6], ["log", "show", "--style", "compact", "--info", "--debug"])
+        self.assertIn("--predicate", argv)
+        self.assertEqual(argv[argv.index("--predicate") + 1], 'subsystem == "io.github.agentboard"')
+        self.assertNotIn("--last", argv)
+        return argv[argv.index("--start") + 1]
+
+    def _local(self, dt):
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+    def test_app_with_relative_since_uses_absolute_start(self):
+        run = self._app_run()
+        self._logs(["--app", "--since", "1h"], run=run)
+        self.assertEqual(self._start_arg(run), self._local(self.now - timedelta(hours=1)))
+
+    def test_app_with_iso_since_uses_absolute_start(self):
+        run = self._app_run()
+        self._logs(["--app", "--since", "2026-10-17T11:15:00Z"], run=run)
+        self.assertEqual(
+            self._start_arg(run), self._local(datetime(2026, 10, 17, 11, 15, tzinfo=timezone.utc))
+        )
+
+    def test_app_without_since_starts_at_oldest_shown_line(self):
+        self._write("agentboard.log", [(42, "INFO first"), (2, "INFO second")])
+        run = self._app_run()
+        self._logs(["--app"], run=run)
+        oldest = (self.now - timedelta(minutes=42)).replace(microsecond=0)
+        self.assertEqual(self._start_arg(run), self._local(oldest))
+
+    def test_app_without_since_or_lines_defaults_to_one_hour(self):
+        run = self._app_run()
+        self._logs(["--app"], run=run)
+        self.assertEqual(self._start_arg(run), self._local(self.now - timedelta(hours=1)))
+
+    def test_app_lines_are_merged_by_timestamp(self):
+        self._write("agentboard.log", [(10, "INFO cli.focus outcome=matched_tty"), (1, "INFO later")])
+        app_ts = (self.now - timedelta(minutes=5)).astimezone().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        stdout = (
+            "Timestamp               Ty Process[PID:TID]\n"
+            f"{app_ts} N  AgentBoard[1:2] [io.github.agentboard:cli] args=\"focus claude s1\" exit=0 ms=400\n"
+        )
+        _, lines, err = self._logs(["--app", "--since", "1h"], run=self._app_run(stdout))
+        self.assertEqual(err, "")
+        self.assertEqual(len(lines), 3)
+        self.assertIn("cli.focus", lines[0])
+        self.assertIn(" APP ", lines[1])
+        self.assertIn('args="focus claude s1"', lines[1])
+        self.assertTrue(lines[1].startswith(_ts(self.now - timedelta(minutes=5))[:19]))
+        self.assertTrue(lines[2].endswith("INFO later"))
+
+    def test_app_log_show_failure_warns_and_prints_file_lines(self):
+        self._write("agentboard.log", [(1, "INFO still.here")])
+        rc, lines, err = self._logs(
+            ["--app", "--since", "1h"], run=self._app_run(returncode=64, stderr="log: bad predicate")
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("warning:", err)
+        self.assertIn("bad predicate", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+
+    def test_app_missing_log_binary_warns_and_prints_file_lines(self):
+        self._write("agentboard.log", [(1, "INFO still.here")])
+        run = mock.Mock(side_effect=FileNotFoundError(2, "No such file", "log"))
+        rc, lines, err = self._logs(["--app", "--since", "1h"], run=run)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("warning:", err)
+
+    def test_logs_itself_adds_nothing_at_info(self):
+        self._write("agentboard.log", [(1, "INFO x")])
+        before = self._log_lines()
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["logs"])
+        self.assertEqual(self._log_lines(), before)
+
+    def test_logs_output_does_not_include_its_own_run_at_debug(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._write("agentboard.log", [(1, "INFO x")])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.main(["logs"])
+        printed = out.getvalue()
+        self.assertNotIn("cmd=logs", printed)
+        self.assertFalse(any("cli.start cmd=logs" in l for l in self._log_lines()))
+
+    def test_successful_logs_leaves_no_footprint_at_debug(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._write("agentboard.log", [(1, "INFO x")])
+        before = self._log_lines()
+        for _ in range(2):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(["logs"]), 0)
+        self.assertEqual(self._log_lines(), before)
+
+    def test_failing_logs_still_records_its_end_line(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._write("agentboard.log", [(1, "INFO x")])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["logs", "--since", "garbage"]), 2)
+        lines = self._log_lines()
+        self.assertTrue(any("INFO cli.end cmd=logs exit=2" in l for l in lines), lines)
+        self.assertFalse(any("cli.start cmd=logs" in l for l in lines))
 
 
 class BackfillCommandTests(AgentBoardTestCase):

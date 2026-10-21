@@ -1090,6 +1090,118 @@ def _old_system_python3_version():
     return out.stdout.strip()
 
 
+class HookDiagTests(AgentBoardTestCase):
+    """Hook tracing: routine events (including the daemon and subagent
+    downgrades) log at debug only; only real drops log at info."""
+
+    def setUp(self):
+        super().setUp()
+        self._old_level = os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+
+    def tearDown(self):
+        os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        if self._old_level is not None:
+            os.environ["AGENTBOARD_LOG_LEVEL"] = self._old_level
+        super().tearDown()
+
+    def _lines(self):
+        path = self.agentboard_home / "agentboard.log"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def _daemon_codex_event(self):
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return mock.Mock(returncode=0, stdout="")
+            table = {1000: (40007, "ttys003", "sh"), 40007: (1, "??", "codex")}
+            entry = table.get(int(cmd[-1]))
+            if entry is None:
+                return mock.Mock(stdout="")
+            ppid, tty, comm = entry
+            return mock.Mock(stdout=f"{ppid} {tty} {comm}\n")
+
+        with mock.patch("agentboard.hook.subprocess.run", side_effect=fake_run), \
+             mock.patch("agentboard.hook.subprocess.Popen"), \
+             mock.patch("agentboard.hook.os.getppid", return_value=1000):
+            hook.process_payload(
+                self.conn, "codex",
+                {"session_id": "s1", "cwd": "/tmp", "hook_event_name": "SessionStart"},
+            )
+
+    def _subagent_event(self):
+        with mock.patch("agentboard.hook.subprocess.run") as run, \
+             mock.patch("agentboard.hook.subprocess.Popen"):
+            run.return_value = mock.Mock(returncode=0, stdout="")
+            hook.process_payload(
+                self.conn, "claude",
+                {"session_id": "s1", "cwd": "/tmp", "hook_event_name": "SessionStart"},
+            )
+            hook.process_payload(
+                self.conn, "claude",
+                {
+                    "session_id": "s1", "cwd": "/tmp", "agent_id": "sub-1",
+                    "hook_event_name": "Stop", "last_assistant_message": "sub done",
+                },
+            )
+
+    def test_daemon_event_logs_nothing_at_info(self):
+        self._daemon_codex_event()
+        self.assertEqual(self._lines(), [])
+
+    def test_daemon_event_debug_line(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._daemon_codex_event()
+        events = [l for l in self._lines() if " hook.event " in l]
+        self.assertEqual(len(events), 1)
+        self.assertIn("DEBUG hook.event tool=codex event=SessionStart session=s1", events[0])
+        self.assertIn("daemon=true", events[0])
+        self.assertIn("pid=-", events[0])
+        self.assertFalse([l for l in self._lines() if " INFO " in l])
+
+    def test_subagent_event_logs_nothing_at_info(self):
+        self._subagent_event()
+        self.assertEqual(self._lines(), [])
+
+    def test_subagent_event_debug_line(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._subagent_event()
+        events = [l for l in self._lines() if " hook.event " in l]
+        self.assertEqual(len(events), 2)
+        self.assertIn("event=Stop", events[1])
+        self.assertIn("subagent=true", events[1])
+        self.assertIn("ignored=subagent", events[1])
+        self.assertFalse([l for l in self._lines() if " INFO " in l])
+
+    def test_missing_session_id_is_an_info_drop(self):
+        hook.run("claude", stdin_stream=io.StringIO(json.dumps({"hook_event_name": "Stop"})))
+        [line] = self._lines()
+        self.assertIn("INFO hook.drop tool=claude event=Stop reason=missing_session_id", line)
+
+    def test_empty_payload_is_an_info_drop(self):
+        hook.run("claude", stdin_stream=io.StringIO(""))
+        [line] = self._lines()
+        self.assertIn("reason=empty_payload", line)
+
+    def test_unparseable_payload_is_an_info_drop_and_still_hits_hook_errors(self):
+        hook.run("codex", stdin_stream=io.StringIO("{not json"))
+        [line] = self._lines()
+        self.assertIn("INFO hook.drop tool=codex reason=unparseable_payload", line)
+        self.assertTrue((self.agentboard_home / "hook-errors.log").exists())
+
+    def test_diag_is_not_imported_at_hook_module_top(self):
+        tree = ast.parse(Path(hook.__file__).read_text())
+        top_level = [
+            alias.name
+            for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        ]
+        self.assertNotIn("diag", top_level)
+
+    def test_broken_diag_never_breaks_the_hook(self):
+        with mock.patch("agentboard.diag.log", side_effect=RuntimeError("log broke")):
+            hook.run("claude", stdin_stream=io.StringIO(json.dumps({"hook_event_name": "Stop"})))
+        self.assertFalse((self.agentboard_home / "hook-errors.log").exists())
+
+
 class BinAgentboardOldInterpreterTests(AgentBoardTestCase):
     """Regression test for the exact repro in the adversarial review: a
     hook command resolved against (or, as here, invoked directly with) an

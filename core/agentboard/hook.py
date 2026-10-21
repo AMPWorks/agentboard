@@ -129,6 +129,18 @@ def _truncate(text):
     return text
 
 
+def _diag(level: str, name: str, /, **fields) -> None:
+    """Write a `hook.<event>` line to agentboard.log. diag is imported here,
+    lazily, never at module top, so the shim's hook fast path keeps its
+    import graph; like everything else in a hook, this never raises."""
+    try:
+        from . import diag
+
+        diag.log(level, "hook", name, **fields)
+    except Exception:
+        pass
+
+
 def _log_error(message: str) -> None:
     try:
         home = db.home_dir()
@@ -344,6 +356,7 @@ def spawn_todos_reparse(tool, session_id, transcript_path) -> None:
     if not transcript_path:
         return
     if _recently_spawned_reparse(tool, session_id):
+        _diag("debug", "spawn", what="backfill", session=f"{tool}:{session_id}", outcome="guarded")
         return
     try:
         subprocess.Popen(
@@ -357,8 +370,11 @@ def spawn_todos_reparse(tool, session_id, transcript_path) -> None:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-    except Exception:
+    except Exception as exc:
+        _diag("warn", "spawn", what="backfill", session=f"{tool}:{session_id}",
+              outcome="error", exc=type(exc).__name__, msg=str(exc))
         return
+    _diag("debug", "spawn", what="backfill", session=f"{tool}:{session_id}", outcome="spawned")
     _mark_reparse_spawned(tool, session_id)
 
 
@@ -385,8 +401,11 @@ def spawn_codex_map(session_id, cwd, at) -> None:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-    except Exception:
+    except Exception as exc:
+        _diag("warn", "spawn", what="map-codex", session=f"codex:{session_id}",
+              outcome="error", exc=type(exc).__name__, msg=str(exc))
         return
+    _diag("debug", "spawn", what="map-codex", session=f"codex:{session_id}", outcome="spawned")
 
 
 def process_payload(conn, tool: str, payload: dict) -> None:
@@ -394,6 +413,9 @@ def process_payload(conn, tool: str, payload: dict) -> None:
     event = payload.get("hook_event_name") or payload.get("event") or ""
     session_id = payload.get("session_id")
     if not session_id:
+        # A real drop: nothing is recorded for this event.
+        _diag("info", "drop", tool=tool, event=event or None,
+              reason="empty_payload" if not payload else "missing_session_id")
         return
 
     now = _now_iso()
@@ -605,6 +627,20 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         conn.execute("ROLLBACK")
         raise
 
+    # Routine, including the downgrades (subagent-tagged events keep
+    # last_event, daemon-origin events drop pid/terminal, irrelevant
+    # notifications are ignored): debug only, so a normal session adds
+    # nothing to the log at the default info level.
+    _diag(
+        "debug", "event", tool=tool, event=event, session=session_id, pid=pid,
+        tty=tty, daemon=is_daemon, subagent=is_subagent_tagged,
+        ignored=(
+            "subagent" if is_subagent_tagged
+            else "irrelevant_notification" if irrelevant_notification else None
+        ),
+        term=term_program,
+    )
+
     if event in REPARSE_TRIGGER_EVENTS and not is_subagent_tagged:
         try:
             spawn_todos_reparse(tool, session_id, transcript_path)
@@ -629,7 +665,11 @@ def run(tool: str, stdin_stream=None) -> None:
         stdin_stream = sys.stdin
     try:
         raw = stdin_stream.read()
-        payload = json.loads(raw) if raw else {}
+        try:
+            payload = json.loads(raw) if raw else {}
+        except ValueError:
+            _diag("info", "drop", tool=tool, reason="unparseable_payload", bytes=len(raw))
+            raise
         conn = db.connect()
         try:
             process_payload(conn, tool, payload)

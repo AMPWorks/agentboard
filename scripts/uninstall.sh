@@ -28,10 +28,12 @@ CORE_VERSION_MARKER=".agentboard-core-version"
 AGENTBOARD_BUNDLE_ID="io.github.agentboard"
 
 # Every top-level file/dir AgentBoard itself ever creates directly inside
-# $AGENTBOARD_HOME (core/agentboard/db.py, hook.py, links.py, cli.py) --
+# $AGENTBOARD_HOME (core/agentboard/db.py, hook.py, links.py, cli.py,
+# diag.py's agentboard.log and its single rotation agentboard.log.1) --
 # see safe_purge_data_home()'s comment for why this list exists.
 AGENTBOARD_DATA_FILES=(agentboard.db agentboard.db-wal agentboard.db-shm
-  hook-errors.log install-manifest.json config.json)
+  hook-errors.log install-manifest.json config.json
+  agentboard.log agentboard.log.1)
 AGENTBOARD_DATA_DIRS=(inbox reparse-locks)
 
 NO_HOOKS=0

@@ -185,7 +185,17 @@ agentboard uninstall-hooks [--claude] [--codex]
 agentboard focus <tool> <session_id>         activate iTerm2 tab by ITERM_SESSION_ID (osascript)
 agentboard resume <tool> <session_id> [--print]  open new iTerm2 tab running resume cmd
 agentboard prune [--days 90]
+agentboard logs [--since 1h] [--grep T] [--lines N] [--app]   print the diagnostic log
 ```
+
+Diagnostic log (added after the original spec): every subcommand, hook and app action writes
+`key=value` lines to `$AGENTBOARD_HOME/agentboard.log` through `core/agentboard/diag.py`
+(level from `AGENTBOARD_LOG_LEVEL`, else `config.json` `log_level`, else `info`). It rotates
+once to `agentboard.log.1` at 2 MB (never a `.2`), never raises, and `snapshot`/`paths` stay at
+debug unless they fail or run over 1 s. `focus` logs an `outcome` (`matched_uuid`, `matched_tty`,
+`matched_unknown`, `activated_only`, `activate_failed`, `not_found`, `timeout`, `no_terminal`,
+`unsupported_terminal`; osascript/`open -a` calls are bounded at 10 s, and a timeout exits 1); its other
+exit codes are unchanged. `hook-errors.log` is still written as described under Hook.
 
 install-hooks: back up the file first (`<file>.agentboard-bak-<ts>`), then append one matcher
 group `{"hooks":[{"type":"command","command":"<abs path>/bin/agentboard hook --tool claude",

@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 from unittest import mock
@@ -141,6 +142,27 @@ class MapCodexSessionTests(AgentBoardTestCase):
         self.assertEqual(row["tty"], "ttys006")
         self.assertEqual(row["iterm_session_id"], "w0t1p0:ABCD-1")
         self.assertEqual(row["term_program"], "iTerm.app")
+
+    def test_successful_map_logs_at_debug_and_misses_at_info(self):
+        # Spawned on every Codex session start/prompt: a routine mapping must
+        # not add an info line; an unmapped session still does.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+            insert_codex_session(self.conn, "sess1")
+            codexmap.map_codex_session(
+                self.conn, "sess1", "/Users/dev",
+                ps_run=make_ps_run(processes=[(60123, "ttys006", "codex")],
+                                   envs={60123: "codex TERM_PROGRAM=iTerm.app"}),
+                lsof_run=make_lsof_run({60123: "/Users/dev"}),
+            )
+            log = self.agentboard_home / "agentboard.log"
+            self.assertFalse(log.exists() and "outcome=mapped" in log.read_text())
+            codexmap.map_codex_session(
+                self.conn, "sess1", "/Users/dev",
+                ps_run=make_ps_run(processes=[]), lsof_run=make_lsof_run({}),
+            )
+            self.assertIn("INFO codexmap.map session=sess1", log.read_text())
+            self.assertIn("outcome=no_candidates", log.read_text())
 
     def test_no_candidates_does_not_map(self):
         insert_codex_session(self.conn, "sess1")
