@@ -4,8 +4,12 @@ import Foundation
 /// Builds snapshot values through the same JSON decoding the app uses, since
 /// `Session` only has a decoding initializer.
 enum Fixtures {
-    static func session(_ key: String, _ state: String, alive: Bool = false) -> [String: Any] {
-        [
+    /// `extra` adds or overrides snapshot JSON fields (e.g. `"branch"`,
+    /// `"links"`, `"triage"`), using the snapshot's snake_case keys.
+    static func session(
+        _ key: String, _ state: String, alive: Bool = false, extra: [String: Any] = [:]
+    ) -> [String: Any] {
+        let base: [String: Any] = [
             "key": key,
             "tool": "claude",
             "session_id": key,
@@ -19,6 +23,14 @@ enum Fixtures {
             "resume_command": "",
             "links": [],
         ]
+        return base.merging(extra) { _, given in given }
+    }
+
+    /// Decodes one session through `snapshot`.
+    static func decoded(
+        _ key: String, _ state: String = "running", alive: Bool = false, extra: [String: Any] = [:]
+    ) -> Session {
+        snapshot([session(key, state, alive: alive, extra: extra)]).sessions[0]
     }
 
     static func snapshot(_ sessions: [[String: Any]], counts: [String: Int]? = nil) -> Snapshot {

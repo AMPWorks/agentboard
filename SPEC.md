@@ -251,14 +251,24 @@ then updated_at desc. Default excludes done older than 7 days and non-interactiv
   Red flashes at 1 Hz when a session newly enters needs_you, until the popover opens / the
   dashboard becomes key / the session leaves needs_you (per-session acknowledgement; timeout
   and "never" options in Settings); Reduce motion shows an exclamation badge instead.
-- Popover: compact grouped list (Needs you, Review, Running; Unconcluded collapsed with count),
-  each row: tool badge (C / X), title, project · branch, relative time, waiting_reason.
+- Popover: a "Filter sessions" search field on top (focused on open; query kept in memory until
+  cleared, (x) button, Escape clears, ⌘F focuses), then a compact grouped list (Needs you,
+  Review, Running; Unconcluded collapsed with count). While a query is set the sections show
+  only matches with counts, Unconcluded opens if it has matches, Snoozed and Done sections are
+  added, and a line reports how many sessions are hidden (emphasized if one needs you). The
+  menu bar icon ignores the query. Each row: tool badge (C / X), title, project · branch,
+  relative time, waiting_reason.
   Row click = focus; context menu & hover buttons: Focus, Resume, Copy resume cmd, Mark done,
   Snooze 1d, Open PR/ticket. Footer: "Open Dashboard", "Refresh", "Quit".
 - Dashboard `Window` scene: NavigationSplitView — sidebar of states with counts + filter by
-  tool/project + search; list; detail pane showing title, cwd, branch, links, timestamps,
-  first prompt, last prompt, last assistant message (scrollable, selectable, rendered as
-  plain text or basic markdown via AttributedString), action buttons.
+  tool/project + search (title, prompts, last assistant message, project, cwd, branch, tool,
+  state, waiting reason, status text, links, triage note, session id; quoted phrases and
+  `repo:`/`path:`/`branch:`/`tool:`/`state:`/`pr:`/`link:` qualifiers; the same matcher as the
+  popover). Sidebar counts reflect the pickers and the search, with a warning line (and a
+  Clear button that also selects All) when the filters hide a needs_you or interrupted
+  session; list; detail pane showing title, cwd, branch, links, timestamps, first prompt, last prompt, last assistant
+  message (scrollable, selectable, rendered as plain text or basic markdown via AttributedString),
+  action buttons.
 - Global hotkey ⌃⌥⌘A toggles the dashboard window (Carbon `RegisterEventHotKey`).
 - Data: run `agentboard snapshot --json` (CLI located per Links section: bundled Resources copy, PATH, then UserDefaults `agentboardPath`) every 3 s while popover/window visible, every 15 s
   otherwise; also watch the db directory with DispatchSource / FSEvents and refresh (debounced

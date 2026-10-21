@@ -284,6 +284,59 @@ The colors are resolved for the system's light/dark setting, which is what the m
 not AgentBoard's own Appearance setting. The icon reacts within the 15 s background poll when
 nothing is open (usually sooner, via the data directory watcher).
 
+## Search
+
+Both the menu bar popover and the dashboard have a search field, and both read a query the same
+way:
+
+- Words are separated by spaces, and a session must match **every** word (`retry codex`).
+- Double quotes keep a phrase together: `"menu bar"`.
+- Matching ignores case and accents and matches anywhere in a field, so `#4` also finds `#42`.
+- A plain word searches the title, the first and last prompts, the last assistant message, the
+  project, working directory and branch, the tool, the state (`needs_you` or `Needs you`), the
+  waiting reason and status text, every link's kind, ref, title and state, the triage note, and
+  the session id. It does not search link URLs; use `pr:` or `link:` for those.
+- A `field:value` word narrows the match to one place. The value can be quoted
+  (`branch:"feat x"`, `state:"needs you"`).
+
+| Qualifier            | Searches                                             |
+|----------------------|------------------------------------------------------|
+| `repo:` / `project:` | project name and working directory                   |
+| `path:`              | working directory                                    |
+| `branch:`            | git branch                                           |
+| `tool:`              | `claude` or `codex`                                  |
+| `state:`             | state, raw (`needs_you`) or as shown (`Needs you`)   |
+| `pr:`                | links of kind `pr`: ref, title and URL               |
+| `link:`              | any link: kind, label, ref, title, URL and state     |
+
+Spaces after the colon are ignored, so `branch: main` is the same as `branch:main` and
+`state: "needs you"` the same as `state:"needs you"`. An unknown qualifier (`foo:bar`, or
+`foo: bar` as two words) or one with nothing after it (`branch:` at the end of the query, or
+followed by a known qualifier such as `branch: tool:codex`) is searched as plain text, colon
+included. An unknown `foo:bar` or a quoted value is not a qualifier, so it still becomes the
+value: `branch: foo:bar` searches branches for `foo:bar`, and `branch: "tool:codex"` for
+`tool:codex`.
+
+**Popover.** The field at the top takes the cursor when the popover opens, so you can type right
+away; ⌘F focuses it again, the (x) button clears it, and Escape clears a non-empty query (with
+an empty field Escape behaves as before). The query is kept when the popover closes, until you
+clear it or quit AgentBoard, and it is selected when the popover reopens so typing replaces it.
+While a query is set:
+
+- the Needs you, Review, Running and Unconcluded sections show only matching sessions, with a
+  count in each header, and Unconcluded opens if it has matches;
+- matching Snoozed and Done sessions appear in their own sections at the bottom;
+- a line under the field says how many sessions the query hides, in red when one of them needs
+  you or was interrupted.
+
+The menu bar icon, its color and the flash always reflect every session, whatever the query.
+
+**Dashboard.** The search box in the toolbar filters the session list together with the state
+sidebar and the tool and project pickers. The sidebar badges, including **All**, count the
+sessions left after the pickers and the query, so they always match the list. When the filters
+hide a session that needs you or was interrupted, a red line under the sidebar says how many,
+with a **Clear** button that resets the search and both pickers and selects **All**.
+
 ## Links & integrations
 
 AgentBoard has no built-in knowledge of any specific ticket system, team, or host — it's meant

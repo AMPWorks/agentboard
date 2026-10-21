@@ -17,24 +17,20 @@ struct DashboardView: View {
         return names.sorted()
     }
 
-    private var filteredSessions: [Session] {
-        store.snapshot.sessions
+    /// Sessions that pass the tool and project pickers and the search
+    /// query, in any state. The sidebar badges count these, and the list
+    /// narrows them to the selected state, so both follow one rule.
+    private var matchedSessions: [Session] {
+        SessionSearch(searchText).filter(store.snapshot.sessions, tool: toolFilter, project: projectFilter)
+    }
+
+    private func listedSessions(from matched: [Session]) -> [Session] {
+        matched
             .filter { selectedState == nil || $0.state == selectedState }
-            .filter { toolFilter == "all" || $0.tool == toolFilter }
-            .filter { projectFilter == "all" || $0.project == projectFilter }
-            .filter { matchesSearch($0) }
             .sorted { lhs, rhs in
                 if lhs.state.sortRank != rhs.state.sortRank { return lhs.state.sortRank < rhs.state.sortRank }
                 return lhs.updatedAt > rhs.updatedAt
             }
-    }
-
-    private func matchesSearch(_ session: Session) -> Bool {
-        guard !searchText.isEmpty else { return true }
-        let haystack = [session.title, session.project, session.branch ?? "", session.cwd]
-            .joined(separator: " ")
-            .lowercased()
-        return haystack.contains(searchText.lowercased())
     }
 
     private var selectedSession: Session? {
@@ -46,19 +42,21 @@ struct DashboardView: View {
     /// clear any filters that might hide it, then select it and consume the request.
     private func consumePendingSelection() {
         guard let key = store.pendingSelection else { return }
-        selectedState = nil
-        toolFilter = "all"
-        projectFilter = "all"
-        searchText = ""
+        clearFilters()
         selectedSessionKey = key
         store.pendingSelection = nil
     }
 
     var body: some View {
+        let matched = matchedSessions
+        let counts = FilteredCounts(matched)
         NavigationSplitView {
-            sidebar
+            sidebar(
+                counts: counts,
+                hiddenNeedingAttention: counts.hiddenNeedingAttention(from: FilteredCounts(store.snapshot.sessions))
+            )
         } content: {
-            list
+            list(listedSessions(from: matched))
         } detail: {
             if let session = selectedSession {
                 SessionDetailView(session: session, store: store)
@@ -66,7 +64,7 @@ struct DashboardView: View {
                 ContentUnavailableView("Select a session", systemImage: "square.stack.3d.up")
             }
         }
-        .searchable(text: $searchText, prompt: "Search title, project, branch")
+        .searchable(text: $searchText, prompt: "Search title, prompts, repo, branch, PR…")
         .onAppear { consumePendingSelection() }
         .onChange(of: store.pendingSelection) { _, _ in consumePendingSelection() }
         .toolbar {
@@ -96,17 +94,44 @@ struct DashboardView: View {
         .navigationTitle("AgentBoard")
     }
 
-    private var sidebar: some View {
+    /// Clearing always lands on All, so nothing a filter hid stays hidden
+    /// behind a selected sidebar state.
+    private func clearFilters() {
+        selectedState = nil
+        toolFilter = "all"
+        projectFilter = "all"
+        searchText = ""
+    }
+
+    private func sidebar(counts: FilteredCounts, hiddenNeedingAttention: Int) -> some View {
         VStack(spacing: 0) {
             List(selection: $selectedState) {
                 Label("All", systemImage: "tray.full")
-                    .badge(store.snapshot.sessions.count)
+                    .badge(counts.total)
                     .tag(SessionState?.none)
                 ForEach(Self.sidebarStates, id: \.self) { state in
                     Label(state.displayName, systemImage: symbol(for: state))
-                        .badge(count(for: state))
+                        .badge(counts.count(for: state))
                         .tag(SessionState?.some(state))
                 }
+            }
+            // The badges follow the filters, so a leftover query or picker
+            // could show "Needs you 0" while a session waits. Say so.
+            if let notice = FilteredCounts.hiddenAttentionNotice(hiddenNeedingAttention) {
+                Divider()
+                HStack(spacing: 6) {
+                    Text(notice)
+                        .font(.caption.bold())
+                        .foregroundStyle(SessionColor.needsYou)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                    // clearFilters also selects All, so the sessions the warning
+                    // was about are on screen, not hidden by a sidebar state.
+                    Button("Clear") { clearFilters() }
+                        .controlSize(.small)
+                        .help("Clear the search and the tool and project pickers, and show all sessions")
+                }
+                .padding(8)
             }
             Divider()
             SessionColorLegendView()
@@ -115,8 +140,8 @@ struct DashboardView: View {
         .navigationSplitViewColumnWidth(min: 160, ideal: 180)
     }
 
-    private var list: some View {
-        List(filteredSessions, selection: $selectedSessionKey) { session in
+    private func list(_ sessions: [Session]) -> some View {
+        List(sessions, selection: $selectedSessionKey) { session in
             SessionRowView(session: session, store: store, compact: false)
                 .tag(session.key)
         }
@@ -134,19 +159,6 @@ struct DashboardView: View {
     private func singleSelectedSession(in keys: Set<String>) -> Session? {
         guard keys.count == 1, let key = keys.first else { return nil }
         return store.snapshot.sessions.first { $0.key == key }
-    }
-
-    private func count(for state: SessionState) -> Int {
-        switch state {
-        case .needsYou: return store.snapshot.counts.needsYou
-        case .interrupted: return store.snapshot.counts.interrupted
-        case .running: return store.snapshot.counts.running
-        case .review: return store.snapshot.counts.review
-        case .unconcluded: return store.snapshot.counts.unconcluded
-        case .snoozed: return store.snapshot.counts.snoozed
-        case .done: return store.snapshot.counts.done
-        case .unknown: return 0
-        }
     }
 
     private func symbol(for state: SessionState) -> String {
