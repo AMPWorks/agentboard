@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import diag
+from . import notes as notes_mod
 
 NON_FEATURE_BRANCHES = {"main", "master", "develop"}
 GH_CACHE_MINUTES = 15
@@ -213,6 +214,27 @@ def has_open_pr(links) -> bool:
     return any(link["kind"] == "pr" and link.get("state") == "OPEN" for link in links)
 
 
+def record_external_notes(conn, tool, session_id, raw_notes, source, now_iso) -> int:
+    """Record the optional `notes` list of an inbox drop file or provider
+    row ([{"kind": "needs_you|update|error", "text": "..."}]). Malformed
+    entries are skipped and logged, never raised, like malformed links."""
+    if raw_notes is None:
+        return 0
+    if not isinstance(raw_notes, list):
+        diag.warn("links", "note_skipped", source=source, session=f"{tool}:{session_id}",
+                  reason="not_a_list")
+        return 0
+    recorded = 0
+    for note in raw_notes:
+        if not notes_mod.is_valid_note(note):
+            diag.warn("links", "note_skipped", source=source, session=f"{tool}:{session_id}",
+                      reason="invalid")
+            continue
+        notes_mod.record_note(conn, tool, session_id, note["kind"], note["text"], source, now_iso)
+        recorded += 1
+    return recorded
+
+
 # -- session resolution -----------------------------------------------------------
 
 def resolve_session_from_env(conn):
@@ -338,6 +360,7 @@ def ingest_inbox(conn, home: Path, now_iso: str) -> int:
                 for link in raw_links if isinstance(raw_links, list) else []:
                     if _is_valid_link(link):
                         upsert_link(conn, tool, session_id, link, now_iso)
+                record_external_notes(conn, tool, session_id, data.get("notes"), "inbox", now_iso)
                 status_text = data.get("status")
                 if status_text and isinstance(status_text, str):
                     conn.execute(
@@ -427,6 +450,7 @@ def run_providers(conn, config: dict, now_iso: str) -> int:
             for link in raw_links if isinstance(raw_links, list) else []:
                 if _is_valid_link(link):
                     upsert_link(conn, tool, session_id, link, now_iso)
+            record_external_notes(conn, tool, session_id, row.get("notes"), "provider", now_iso)
             checked += 1
     return checked
 

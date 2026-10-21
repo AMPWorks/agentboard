@@ -273,4 +273,17 @@ struct SessionSearchTests {
         #expect(keys(SessionSearch("alpha").filter(sessions)) == ["a", "c"])
         #expect(keys(SessionSearch("alpha").filter(sessions, tool: "codex", project: "p2")) == ["c"])
     }
+
+    // MARK: Notes
+
+    @Test func noteTextMatchesItsSession() {
+        let session = Fixtures.decoded("n", "review", extra: [
+            "notes": [["id": 1, "kind": "update", "text": "Deployed PR #314 to staging",
+                       "ts": "2026-10-15T00:00:00Z", "last_ts": "2026-10-15T00:00:00Z"]],
+            "notes_count": 1,
+        ])
+        #expect(matches("#314", session))
+        #expect(matches("staging", session))
+        #expect(!matches("staging", Fixtures.decoded("plain", "review")))
+    }
 }

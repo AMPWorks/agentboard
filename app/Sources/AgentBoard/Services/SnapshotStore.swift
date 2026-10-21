@@ -164,6 +164,31 @@ final class SnapshotStore: ObservableObject {
         (try? await cli.resume(tool: session.tool, sessionId: session.sessionId, printOnly: true)) ?? session.resumeCommand
     }
 
+    /// Dismisses one note (the popover's and the detail view's per-note x).
+    func dismissNote(_ note: Note, of session: Session) async {
+        await perform("dismiss note \(note.id)", session) { try await cli.dismissNotes(ids: [note.id]) }
+    }
+
+    /// Dismisses every open note of one session.
+    func dismissNotes(for session: Session) async {
+        await perform("dismiss notes", session) { try await cli.dismissNotes(tool: session.tool, sessionId: session.sessionId) }
+    }
+
+    /// The popover's "Clear all": dismisses exactly the notes it shows (the
+    /// filtered feed), not notes a query hides or the 20-per-session cap cut.
+    func dismissNotes(_ notes: [Note]) async {
+        let ids = notes.map(\.id)
+        guard !ids.isEmpty else { return }
+        log.notice("action dismiss notes count=\(ids.count, privacy: .public)")
+        do {
+            try await cli.dismissNotes(ids: ids)
+            await refresh()
+        } catch {
+            self.lastError = error.localizedDescription
+            log.error("action dismiss notes failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     func requestSelection(_ key: String) {
         pendingSelection = key
     }

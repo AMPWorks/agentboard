@@ -7,7 +7,8 @@
     "review": 3,
     "unconcluded": 2,
     "snoozed": 2,
-    "done": 2
+    "done": 2,
+    "notes": 4
   },
   "sessions": [
     {
@@ -72,7 +73,19 @@
           "title": "backfill aborts on truncated transcript line"
         }
       ],
-      "triage": { "status": "open", "until": null, "note": null }
+      "triage": { "status": "open", "until": null, "note": null },
+      "notes": [
+        {
+          "id": 11,
+          "kind": "needs_you",
+          "text": "USER_ACTION: [widget-service] plan for the truncated-transcript fix is in Pending, awaiting your approval\n\nThe plan adds a tolerant line reader and a test with a cut-off transcript.",
+          "ts": "2026-10-12T17:10:00.000000Z",
+          "last_ts": "2026-10-12T19:20:00.000000Z",
+          "count": 3,
+          "source": "stop"
+        }
+      ],
+      "notes_count": 1
     },
     {
       "key": "codex:sess-needsyou-3",
@@ -223,7 +236,19 @@
       "can_focus": true,
       "resume_command": "cd /Users/dev/projects/metrics-pipeline && codex resume sess-running-2",
       "links": [],
-      "triage": { "status": "open", "until": null, "note": null }
+      "triage": { "status": "open", "until": null, "note": null },
+      "notes": [
+        {
+          "id": 10,
+          "kind": "error",
+          "text": "Request timed out while calling the model API.",
+          "ts": "2026-10-12T18:50:00.000000Z",
+          "last_ts": "2026-10-12T19:05:00.000000Z",
+          "count": 4,
+          "source": "stop"
+        }
+      ],
+      "notes_count": 1
     },
     {
       "key": "codex:sess-running-3",
@@ -279,7 +304,19 @@
           "title": "Fix fleet-wide rollup over-count"
         }
       ],
-      "triage": { "status": "open", "until": null, "note": null }
+      "triage": { "status": "open", "until": null, "note": null },
+      "notes": [
+        {
+          "id": 9,
+          "kind": "update",
+          "text": "**PR #57 opened** for the rollup over-count writeup; CI is green and the self-review found nothing blocking.\n\nhttps://example.test/pulls/57",
+          "ts": "2026-10-12T18:40:00.000000Z",
+          "last_ts": "2026-10-12T18:40:00.000000Z",
+          "count": 1,
+          "source": "stop"
+        }
+      ],
+      "notes_count": 1
     },
     {
       "key": "claude:sess-review-2",
@@ -503,7 +540,19 @@
           "title": "Add terminal focus helper via AppleScript"
         }
       ],
-      "triage": { "status": "done", "until": null, "note": null }
+      "triage": { "status": "done", "until": null, "note": null },
+      "notes": [
+        {
+          "id": 7,
+          "kind": "update",
+          "text": "PR #61 merged; the AppleScript focus helper is live on main.",
+          "ts": "2026-10-12T16:00:00.000000Z",
+          "last_ts": "2026-10-12T16:00:00.000000Z",
+          "count": 1,
+          "source": "cli"
+        }
+      ],
+      "notes_count": 1
     },
     {
       "key": "codex:sess-done-2",

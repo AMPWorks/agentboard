@@ -49,11 +49,13 @@ struct DashboardView: View {
 
     var body: some View {
         let matched = matchedSessions
-        let counts = FilteredCounts(matched)
+        let counts = FilteredCounts(matched, query: SessionSearch(searchText))
+        let all = FilteredCounts(store.snapshot.sessions)
         NavigationSplitView {
             sidebar(
                 counts: counts,
-                hiddenNeedingAttention: counts.hiddenNeedingAttention(from: FilteredCounts(store.snapshot.sessions))
+                hiddenNeedingAttention: counts.hiddenNeedingAttention(from: all),
+                hiddenNeedsYouNotes: counts.hiddenNeedsYouNotes(from: all)
             )
         } content: {
             list(listedSessions(from: matched))
@@ -103,7 +105,8 @@ struct DashboardView: View {
         searchText = ""
     }
 
-    private func sidebar(counts: FilteredCounts, hiddenNeedingAttention: Int) -> some View {
+    private func sidebar(counts: FilteredCounts, hiddenNeedingAttention: Int,
+                         hiddenNeedsYouNotes: Int) -> some View {
         VStack(spacing: 0) {
             List(selection: $selectedState) {
                 Label("All", systemImage: "tray.full")
@@ -115,9 +118,26 @@ struct DashboardView: View {
                         .tag(SessionState?.some(state))
                 }
             }
+            // Open notes the filters keep, counted note by note like the
+            // popover's Updates header (`UpdatesFeed.total`).
+            HStack(spacing: 6) {
+                Label("Updates", systemImage: "text.bubble")
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Text("\(counts.counts.notes)")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            .font(.callout)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .help("Open updates (retained notes) the filters keep; dismiss them in the menu bar popover or a session's detail")
             // The badges follow the filters, so a leftover query or picker
-            // could show "Needs you 0" while a session waits. Say so.
-            if let notice = FilteredCounts.hiddenAttentionNotice(hiddenNeedingAttention) {
+            // could show "Needs you 0" while a session waits, or hide a
+            // session in Review/Snoozed/Done that holds an open needs_you
+            // note. Say so.
+            if let notice = FilteredCounts.hiddenAttentionNotice(hiddenNeedingAttention,
+                                                                  notes: hiddenNeedsYouNotes) {
                 Divider()
                 HStack(spacing: 6) {
                     Text(notice)

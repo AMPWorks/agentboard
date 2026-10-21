@@ -604,6 +604,132 @@ def _fake_ps_chain(hops):
     return fake_run
 
 
+class HookNotesTests(AgentBoardTestCase):
+    MILESTONE = (
+        "Opened PR #31 for the fade task and pushed the follow-up commit. " * 8
+    ).strip()
+
+    def _send(self, payload, tool="claude"):
+        payload = {"cwd": "/tmp", **payload}
+        with mock.patch("agentboard.hook.subprocess.run") as run, \
+             mock.patch("agentboard.hook.subprocess.Popen"):
+            run.return_value = mock.Mock(returncode=0, stdout="")
+            hook.process_payload(self.conn, tool, payload)
+
+    def _stop(self, text, session_id="s1", tool="claude", **extra):
+        self._send({"session_id": session_id, "hook_event_name": "Stop",
+                    "last_assistant_message": text, **extra}, tool=tool)
+
+    def _prompt(self, text, session_id="s1", **extra):
+        self._send({"session_id": session_id, "hook_event_name": "UserPromptSubmit",
+                    "prompt": text, **extra})
+
+    def _notes(self):
+        return self.conn.execute("SELECT * FROM notes ORDER BY id").fetchall()
+
+    def _last_event_id(self):
+        return self.conn.execute("SELECT MAX(id) FROM events").fetchone()[0]
+
+    def test_user_action_stop_records_needs_you_note_with_event_id(self):
+        self._stop("USER_ACTION: [proj] plan in Pending — awaiting your approval")
+        (note,) = self._notes()
+        self.assertEqual(note["kind"], "needs_you")
+        self.assertEqual(note["source"], "stop")
+        self.assertEqual(note["tool"], "claude")
+        self.assertEqual(note["session_id"], "s1")
+        self.assertEqual(note["event_id"], self._last_event_id())
+        self.assertEqual(note["last_event_id"], self._last_event_id())
+        self.assertEqual(note["count"], 1)
+
+    def test_quiet_tick_records_no_note(self):
+        self._prompt("# Autonomous loop tick")
+        self._stop("Quiet tick, backoff window, nothing changed.")
+        self.assertEqual(self._notes(), [])
+
+    def test_repeat_bumps_count(self):
+        self._stop("USER_ACTION: approve the plan")
+        self._stop("USER_ACTION: approve the plan")
+        (note,) = self._notes()
+        self.assertEqual(note["count"], 2)
+        self.assertEqual(note["last_event_id"], self._last_event_id())
+        self.assertLess(note["event_id"], note["last_event_id"])
+
+    def test_subagent_stop_records_no_note(self):
+        self._stop("USER_ACTION: approve the plan", agent_id="sub-1")
+        self.assertEqual(self._notes(), [])
+
+    def test_codex_stop_records_note(self):
+        self._stop("USER_ACTION: approve the plan", tool="codex", session_id="c1")
+        (note,) = self._notes()
+        self.assertEqual((note["tool"], note["session_id"]), ("codex", "c1"))
+
+    def test_attended_milestone_is_not_kept_but_unattended_is(self):
+        self._prompt("please open the PR")
+        self._stop(self.MILESTONE)
+        self.assertEqual(self._notes(), [])
+        self._prompt("# Autonomous loop tick (dynamic pacing)\n\nRun the check.")
+        self._stop(self.MILESTONE)
+        (note,) = self._notes()
+        self.assertEqual(note["kind"], "update")
+
+    def test_subagent_prompt_does_not_change_the_unattended_flag(self):
+        # A subagent-tagged prompt overwrites sessions.last_prompt, but the
+        # unattended gate reads the newest *parent* prompt, as rebuild does.
+        self._prompt("# Autonomous loop tick")
+        self._prompt("summarize the diff", agent_id="sub-1")
+        self._stop(self.MILESTONE)
+        (note,) = self._notes()
+        self.assertEqual(note["kind"], "update")
+        # notes --rebuild --reset classifies the same Stop the same way.
+        from agentboard import notes
+        notes.rebuild(self.conn, {}, reset=True)
+        (rebuilt,) = self._notes()
+        self.assertEqual((rebuilt["kind"], rebuilt["source"]), ("update", "backfill"))
+
+    def test_subagent_autonomous_prompt_does_not_make_a_parent_turn_unattended(self):
+        self._prompt("please open the PR")
+        self._prompt("# Autonomous loop tick", agent_id="sub-1")
+        self._stop(self.MILESTONE)
+        self.assertEqual(self._notes(), [])
+
+    def test_unattended_prefix_override_from_config(self):
+        (self.agentboard_home / "config.json").write_text(
+            json.dumps({"note_unattended_prefixes": ["[cron]"]})
+        )
+        self._prompt("[cron] nightly")
+        self._stop(self.MILESTONE)
+        self.assertEqual(self._notes()[0]["kind"], "update")
+
+    def test_classifier_failure_keeps_the_event_and_session_update(self):
+        with mock.patch("agentboard.notes.classify", side_effect=RuntimeError("boom")):
+            self._stop("USER_ACTION: approve the plan")
+        self.assertEqual(self._notes(), [])
+        events = self.conn.execute("SELECT event FROM events").fetchall()
+        self.assertEqual([e["event"] for e in events], ["Stop"])
+        row = self.conn.execute("SELECT last_assistant FROM sessions").fetchone()
+        self.assertEqual(row["last_assistant"], "USER_ACTION: approve the plan")
+
+    def test_note_write_failure_rolls_back_only_the_note(self):
+        with mock.patch("agentboard.notes.record_note", side_effect=RuntimeError("boom")):
+            self._stop("USER_ACTION: approve the plan")
+        self.assertEqual(self._notes(), [])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_empty_stop_text_records_no_note(self):
+        self._stop("")
+        self.assertEqual(self._notes(), [])
+
+    def test_other_events_never_import_notes(self):
+        sys.modules.pop("agentboard.notes", None)
+        try:
+            self._prompt("# Autonomous loop tick")
+            self._send({"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash"})
+            self.assertNotIn("agentboard.notes", sys.modules)
+        finally:
+            import agentboard.notes  # noqa: F401  (restore for later tests)
+
+
 class FindAgentPidTests(AgentBoardTestCase):
     def test_real_ancestry_python_sh_claude(self):
         # hook (python) calls _find_agent_pid(os.getppid()), i.e. starting

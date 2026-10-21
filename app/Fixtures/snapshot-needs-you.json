@@ -7,7 +7,8 @@
     "review": 0,
     "unconcluded": 0,
     "snoozed": 0,
-    "done": 0
+    "done": 0,
+    "notes": 1
   },
   "sessions": [
     {
@@ -44,7 +45,19 @@
         "status": "open",
         "until": null,
         "note": null
-      }
+      },
+      "notes": [
+        {
+          "id": 1,
+          "kind": "needs_you",
+          "text": "USER_ACTION: [widget-service] approve running the integration suite against staging",
+          "ts": "2026-10-12T19:00:00.000000Z",
+          "last_ts": "2026-10-12T19:28:00.000000Z",
+          "count": 2,
+          "source": "stop"
+        }
+      ],
+      "notes_count": 1
     }
   ]
 }

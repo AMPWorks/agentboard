@@ -19,6 +19,7 @@ from . import db
 from . import diag
 from . import hook as hook_mod
 from . import links
+from . import notes as notes_mod
 from . import reconcile
 
 STATES = ["needs_you", "interrupted", "running", "review", "unconcluded", "snoozed", "done"]
@@ -121,10 +122,42 @@ def _session_status_text(session, now):
     return text
 
 
-def _build_session_entry(conn, session, triage_by_key, claude_registry, config, now):
+SNAPSHOT_NOTES_PER_SESSION = 20
+
+
+def _open_notes_by_session(conn) -> dict:
+    """{(tool, session_id): [open note rows, newest last_ts first]}."""
+    by_key = {}
+    for row in conn.execute("SELECT * FROM notes WHERE dismissed_at IS NULL").fetchall():
+        by_key.setdefault((row["tool"], row["session_id"]), []).append(dict(row))
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+
+    def newest_first(note):
+        ts = reconcile.parse_ts(note["last_ts"])
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (ts or oldest, note["id"])
+
+    for rows in by_key.values():
+        rows.sort(key=newest_first, reverse=True)
+    return by_key
+
+
+def _last_parent_prompt_at(conn, tool, session_id):
+    row = conn.execute(
+        "SELECT ts FROM events WHERE tool=? AND session_id=? AND event='UserPromptSubmit' "
+        "AND agent_id IS NULL ORDER BY id DESC LIMIT 1",
+        (tool, session_id),
+    ).fetchone()
+    return row["ts"] if row else None
+
+
+def _build_session_entry(conn, session, triage_by_key, claude_registry, config, now,
+                         notes_by_key=None):
     session = dict(session)
     tool = session["tool"]
     session_id = session["session_id"]
+    session_notes = (notes_by_key or {}).get((tool, session_id), [])
     triage = triage_by_key.get((tool, session_id))
     session_link_rows = _session_links(conn, session, config)
 
@@ -145,10 +178,20 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
     if session.get("ended_at"):
         turn_finished = reconcile.last_turn_finished(conn, tool, session_id)
 
+    open_needs_you_note = next((n for n in session_notes if n["kind"] == "needs_you"), None)
+    last_prompt_at = None
+    if open_needs_you_note is not None:
+        open_needs_you_note = dict(
+            open_needs_you_note,
+            headline=notes_mod.headline(open_needs_you_note["text"], notes_mod.markers(config)),
+        )
+        last_prompt_at = _last_parent_prompt_at(conn, tool, session_id)
+
     state, waiting_reason, auto_done, done_reason = reconcile.compute_state(
         session, triage, session_link_rows, now=now, alive=alive,
         registry_entry=registry_entry, notification_type=notification_type,
-        turn_finished=turn_finished,
+        turn_finished=turn_finished, open_needs_you_note=open_needs_you_note,
+        last_prompt_at=last_prompt_at,
     )
 
     cwd = session.get("cwd")
@@ -192,6 +235,19 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
             "until": (triage["until"] if triage else None),
             "note": (triage["note"] if triage else None),
         },
+        "notes": [
+            {
+                "id": note["id"],
+                "kind": note["kind"],
+                "text": note["text"],
+                "ts": note["ts"],
+                "last_ts": note["last_ts"],
+                "count": note["count"],
+                "source": note["source"],
+            }
+            for note in session_notes[:SNAPSHOT_NOTES_PER_SESSION]
+        ],
+        "notes_count": len(session_notes),
     }
 
 
@@ -208,9 +264,11 @@ def build_snapshot(conn, include_all=False, now=None):
         Path.home() / ".claude" / "sessions"
     )
     config = links.load_config(home)
+    notes_by_key = _open_notes_by_session(conn)
 
     entries = [
-        _build_session_entry(conn, session, triage_by_key, claude_registry, config, now)
+        _build_session_entry(conn, session, triage_by_key, claude_registry, config, now,
+                             notes_by_key)
         for session in sessions
     ]
 
@@ -248,6 +306,9 @@ def build_snapshot(conn, include_all=False, now=None):
     for entry in entries:
         if entry["state"] in counts:
             counts[entry["state"]] += 1
+    # Only the notes of sessions this snapshot emits, so the total matches
+    # what the app can show.
+    counts["notes"] = sum(entry["notes_count"] for entry in entries)
 
     return {
         "generated_at": _now_iso(now),
@@ -402,6 +463,136 @@ def cmd_status(args):
         conn.execute("COMMIT")
     finally:
         conn.close()
+    return 0
+
+
+# -- notes ---------------------------------------------------------------------
+
+def _note_dict(row) -> dict:
+    return {
+        "id": row["id"],
+        "key": f"{row['tool']}:{row['session_id']}",
+        "tool": row["tool"],
+        "session_id": row["session_id"],
+        "kind": row["kind"],
+        "text": row["text"],
+        "ts": row["ts"],
+        "last_ts": row["last_ts"],
+        "count": row["count"],
+        "source": row["source"],
+        "dismissed_at": row["dismissed_at"],
+    }
+
+
+def _explicit_session(value):
+    """TOOL:ID -> (tool, session_id), or None when malformed."""
+    tool, _, session_id = (value or "").partition(":")
+    if not tool or not session_id:
+        return None
+    return tool, session_id
+
+
+def cmd_note(args):
+    text = (args.text or "").strip()
+    if not text:
+        _report("error", "note", "agentboard note: --text is empty")
+        return 1
+    conn = db.connect()
+    try:
+        resolved = links.resolve_session(conn, explicit=args.session)
+        if not resolved:
+            _report("warn", "note", "agentboard note: could not resolve a session",
+                    explicit=args.session)
+            return 0
+        tool, session_id = resolved
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            note_id = notes_mod.record_note(
+                conn, tool, session_id, args.kind, text, "cli", _now_iso()
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+    diag.info("cli", "note", key=f"{tool}:{session_id}", kind=args.kind, id=note_id,
+              text=f"<redacted:{len(text)} chars>")
+    return 0
+
+
+def cmd_notes(args):
+    if (args.days is not None or args.reset) and not args.rebuild:
+        _report("error", "notes", "agentboard notes: --days and --reset need --rebuild")
+        return 2
+    session = None
+    if args.session:
+        session = _explicit_session(args.session)
+        if session is None:
+            _report("error", "notes", f"agentboard notes: --session must be TOOL:ID, got {args.session!r}")
+            return 2
+
+    conn = db.connect()
+    try:
+        if args.rebuild:
+            stats = notes_mod.rebuild(
+                conn, notes_mod.load_config(db.home_dir()), days=args.days, reset=args.reset,
+            )
+            diag.info("cli", "notes_rebuild", days=args.days, reset=args.reset, **stats)
+            if args.json:
+                print(json.dumps(stats))
+            else:
+                print(
+                    f"rebuilt notes: scanned={stats['scanned']} recorded={stats['recorded']} "
+                    f"skipped_dismissed={stats['skipped_dismissed']} deleted={stats['deleted']}"
+                )
+            return 0
+
+        if args.dismiss is not None or args.dismiss_all:
+            now_iso = _now_iso()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if args.dismiss is not None:
+                    count = notes_mod.dismiss(conn, now_iso, ids=args.dismiss)
+                else:
+                    count = notes_mod.dismiss(conn, now_iso, session=session)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            diag.info("cli", "notes_dismiss", ids=args.dismiss, all=args.dismiss_all,
+                      session=args.session, dismissed=count)
+            if args.json:
+                print(json.dumps({"dismissed": count}))
+            else:
+                print(f"dismissed {count} note(s)")
+            return 0
+
+        query = "SELECT * FROM notes"
+        clauses, params = [], []
+        if not args.all:
+            clauses.append("dismissed_at IS NULL")
+        if session is not None:
+            clauses.append("tool=? AND session_id=?")
+            params.extend(session)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY last_ts DESC, id DESC"
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    items = [_note_dict(row) for row in rows]
+    if args.json:
+        print(json.dumps({"notes": items}))
+        return 0
+    for item in items:
+        times = f" x{item['count']}" if item["count"] > 1 else ""
+        dismissed = " (dismissed)" if item["dismissed_at"] else ""
+        print(
+            f"{item['id']:>5} {item['kind']:<9} {item['key']:<44} {item['last_ts']}"
+            f"{times}{dismissed}  {notes_mod.first_line(item['text'])[:120]}"
+        )
     return 0
 
 
@@ -1889,16 +2080,24 @@ def cmd_prune(args):
         ).fetchall()
         conn.execute("BEGIN IMMEDIATE")
         for row in rows:
-            for table in ("events", "sessions", "triage", "links"):
+            for table in ("events", "sessions", "triage", "links", "notes"):
                 conn.execute(
                     f"DELETE FROM {table} WHERE tool=? AND session_id=?",
                     (row["tool"], row["session_id"]),
                 )
+        # The only retention for dismissed notes: they are kept (so a
+        # `notes --rebuild --reset` does not resurrect them) until they are
+        # older than the prune window.
+        dismissed = conn.execute(
+            "DELETE FROM notes WHERE dismissed_at IS NOT NULL AND dismissed_at < ?",
+            (cutoff,),
+        ).rowcount
         conn.execute("COMMIT")
     finally:
         conn.close()
-    diag.info("cli", "prune", days=args.days, cutoff=cutoff, sessions=len(rows))
-    print(f"pruned {len(rows)} session(s)")
+    diag.info("cli", "prune", days=args.days, cutoff=cutoff, sessions=len(rows),
+              dismissed_notes=dismissed)
+    print(f"pruned {len(rows)} session(s), {dismissed} dismissed note(s)")
     return 0
 
 
@@ -2137,6 +2336,29 @@ def build_parser():
     p.add_argument("--ttl", type=float, default=None, help="minutes until this status expires")
     p.add_argument("--session", default=None, help="TOOL:ID, auto-resolved if omitted")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("note", help="add a retained note to a session")
+    p.add_argument("--kind", choices=list(notes_mod.KINDS), required=True)
+    p.add_argument("--text", required=True)
+    p.add_argument("--session", default=None, help="TOOL:ID, auto-resolved if omitted")
+    p.set_defaults(func=cmd_note)
+
+    p = sub.add_parser("notes", help="list, dismiss or rebuild retained notes")
+    p.add_argument("--session", default=None, help="TOOL:ID: only this session's notes")
+    p.add_argument("--all", action="store_true", help="include dismissed notes")
+    p.add_argument("--json", action="store_true")
+    action = p.add_mutually_exclusive_group()
+    action.add_argument("--dismiss", nargs="+", type=int, metavar="ID", default=None)
+    action.add_argument("--dismiss-all", action="store_true",
+                        help="dismiss every open note (only --session's with --session)")
+    action.add_argument("--rebuild", action="store_true",
+                        help="classify recorded Stop events the hook has not seen")
+    p.add_argument("--days", type=int, default=None,
+                   help="with --rebuild: only the last N days (older events are then marked "
+                        "replayed; use --reset to revisit them)")
+    p.add_argument("--reset", action="store_true",
+                   help="with --rebuild: drop open stop/backfill notes and replay every event")
+    p.set_defaults(func=cmd_notes)
 
     p = sub.add_parser("install-hooks")
     p.add_argument("--claude", action="store_true")

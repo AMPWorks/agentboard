@@ -15,6 +15,9 @@ struct SessionDetailView: View {
                 }
                 textSection(title: "First prompt", text: session.firstPrompt)
                 textSection(title: "Last prompt", text: session.lastPrompt)
+                if !session.notes.isEmpty {
+                    SessionNotesSection(session: session, store: store)
+                }
                 textSection(title: "Last assistant message", text: session.lastAssistant, markdown: true)
             }
             .padding(20)

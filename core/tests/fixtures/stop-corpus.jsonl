@@ -1,0 +1,48 @@
+{"text": "USER_ACTION: [agentboard] plan retained-updates in Pending — awaiting your approval", "unattended": true, "expected": "needs_you", "why": "marker line"}
+{"text": "USER_ACTION: [agentboard] plan retained-updates in Pending — awaiting your approval", "unattended": false, "expected": "needs_you", "why": "marker in attended turn"}
+{"text": "Tick summary below.\nUSER_ACTION: PR acme/widgets#7 awaits your review\nNothing else changed.", "unattended": true, "expected": "needs_you", "why": "marker on a later line"}
+{"text": "- **USER_ACTION:** approve the plan for the sparkle-fade task", "unattended": true, "expected": "needs_you", "why": "decorated marker line"}
+{"text": "USER_ACTION: run scripts/install.sh to deploy PR #4 (merged 97303cf)", "unattended": false, "expected": "needs_you", "why": "deploy request"}
+{"text": "I could not continue. USER_ACTION: is mentioned mid-line here, not at the start.", "unattended": false, "expected": null, "why": "marker not at line start, attended"}
+{"text": "API Error: Can't reach the API. Retrying in 30 seconds.", "unattended": true, "expected": "error", "why": "api outage"}
+{"text": "API Error (Connection error.) · Retrying in 4 seconds… (attempt 3/10)", "unattended": true, "expected": "error", "why": "api retry"}
+{"text": "Request timed out.", "unattended": true, "expected": "error", "why": "timeout"}
+{"text": "You've hit your session limit · resets 3am (Europe/Paris)", "unattended": true, "expected": "error", "why": "session limit"}
+{"text": "Still down: the API keeps returning 529 overloaded.", "unattended": true, "expected": "error", "why": "still down is an error before quiet"}
+{"text": "API Error: Can't reach the API. Retrying in 30 seconds.", "unattended": false, "expected": null, "why": "error in attended turn"}
+{"text": "Quiet tick, backoff window, nothing changed.", "unattended": true, "expected": null, "why": "quiet tick"}
+{"text": "Quiet tick: idle. PR #2 still awaits your approval and the manual menu bar checks.", "unattended": true, "expected": null, "why": "quiet with PR mention"}
+{"text": "Quiet tick: idle. PR #2 still awaits your approval and the manual menu bar checks; the plan for the notes task is in Pending awaiting your approval; nothing else is actionable until one of those moves, so I am backing off.", "unattended": true, "expected": null, "why": "long quiet without news words"}
+{"text": "Idle — nothing to do this pass.", "unattended": true, "expected": null, "why": "idle"}
+{"text": "Nothing actionable: every task is waiting on you.", "unattended": true, "expected": null, "why": "nothing actionable"}
+{"text": "Nothing new since the last tick.", "unattended": true, "expected": null, "why": "nothing new"}
+{"text": "Unchanged: PR #5 still in review.", "unattended": true, "expected": null, "why": "unchanged"}
+{"text": "Still waiting on the human review of PR #9.", "unattended": true, "expected": null, "why": "still"}
+{"text": "Holding: the project lock is held by another session.", "unattended": true, "expected": null, "why": "holding"}
+{"text": "No-op tick.", "unattended": true, "expected": null, "why": "no-op"}
+{"text": "Waiting on CI for PR #12.", "unattended": true, "expected": null, "why": "waiting on"}
+{"text": "Standing by for your approval of the plan.", "unattended": true, "expected": null, "why": "standing by"}
+{"text": "Awaiting your review on PR #3; nothing else to do.", "unattended": true, "expected": null, "why": "awaiting"}
+{"text": "Loop stays stopped until you re-arm it.", "unattended": true, "expected": null, "why": "loop stopped"}
+{"text": "No change since the previous tick.", "unattended": true, "expected": null, "why": "no change"}
+{"text": "Second quiet tick in a row; backing off to 20 min.", "unattended": true, "expected": null, "why": "second"}
+{"text": "**Quiet tick**, backoff window.", "unattended": true, "expected": null, "why": "bold quiet"}
+{"text": "Quiet tick otherwise, but a heads-up: I found that the stalled-bot tripwire was reading the wrong lock file for submodule tasks, so it never fired there. I fixed the path in the local checkout and logged a NOTE; nothing else changed.", "unattended": true, "expected": "update", "why": "quiet worded but reports a repair"}
+{"text": "Quiet tick; found nothing new.", "unattended": true, "expected": null, "why": "news word but short"}
+{"text": "The comment-response agent is still working on PR #2's review findings; I hold the project lock, so this tick takes no action.", "unattended": true, "expected": null, "why": "progress note"}
+{"text": "The build agent is still building the app bundle; no new work this pass.", "unattended": true, "expected": null, "why": "still building"}
+{"text": "The execution agent is still running; see https://github.com/acme/widgets/pull/8 for the draft.", "unattended": true, "expected": "update", "why": "progress with a URL is kept"}
+{"text": "**PR #23 is merged** as `61cffa88` on `main`, so the effect-ID pinning and the preset remap are live. The task is now in Completed.", "unattended": true, "expected": "update", "why": "merged"}
+{"text": "Opened https://github.com/acme/widgets/pull/42 for the search bar task.", "unattended": true, "expected": "update", "why": "url"}
+{"text": "CI went red on PR #14: the Swift build fails on a missing import.", "unattended": true, "expected": "update", "why": "ci red"}
+{"text": "The plan for the export task is in Pending, ready for your review.", "unattended": true, "expected": "update", "why": "plan ready"}
+{"text": "Deployed PR #6 via the install script; post-deploy checks pass.", "unattended": true, "expected": "update", "why": "deployed"}
+{"text": "Task blocked: depends on the stale-link task, which has not merged.", "unattended": true, "expected": "update", "why": "blocked"}
+{"text": "Pushed two commits addressing the review on acme#19.", "unattended": true, "expected": "update", "why": "repo#num"}
+{"text": "Opened PR #31 for the color-fade task: the fader now eases between palettes over the configured duration, the old step mode stays behind a flag, and the new tests cover both paths. Self-review posted two low findings, both fixed in a follow-up commit. CI is green on the branch. The PR waits on your review and the manual checks listed in its Testing Required section.", "unattended": true, "expected": "update", "why": "long milestone"}
+{"text": "Opened PR #31 for the color-fade task: the fader now eases between palettes over the configured duration, the old step mode stays behind a flag, and the new tests cover both paths. Self-review posted two low findings, both fixed in a follow-up commit. CI is green on the branch. The PR waits on your review and the manual checks listed in its Testing Required section.", "unattended": false, "expected": null, "why": "long milestone in attended turn"}
+{"text": "I went through the remaining review comments on the dashboard layout. The sidebar spacing now matches the popover, the legend wraps at narrow widths instead of clipping, and the session rows keep their badges aligned when a title is long. I also tightened the wording of two help strings and reran the whole app test suite locally, which passes, so the branch is in a consistent state for the next round.", "unattended": true, "expected": "update", "why": "long plain text over 300 chars"}
+{"text": "Rendering the self-review prompt now.", "unattended": true, "expected": null, "why": "short, nothing notable"}
+{"text": "Done.", "unattended": true, "expected": null, "why": "too short"}
+{"text": "", "unattended": true, "expected": null, "why": "empty"}
+{"text": "   \n  ", "unattended": true, "expected": null, "why": "whitespace only"}

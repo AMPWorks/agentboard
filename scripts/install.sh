@@ -736,6 +736,16 @@ else
   "$INSTALLED_BIN" backfill --days 30
 fi
 
+# Turn the Stop messages already in the events table into retained notes
+# (Updates). Idempotent: a second run, or a run after the hook has started
+# writing notes itself, imports nothing new. Never fatal to the install.
+echo "==> rebuilding retained notes from recorded stop messages"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "would run: $INSTALLED_BIN notes --rebuild"
+else
+  "$INSTALLED_BIN" notes --rebuild || echo "warning: notes --rebuild failed" >&2
+fi
+
 # -- 6. Launch -----------------------------------------------------------------
 
 if [[ "$NO_APP" -eq 0 && "$DRY_RUN" -eq 0 && "$APP_INSTALL_RC" -eq 0 ]]; then

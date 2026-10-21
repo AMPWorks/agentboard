@@ -6,7 +6,7 @@ from pathlib import Path
 
 DB_FILENAME = "agentboard.db"
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _MIGRATIONS = {
     1: """
@@ -82,6 +82,32 @@ _MIGRATIONS = {
     4: """
     ALTER TABLE sessions ADD COLUMN end_reason TEXT;
     ALTER TABLE sessions ADD COLUMN todos_open INTEGER;
+    """,
+    5: """
+    CREATE TABLE notes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tool TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        ts TEXT NOT NULL,
+        last_ts TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        text TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 1,
+        source TEXT NOT NULL,
+        event_id INTEGER,
+        last_event_id INTEGER,
+        dismissed_at TEXT
+    );
+    CREATE UNIQUE INDEX idx_notes_fp
+        ON notes(tool, session_id, fingerprint) WHERE dismissed_at IS NULL;
+    CREATE INDEX idx_notes_open ON notes(dismissed_at, last_ts);
+    CREATE INDEX idx_notes_session ON notes(tool, session_id);
+
+    CREATE TABLE notes_meta(key TEXT PRIMARY KEY, value INTEGER);
+    INSERT INTO notes_meta(key, value)
+        VALUES ('hook_from', (SELECT COALESCE(MAX(id), 0) FROM events)),
+               ('rebuilt_through', 0);
     """,
 }
 

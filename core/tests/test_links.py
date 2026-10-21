@@ -275,6 +275,89 @@ class ProviderTests(AgentBoardTestCase):
         self.assertEqual(checked, 0)
 
 
+class ExternalNotesTests(AgentBoardTestCase):
+    NOW = "2026-01-01T00:00:00.000000Z"
+
+    def setUp(self):
+        super().setUp()
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, cwd, origin, updated_at) "
+            "VALUES ('claude','s1','/tmp/proj','hook','2026-01-01T00:00:00.000000Z')"
+        )
+
+    def _notes(self):
+        return self.conn.execute(
+            "SELECT tool, session_id, kind, text, source, count FROM notes ORDER BY id"
+        ).fetchall()
+
+    def test_inbox_drop_records_notes(self):
+        inbox = links.inbox_dir(self.agentboard_home)
+        inbox.mkdir(parents=True)
+        (inbox / "a.json").write_text(json.dumps({
+            "session": "claude:s1",
+            "notes": [
+                {"kind": "needs_you", "text": "approve the deploy"},
+                {"kind": "update", "text": "PR #7 merged"},
+            ],
+        }))
+        count = links.ingest_inbox(self.conn, self.agentboard_home, self.NOW)
+        self.assertEqual(count, 1)
+        rows = [tuple(r) for r in self._notes()]
+        self.assertEqual(rows, [
+            ("claude", "s1", "needs_you", "approve the deploy", "inbox", 1),
+            ("claude", "s1", "update", "PR #7 merged", "inbox", 1),
+        ])
+
+    def test_inbox_skips_malformed_notes_without_blocking_the_rest(self):
+        inbox = links.inbox_dir(self.agentboard_home)
+        inbox.mkdir(parents=True)
+        (inbox / "a.json").write_text(json.dumps({
+            "session": "claude:s1",
+            "links": [{"kind": "ticket", "ref": "T-1"}],
+            "notes": [
+                "not-an-object",
+                {"kind": "chatter", "text": "x"},
+                {"kind": "update", "text": ""},
+                {"kind": "update", "text": 12},
+                {"kind": "error"},
+                {"kind": "error", "text": "API Error: down"},
+            ],
+        }))
+        (inbox / "b.json").write_text(json.dumps({
+            "session": "claude:s1", "notes": {"kind": "update", "text": "not a list"},
+        }))
+        links.ingest_inbox(self.conn, self.agentboard_home, self.NOW)
+        self.assertEqual([r["text"] for r in self._notes()], ["API Error: down"])
+        self.assertEqual(list(inbox.glob("*.json")), [])
+        self.assertIsNotNone(self.conn.execute("SELECT 1 FROM links WHERE ref='T-1'").fetchone())
+
+    def test_provider_rows_record_notes(self):
+        config = {"providers": [{"name": "fake", "command": ["echo"]}]}
+        fake_result = mock.Mock(returncode=0, stdout=json.dumps([
+            {"session": "claude:s1", "notes": [
+                {"kind": "update", "text": "CI went red on main"},
+                {"kind": "bogus", "text": "skipped"},
+            ]},
+            {"session": "claude:s1", "notes": "not-a-list"},
+        ]).encode())
+        with mock.patch("agentboard.links.subprocess.run", return_value=fake_result):
+            links.run_providers(self.conn, config, self.NOW)
+        rows = [tuple(r) for r in self._notes()]
+        self.assertEqual(rows, [("claude", "s1", "update", "CI went red on main", "provider", 1)])
+
+    def test_provider_repeat_bumps_count(self):
+        config = {"providers": [{"name": "fake", "command": ["echo"]}]}
+        payload = json.dumps([
+            {"session": "claude:s1", "notes": [{"kind": "update", "text": "CI went red"}]},
+        ]).encode()
+        with mock.patch("agentboard.links.subprocess.run",
+                        return_value=mock.Mock(returncode=0, stdout=payload)):
+            links.run_providers(self.conn, config, self.NOW)
+            links.run_providers(self.conn, config, "2026-01-01T00:05:00.000000Z")
+        (row,) = self._notes()
+        self.assertEqual(row["count"], 2)
+
+
 class LinksDiagTests(AgentBoardTestCase):
     """refresh-links decisions land in agentboard.log."""
 

@@ -107,6 +107,67 @@ struct PopoverSectionsTests {
         #expect(oneUrgent.noticeIsEmphasized)
     }
 
+    @Test(arguments: ["review", "snoozed", "done"])
+    func hiddenNeedsYouNoteEmphasizesTheNotice(state: String) {
+        // The note's state effect is gone (released by a prompt, or snooze /
+        // done wins), but the request is unanswered: a query that hides the
+        // session must still say so.
+        let sessions = Fixtures.snapshot([
+            session("a", "running"),
+            Fixtures.session("b", state, extra: [
+                "title": "b",
+                "notes": [["id": 9, "kind": "needs_you", "text": "USER_ACTION: approve the plan",
+                           "ts": "2026-10-15T00:00:00Z", "last_ts": "2026-10-15T00:00:00Z"]],
+                "notes_count": 1,
+            ]),
+        ]).sessions
+        let sections = make(sessions, "state:running")
+        #expect(sections.hiddenCount == 1)
+        #expect(sections.hiddenNeedingAttention == 0)
+        #expect(sections.hiddenNeedsYouNotes == 1)
+        #expect(sections.hiddenNotice == "Filtered: 1 session hidden, 1 update needs you")
+        #expect(sections.noticeIsEmphasized)
+        // A query that keeps the note leaves the notice plain.
+        let kept = make(sessions, "approve")
+        #expect(kept.hiddenNeedsYouNotes == 0)
+        #expect(!kept.noticeIsEmphasized)
+    }
+
+    @Test(arguments: ["needs_you", "interrupted"])
+    func hiddenNeedsYouSessionIsNotCountedTwiceForItsNote(state: String) {
+        // The usual USER_ACTION case: the open note is what holds the
+        // session in needs_you, so hiding it is one request, not two.
+        let sessions = Fixtures.snapshot([
+            session("a", "running"),
+            Fixtures.session("b", state, extra: [
+                "title": "b",
+                "notes": [["id": 9, "kind": "needs_you", "text": "USER_ACTION: approve the plan",
+                           "ts": "2026-10-15T00:00:00Z", "last_ts": "2026-10-15T00:00:00Z"]],
+                "notes_count": 1,
+            ]),
+        ]).sessions
+        let sections = make(sessions, "state:running")
+        #expect(sections.hiddenNeedingAttention == 1)
+        #expect(sections.hiddenNeedsYouNotes == 0)
+        #expect(sections.hiddenNotice == "Filtered: 1 session hidden, 1 needs you")
+        #expect(sections.noticeIsEmphasized)
+    }
+
+    @Test func hiddenUpdateNoticeCombinesWithHiddenSessions() {
+        let urgentNote: [String: Any] = ["id": 1, "kind": "needs_you", "text": "USER_ACTION: x",
+                                         "ts": "2026-10-15T00:00:00Z", "last_ts": "2026-10-15T00:00:00Z"]
+        let sessions = Fixtures.snapshot([
+            session("a", "running"),
+            session("b", "needs_you"),
+            Fixtures.session("c", "review", extra: ["title": "c", "notes": [urgentNote, urgentNote.merging(["id": 2]) { $1 }]]),
+            // An update-kind note never counts.
+            Fixtures.session("d", "done", extra: ["title": "d", "notes": [urgentNote.merging(["id": 3, "kind": "update"]) { $1 }]]),
+        ]).sessions
+        let sections = make(sessions, "state:running")
+        #expect(sections.hiddenNotice == "Filtered: 3 sessions hidden, 1 needs you, 2 updates need you")
+        #expect(sections.noticeIsEmphasized)
+    }
+
     @Test func unconcludedExpandsOnlyWithMatchesWhileFiltering() {
         #expect(make(everyState, "state:unconcluded").expandsUnconcluded)
         #expect(!make(everyState, "state:review").expandsUnconcluded)
