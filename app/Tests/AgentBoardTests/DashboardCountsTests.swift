@@ -20,7 +20,8 @@ struct DashboardCountsTests {
     /// What the dashboard sidebar shows for these pickers and this query.
     private func badges(_ query: String, in sessions: [Session]? = nil,
                         tool: String = "all", project: String = "all") -> FilteredCounts {
-        FilteredCounts(SessionSearch(query).filter(sessions ?? self.sessions, tool: tool, project: project))
+        let search = SessionSearch(query)
+        return FilteredCounts(search.filter(sessions ?? self.sessions, tool: tool, project: project), query: search)
     }
 
     private func titles(_ query: String) -> [String] {
@@ -148,5 +149,90 @@ struct DashboardCountsTests {
     @Test func noMatch() {
         #expect(titles("zzzz").isEmpty)
         #expect(PopoverSections.make(from: sessions, query: SessionSearch("zzzz")).hasNoMatches)
+    }
+
+    // MARK: Notes total
+
+    @Test func notesTotalSumsNotesCountOverTheFilteredSessions() {
+        let sessions = Fixtures.snapshot([
+            Fixtures.session("a", "review", extra: ["title": "alpha", "notes_count": 3]),
+            Fixtures.session("b", "needs_you", extra: ["title": "beta", "notes_count": 2]),
+            Fixtures.session("c", "done", extra: ["title": "alpha two"]),
+        ]).sessions
+        #expect(badges("", in: sessions).counts.notes == 5)
+        #expect(badges("alpha", in: sessions).counts.notes == 3)
+        #expect(badges("zzzz", in: sessions).counts.notes == 0)
+    }
+
+    @Test(arguments: ["review", "snoozed", "done"])
+    func filtersHidingANeedsYouNoteWarn(state: String) {
+        let sessions = Fixtures.snapshot([
+            Fixtures.session("a", "running", extra: ["title": "alpha"]),
+            Fixtures.session("b", state, extra: [
+                "title": "beta",
+                "notes": [["id": 1, "kind": "needs_you", "text": "USER_ACTION: approve",
+                           "ts": "2026-10-15T00:00:00Z", "last_ts": "2026-10-15T00:00:00Z"],
+                          ["id": 2, "kind": "update", "text": "PR #3 merged",
+                           "ts": "2026-10-15T00:00:00Z", "last_ts": "2026-10-15T00:00:00Z"]],
+                "notes_count": 2,
+            ]),
+        ]).sessions
+        let all = badges("", in: sessions)
+        let filtered = badges("alpha", in: sessions)
+        #expect(filtered.hiddenNeedingAttention(from: all) == 0)
+        #expect(filtered.hiddenNeedsYouNotes(from: all) == 1)
+        #expect(FilteredCounts.hiddenAttentionNotice(0, notes: 1) == "Filters hide 1 update that needs you")
+        #expect(badges("beta", in: sessions).hiddenNeedsYouNotes(from: all) == 0)
+    }
+
+    @Test func siblingNoteQueryWarnsLikeThePopover() {
+        // The query keeps the session only through its update note, so its
+        // needs_you note is hidden on both surfaces, note by note.
+        let sessions = Fixtures.snapshot([
+            Fixtures.session("b", "review", extra: [
+                "title": "beta",
+                "notes": [["id": 1, "kind": "needs_you", "text": "USER_ACTION: approve",
+                           "ts": "2026-10-15T00:00:00Z", "last_ts": "2026-10-15T00:00:00Z"],
+                          ["id": 2, "kind": "update", "text": "PR #7 merged",
+                           "ts": "2026-10-15T00:00:00Z", "last_ts": "2026-10-15T00:00:00Z"]],
+                "notes_count": 2,
+            ]),
+        ]).sessions
+        let query = "PR #7 merged"
+        let dashboard = badges(query, in: sessions).hiddenNeedsYouNotes(from: badges("", in: sessions))
+        let popover = PopoverSections.make(from: sessions, query: SessionSearch(query)).hiddenNeedsYouNotes
+        #expect(dashboard == 1)
+        #expect(dashboard == popover)
+    }
+
+    @Test(arguments: ["needs_you", "interrupted"])
+    func hiddenNeedsYouSessionIsNotCountedTwiceForItsNote(state: String) {
+        // The note is what holds the session in needs_you: the warning
+        // names the session once, not the session and its note.
+        let sessions = Fixtures.snapshot([
+            Fixtures.session("a", "running", extra: ["title": "alpha"]),
+            Fixtures.session("b", state, extra: [
+                "title": "beta",
+                "notes": [["id": 1, "kind": "needs_you", "text": "USER_ACTION: approve",
+                           "ts": "2026-10-15T00:00:00Z", "last_ts": "2026-10-15T00:00:00Z"]],
+                "notes_count": 1,
+            ]),
+        ]).sessions
+        let all = badges("", in: sessions)
+        let filtered = badges("alpha", in: sessions)
+        #expect(filtered.hiddenNeedingAttention(from: all) == 1)
+        #expect(filtered.hiddenNeedsYouNotes(from: all) == 0)
+        #expect(FilteredCounts.hiddenAttentionNotice(1, notes: 0) == "Filters hide 1 session that needs you")
+    }
+
+    @Test func hiddenAttentionNoticeWordingWithUpdates() {
+        #expect(FilteredCounts.hiddenAttentionNotice(0, notes: 0) == nil)
+        #expect(FilteredCounts.hiddenAttentionNotice(0, notes: 3) == "Filters hide 3 updates that need you")
+        #expect(FilteredCounts.hiddenAttentionNotice(1, notes: 1) == "Filters hide 1 session and 1 update that need you")
+    }
+
+    @Test func fixtureNotesTotalMatchesTheSnapshot() {
+        #expect(badges("").counts.notes == Self.fixture.counts.notes)
+        #expect(Self.fixture.counts.notes > 0)
     }
 }

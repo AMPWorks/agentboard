@@ -70,6 +70,31 @@ struct SessionSearch: Sendable, Equatable {
         return true
     }
 
+    /// One note of `session` matches when the query matches the session
+    /// with only that note's text among its notes: a term may hit the
+    /// session's own fields or this note, never a sibling note's text. The
+    /// popover Updates feed filters note by note with this, so a query that
+    /// finds one note's PR number lists that note, not every note of its
+    /// session. The session's fields include `waitingReason` and
+    /// `lastAssistant`, which for a session raised by a note (or the Stop
+    /// that produced its newest note) repeat that note's wording, so a term
+    /// from them keeps every note of the session, as it keeps the session.
+    func matches(_ note: Note, in session: Session) -> Bool {
+        guard !terms.isEmpty else { return true }
+        var scoped = session
+        scoped.notes = [note]
+        return matches(scoped)
+    }
+
+    /// The query matches the session on its own fields, without any note
+    /// text, so every one of its notes (listed or not) matches too.
+    func matchesIgnoringNotes(_ session: Session) -> Bool {
+        guard !terms.isEmpty else { return true }
+        var bare = session
+        bare.notes = []
+        return matches(bare)
+    }
+
     /// Sessions that pass the dashboard's tool and project pickers (`"all"`
     /// disables a picker) and this query.
     func filter(_ sessions: [Session], tool: String = "all", project: String = "all") -> [Session] {
@@ -112,6 +137,9 @@ struct SessionSearch: Sendable, Equatable {
             parts.append(link.ref)
             parts.append(link.title ?? "")
             parts.append(link.state ?? "")
+        }
+        for note in session.notes {
+            parts.append(note.text)
         }
         return fold(parts.joined(separator: separator))
     }
@@ -222,11 +250,25 @@ struct FilteredCounts: Sendable, Equatable {
     /// Every counted session, including any in an unknown state.
     var total = 0
 
-    init(_ sessions: [Session]) {
+    /// Open `needs_you` notes among the listed notes of these sessions that
+    /// `query` matches note by note (the CLI lists at most 20 per session;
+    /// only listed notes carry a kind), as the popover's Updates feed does.
+    /// Sessions in Needs you or Interrupted are skipped: `needingAttention`
+    /// already counts them, so a hidden one is never reported twice.
+    var needsYouNotes = 0
+
+    /// `counts.notes` follows `UpdatesFeed.total` for `query` (the query the
+    /// sessions were filtered with), so a query that only hits one note's
+    /// text counts that note, as the popover's Updates header does.
+    init(_ sessions: [Session], query: SessionSearch = SessionSearch("")) {
         total = sessions.count
         for session in sessions {
             counts.increment(session.state)
+            if session.state != .needsYou && session.state != .interrupted {
+                needsYouNotes += session.notes.filter { $0.kind == .needsYou && query.matches($0, in: session) }.count
+            }
         }
+        counts.notes = UpdatesFeed.total(from: sessions, query: query)
     }
 
     func count(for state: SessionState) -> Int { counts.count(for: state) }
@@ -240,13 +282,26 @@ struct FilteredCounts: Sendable, Equatable {
         max(0, all.needingAttention - needingAttention)
     }
 
-    /// The dashboard sidebar's warning when filters hide sessions that need
-    /// the user, e.g. "Filters hide 2 sessions that need you". Nil for zero.
-    static func hiddenAttentionNotice(_ hidden: Int) -> String? {
-        guard hidden > 0 else { return nil }
-        return hidden == 1
-            ? "Filters hide 1 session that needs you"
-            : "Filters hide \(hidden) sessions that need you"
+    /// How many open `needs_you` notes are on sessions in `all` but not in
+    /// these counts. A `needs_you` note outlives its state effect (a newer
+    /// prompt releases it; snooze and done win over it), so a hidden session
+    /// in Review, Snoozed or Done can still hold an unanswered request.
+    func hiddenNeedsYouNotes(from all: FilteredCounts) -> Int {
+        max(0, all.needsYouNotes - needsYouNotes)
+    }
+
+    /// The dashboard sidebar's warning when filters hide sessions or updates
+    /// that need the user, e.g. "Filters hide 2 sessions that need you" or
+    /// "Filters hide 1 session and 2 updates that need you". Nil for zero.
+    static func hiddenAttentionNotice(_ hidden: Int, notes: Int = 0) -> String? {
+        let sessions = hidden == 1 ? "1 session" : "\(hidden) sessions"
+        let updates = notes == 1 ? "1 update" : "\(notes) updates"
+        switch (hidden > 0, notes > 0) {
+        case (false, false): return nil
+        case (true, false): return "Filters hide \(sessions) that need\(hidden == 1 ? "s" : "") you"
+        case (false, true): return "Filters hide \(updates) that need\(notes == 1 ? "s" : "") you"
+        case (true, true): return "Filters hide \(sessions) and \(updates) that need you"
+        }
     }
 }
 

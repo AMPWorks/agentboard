@@ -183,6 +183,41 @@ def last_turn_finished(conn, tool, session_id) -> bool:
     return not any(event in NEEDS_YOU_EVENT_NAMES for event in after_stop)
 
 
+NOTE_HEADLINE_CHARS = 160
+
+
+def note_headline(note) -> str:
+    """The waiting_reason a needs_you note shows: its precomputed headline
+    (the marker line), else its first non-empty line."""
+    headline = note.get("headline")
+    if not headline:
+        headline = ""
+        for line in (note.get("text") or "").strip().splitlines():
+            line = line.strip().strip("*").strip()
+            if line:
+                headline = line
+                break
+    return headline[:NOTE_HEADLINE_CHARS] or None
+
+
+def note_still_raises(note, last_prompt_at) -> bool:
+    """True unless a parent prompt came after the note's latest occurrence.
+    Compared as parsed datetimes, never as strings."""
+    def aware(value):
+        parsed = parse_ts(value)
+        if parsed is not None and parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    prompt_ts = aware(last_prompt_at)
+    if prompt_ts is None:
+        return True
+    note_ts = aware(note.get("last_ts"))
+    if note_ts is None:
+        return False
+    return not prompt_ts > note_ts
+
+
 def compute_state(
     session,
     triage,
@@ -192,6 +227,8 @@ def compute_state(
     registry_entry=None,
     notification_type=None,
     turn_finished=None,
+    open_needs_you_note=None,
+    last_prompt_at=None,
 ):
     """Compute (state, waiting_reason, auto_done, done_reason) for one session.
 
@@ -209,6 +246,14 @@ def compute_state(
     `done_reason` is one of "manual", "pr merged", "link done", "clean
     exit", or None; `auto_done` is True whenever done_reason is set and
     isn't "manual" -- i.e. the system decided it, not the user.
+
+    `open_needs_you_note` is the session's newest open (undismissed) note of
+    kind needs_you, a mapping with at least `last_ts` and `text` (and
+    optionally a precomputed `headline`), or None. `last_prompt_at` is the
+    ts of the session's latest parent UserPromptSubmit event, or None. The
+    note raises the session to needs_you only while no parent prompt is
+    newer than the note's last_ts: a human reply (or the next scheduled
+    tick) releases the state, and a re-emitted request re-raises it.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -245,6 +290,9 @@ def compute_state(
             return "needs_you", registry_entry.get("waitingFor"), False, None
     if needs_you:
         return "needs_you", waiting_reason, False, None
+
+    if open_needs_you_note and note_still_raises(open_needs_you_note, last_prompt_at):
+        return "needs_you", note_headline(open_needs_you_note), False, None
 
     is_activity = last_event in ACTIVITY_EVENTS
     last_event_at = parse_ts(session.get("last_event_at"))

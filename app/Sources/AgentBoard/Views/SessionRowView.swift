@@ -54,6 +54,9 @@ struct SessionRowView: View {
                             .background(.orange.opacity(0.2), in: Capsule())
                             .foregroundStyle(.orange)
                     }
+                    if session.notesCount > 0 {
+                        notesBadge
+                    }
                     if session.isAutoDone {
                         Text("auto")
                             .font(.caption2)
@@ -108,6 +111,21 @@ struct SessionRowView: View {
             return "\(session.project) · \(branch)"
         }
         return session.project
+    }
+
+    /// Open notes on this session; red when one of them needs the user.
+    private var notesBadge: some View {
+        let urgent = session.notes.contains { $0.kind == .needsYou }
+        let color: Color = urgent ? SessionColor.needsYou : .secondary
+        return Label("\(session.notesCount)", systemImage: "text.bubble")
+            .labelStyle(.titleAndIcon)
+            .font(.caption2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(color.opacity(0.15), in: Capsule())
+            .foregroundStyle(color)
+            .help(session.notesCount == 1 ? "1 open update" : "\(session.notesCount) open updates")
+            .accessibilityLabel(session.notesCount == 1 ? "1 open update" : "\(session.notesCount) open updates")
     }
 
     private var toolBadge: some View {

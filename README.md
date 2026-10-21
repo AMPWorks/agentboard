@@ -164,7 +164,7 @@ Override the whole data directory with the `AGENTBOARD_HOME` environment variabl
 do this, pointed at a throwaway temp directory — nothing in this project ever touches the real
 path above during a test run).
 
-The schema (see `core/agentboard/db.py`) has four tables:
+The schema (see `core/agentboard/db.py`) has these tables:
 
 - `events` — an append-only log of every hook event ever received, per `(tool, session_id)`.
 - `sessions` — one row per session: cwd, branch, title, prompts, last activity, liveness
@@ -173,6 +173,9 @@ The schema (see `core/agentboard/db.py`) has four tables:
 - `triage` — the user's own done/snoozed/open decision for a session.
 - `links` — PRs, tickets, or arbitrary URLs associated with a session, from whatever source
   reported them (see Links below).
+- `notes` — retained updates: the few things a session said that are worth keeping (see Updates
+  below), deduplicated per session with a repeat count, kept until dismissed. `notes_meta`
+  records which recorded events `notes --rebuild` has already replayed.
 
 Migrations are tracked with `PRAGMA user_version`; `db.connect()` applies any pending ones.
 
@@ -221,7 +224,7 @@ sessions. Each session is assigned exactly one `state`, in priority order:
 `done` → `snoozed` → `needs_you` → `interrupted` → `review` → `running` → `unconcluded`
 
 (see `core/agentboard/reconcile.py` for the exact rules — permission requests and failures mean
-`needs_you`; live activity means `running`; a dead process or stale activity means `interrupted`;
+`needs_you`, and so does an open `needs_you` note no newer prompt has answered (see Updates below); live activity means `running`; a dead process or stale activity means `interrupted`;
 a finished turn less than 24h old means `review`, older or never-concluded means `unconcluded`).
 By default the snapshot excludes sessions marked `interactive: false` (non-interactive `claude -p`
 / SDK runs, Codex `exec` runs) and `done` sessions older than 7 days; `--all` includes everything.
@@ -295,7 +298,8 @@ way:
 - A plain word searches the title, the first and last prompts, the last assistant message, the
   project, working directory and branch, the tool, the state (`needs_you` or `Needs you`), the
   waiting reason and status text, every link's kind, ref, title and state, the triage note, and
-  the session id. It does not search link URLs; use `pr:` or `link:` for those.
+  the session id, and the text of the session's open updates (notes). It does not search link
+  URLs; use `pr:` or `link:` for those.
 - A `field:value` word narrows the match to one place. The value can be quoted
   (`branch:"feat x"`, `state:"needs you"`).
 
@@ -386,6 +390,74 @@ these generic mechanisms, all handled in `core/agentboard/links.py`:
 A link with every `pr`-kind entry `MERGED`/`CLOSED`, or any link at all with `state: DONE`,
 marks the session `done` automatically.
 
+### Updates (retained notes)
+
+Sessions that run unattended print a final message every turn, and most of it is noise ("Quiet
+tick, nothing changed."). The few messages a human actually has to read (a request for you, a
+PR opened or merged, CI red, a plan ready, a repair, an API outage) are kept as **notes**: a
+durable, cross-session list shown as **Updates** in the popover and the session detail, until you
+dismiss them.
+
+The hook classifies each parent (non-subagent) `Stop` message with generic prose rules in
+`core/agentboard/notes.py`: a line starting with a marker (`USER_ACTION:` by default) is a
+`needs_you` note in any turn; in an *unattended* turn (its latest parent, non-subagent prompt
+starts with one of the configured prefixes, `# Autonomous loop` by default) a transient failure
+(`API Error`, `Request timed out`, ...) is an `error` note, idle and progress one-liners are
+dropped, and a milestone (an `owner/repo#N` or `PR #N`, merged, approved, CI red/green, pushed,
+opened, deployed, blocked, a URL, ...) or any message of 300+ characters is an `update` note. A
+repeat of an open note (same session, same kind, same first 200 characters once timestamps, clock
+times, durations and tick counts are ignored; errors compare their first line only) bumps its count
+(shown as `×N`) instead of adding a row; a repeat of a dismissed note starts a new one. Both knobs
+live in `config.json`, and those are the only ones:
+
+```json
+{"note_markers": ["USER_ACTION:"], "note_unattended_prefixes": ["# Autonomous loop"]}
+```
+
+Anything can also add a note directly:
+
+```
+agentboard note --kind needs_you|update|error --text T [--session TOOL:ID]
+agentboard notes [--session TOOL:ID] [--all] [--json]
+agentboard notes --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID]
+agentboard notes --rebuild [--days N] [--reset]
+```
+
+`note` resolves the session exactly like `agentboard link` and, like it, warns and exits 0 when
+it cannot. Inbox drop files and provider rows take the same shape in an optional `"notes"` key,
+`[{"kind": "update", "text": "..."}]`; an entry with another kind or an empty text is skipped.
+
+`notes --rebuild` replays the `Stop` messages already in the `events` table from before the notes
+table existed (`install.sh` runs it after its backfill step), and a second run imports nothing.
+`--rebuild --days N` imports only the last N days, but still marks the older events as replayed, so
+a later plain `--rebuild` skips them; only `--reset` revisits them. `--rebuild --reset` re-applies
+changed rules: it drops the open notes it made itself (never dismissed ones, never ones added by
+`note`, the inbox or a provider) and replays every recorded `Stop`, without reopening anything you
+dismissed. Transcript backfill does not record per-turn `Stop` events, so notes start with what the
+hook has recorded. `agentboard prune` drops dismissed notes older than its window, along with every
+note of a pruned session.
+
+**An open `needs_you` note puts its session in `needs_you`** (red icon, notification, Needs you
+section, the note's marker line as the waiting reason) until a newer prompt arrives in that
+session or you dismiss the note. Manual done and snooze still win, and a permission prompt's own
+reason wins over the note's. The note stays in Updates after a prompt releases the state; if the
+next turn repeats the request, the note's count goes up and the session is red again.
+
+In the popover, Updates sits above Needs you with a count and **Clear all**: each row shows the
+kind (red bubble for needs you, red triangle for an error), the project, the first line, `×N` and
+the time; a click focuses the owning session like a session row, the chevron expands the full text,
+and (x) dismisses it. The popover query filters it note by note: a note shows when the query
+matches its own text or its session's fields (never a sibling note's text; a session's waiting
+reason and last assistant message can repeat its newest note, so a term from them keeps all of its
+notes). When a query hides an open `needs_you` note on a session in Review, Snoozed or Done, the
+notice under the search field counts it in red ("1 update needs you"), and the dashboard sidebar
+warns the same way; a hidden session in Needs you or Interrupted is counted once, as a session. A
+session row shows a small badge with its number of open updates, the session detail lists them in
+full with a Dismiss button each, and the dashboard sidebar shows the total the filters keep,
+counted note by note like the popover's Updates header. Totals count all open notes
+(`notes_count`), not only the listed ones; the snapshot lists at most 20 per session, so a header
+shows "Updates (20 of 25)" when some are not listed.
+
 Terminal focus/resume support iTerm2 (`ITERM_SESSION_ID`) and Apple Terminal
 (`TERM_SESSION_ID`); for anything else, `agentboard focus`/`resume` just activates the app by
 `TERM_PROGRAM`.
@@ -407,6 +479,10 @@ agentboard paths [--json]
 agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
 agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state ...] [--title T] [--session TOOL:ID]
 agentboard status --text TEXT [--ttl MIN] [--session TOOL:ID]
+agentboard note --kind needs_you|update|error --text T [--session TOOL:ID]
+agentboard notes [--session TOOL:ID] [--all] [--json]
+agentboard notes --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID]
+agentboard notes --rebuild [--days N] [--reset] [--json]
 agentboard backfill [--days 30]
 agentboard refresh-links
 agentboard install-hooks [--claude] [--codex] [--dry-run]

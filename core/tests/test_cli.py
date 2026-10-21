@@ -59,13 +59,14 @@ class SnapshotTests(AgentBoardTestCase):
         snapshot = cli.build_snapshot(self.conn, include_all=True)
         self.assertIn("generated_at", snapshot)
         self.assertIn("counts", snapshot)
-        self.assertEqual(set(snapshot["counts"].keys()), set(cli.STATES))
+        self.assertEqual(set(snapshot["counts"].keys()), set(cli.STATES) | {"notes"})
         entry = snapshot["sessions"][0]
         for key in (
             "key", "tool", "session_id", "state", "waiting_reason", "title", "cwd",
             "project", "branch", "first_prompt", "last_prompt", "last_assistant",
             "started_at", "updated_at", "ended_at", "alive", "interactive",
             "can_focus", "resume_command", "status_text", "links", "triage",
+            "notes", "notes_count",
         ):
             self.assertIn(key, entry)
         self.assertEqual(entry["key"], "claude:s1")
@@ -174,6 +175,133 @@ class SnapshotTests(AgentBoardTestCase):
         by_key = {s["key"]: s for s in snapshot["sessions"]}
         self.assertEqual(by_key["claude:s1"]["status_text"], "working")
         self.assertIsNone(by_key["claude:s2"]["status_text"])
+
+
+class SnapshotNotesTests(AgentBoardTestCase):
+    def setUp(self):
+        super().setUp()
+        self.now = datetime.now(timezone.utc)
+
+    def stamp(self, minutes_ago):
+        return (self.now - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def session(self, session_id="s1", **overrides):
+        overrides.setdefault("updated_at", self.stamp(30))
+        overrides.setdefault("last_event_at", self.stamp(30))
+        insert_session(self.conn, session_id=session_id, **overrides)
+
+    def note(self, text, kind="needs_you", session_id="s1", minutes_ago=5):
+        from agentboard import notes
+
+        return notes.record_note(self.conn, "claude", session_id, kind, text, "cli",
+                                 self.stamp(minutes_ago))
+
+    def prompt(self, minutes_ago, session_id="s1", agent_id=None):
+        _insert_event(self.conn, "UserPromptSubmit", "hi", session_id=session_id,
+                      ts=self.stamp(minutes_ago), agent_id=agent_id)
+
+    def entry(self, include_all=True, key="claude:s1"):
+        snapshot = cli.build_snapshot(self.conn, include_all=include_all, now=self.now)
+        return snapshot, next((e for e in snapshot["sessions"] if e["key"] == key), None)
+
+    def test_open_needs_you_note_raises_state_with_first_line(self):
+        self.session()
+        self.note("USER_ACTION: [proj] approve the plan\nextra detail")
+        _, entry = self.entry()
+        self.assertEqual(entry["state"], "needs_you")
+        self.assertEqual(entry["waiting_reason"], "USER_ACTION: [proj] approve the plan")
+        self.assertEqual(entry["notes_count"], 1)
+        self.assertEqual(
+            set(entry["notes"][0]), {"id", "kind", "text", "ts", "last_ts", "count", "source"}
+        )
+
+    def test_marker_line_is_the_waiting_reason_even_when_not_first(self):
+        self.session()
+        self.note("Tick summary.\nUSER_ACTION: approve the plan")
+        self.assertEqual(self.entry()[1]["waiting_reason"], "USER_ACTION: approve the plan")
+
+    def test_hook_needs_you_reason_wins_over_note(self):
+        self.session(last_event="PermissionRequest", waiting_reason="Bash")
+        self.note("USER_ACTION: approve")
+        _, entry = self.entry()
+        self.assertEqual((entry["state"], entry["waiting_reason"]), ("needs_you", "Bash"))
+
+    def test_newer_parent_prompt_releases_older_does_not(self):
+        self.session()
+        self.note("USER_ACTION: approve", minutes_ago=5)
+        self.prompt(minutes_ago=10)
+        self.assertEqual(self.entry()[1]["state"], "needs_you")
+        self.prompt(minutes_ago=1)
+        _, entry = self.entry()
+        self.assertEqual(entry["state"], "review")
+        self.assertEqual(entry["notes_count"], 1, "a released note stays listed")
+
+    def test_subagent_prompt_does_not_release(self):
+        self.session()
+        self.note("USER_ACTION: approve", minutes_ago=5)
+        self.prompt(minutes_ago=1, agent_id="sub-1")
+        self.assertEqual(self.entry()[1]["state"], "needs_you")
+
+    def test_dismissed_note_returns_prior_state(self):
+        self.session()
+        note_id = self.note("USER_ACTION: approve")
+        self.conn.execute("UPDATE notes SET dismissed_at=? WHERE id=?", (self.stamp(0), note_id))
+        _, entry = self.entry()
+        self.assertEqual(entry["state"], "review")
+        self.assertEqual((entry["notes"], entry["notes_count"]), ([], 0))
+
+    def test_update_note_does_not_raise(self):
+        self.session()
+        self.note("PR #4 merged", kind="update")
+        self.assertEqual(self.entry()[1]["state"], "review")
+
+    def test_snooze_wins(self):
+        self.session()
+        self.note("USER_ACTION: approve")
+        self.conn.execute(
+            "INSERT INTO triage(tool, session_id, status, until, note, updated_at) "
+            "VALUES ('claude','s1','snoozed',?,NULL,?)",
+            ((self.now + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), self.stamp(0)),
+        )
+        self.assertEqual(self.entry()[1]["state"], "snoozed")
+
+    def test_cap_20_newest_first_with_uncapped_count(self):
+        self.session()
+        for i in range(25):
+            self.note(f"PR #{i} merged", kind="update", minutes_ago=100 - i)
+        snapshot, entry = self.entry()
+        self.assertEqual(len(entry["notes"]), cli.SNAPSHOT_NOTES_PER_SESSION)
+        self.assertEqual(entry["notes_count"], 25)
+        self.assertEqual(entry["notes"][0]["text"], "PR #24 merged")
+        self.assertEqual(entry["notes"][-1]["text"], "PR #5 merged")
+        self.assertEqual(snapshot["counts"]["notes"], 25)
+
+    def test_ordering_follows_last_ts_not_insertion(self):
+        self.session()
+        self.note("PR #1 merged", kind="update", minutes_ago=50)
+        self.note("PR #2 merged", kind="update", minutes_ago=40)
+        self.note("PR #1 merged", kind="update", minutes_ago=2)  # repeat bumps last_ts
+        _, entry = self.entry()
+        self.assertEqual([n["text"] for n in entry["notes"]], ["PR #1 merged", "PR #2 merged"])
+        self.assertEqual(entry["notes"][0]["count"], 2)
+
+    def test_counts_notes_only_cover_emitted_sessions(self):
+        self.session("shown")
+        self.session("hidden", interactive=0)
+        self.note("PR #1 merged", kind="update", session_id="shown")
+        self.note("PR #2 merged", kind="update", session_id="hidden")
+        self.note("PR #3 merged", kind="update", session_id="hidden")
+        snapshot = cli.build_snapshot(self.conn, include_all=False, now=self.now)
+        self.assertEqual([e["key"] for e in snapshot["sessions"]], ["claude:shown"])
+        self.assertEqual(snapshot["counts"]["notes"], 1)
+        snapshot_all = cli.build_snapshot(self.conn, include_all=True, now=self.now)
+        self.assertEqual(snapshot_all["counts"]["notes"], 3)
+
+    def test_session_without_notes_has_empty_list(self):
+        self.session()
+        snapshot, entry = self.entry()
+        self.assertEqual((entry["notes"], entry["notes_count"]), ([], 0))
+        self.assertEqual(snapshot["counts"]["notes"], 0)
 
 
 class MarkTests(AgentBoardTestCase):
@@ -313,6 +441,305 @@ class LinkStatusCommandTests(AgentBoardTestCase):
                 with mock.patch("agentboard.links.resolve_session_from_ancestors", return_value=None):
                     result = cli.cmd_link(args)
         self.assertEqual(result, 0)
+
+
+def _no_auto_resolution():
+    """Context that disables env/ancestor session resolution so a test
+    resolves only by the patched cwd."""
+    stack = contextlib.ExitStack()
+    stack.enter_context(mock.patch("agentboard.links.resolve_session_from_env", return_value=None))
+    stack.enter_context(
+        mock.patch("agentboard.links.resolve_session_from_ancestors", return_value=None)
+    )
+    return stack
+
+
+def _run_cmd(argv):
+    args = cli.build_parser().parse_args(argv)
+    out = io.StringIO()
+    err = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = args.func(args)
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _insert_event(conn, event, text=None, session_id="s1", tool="claude", ts=None,
+                  agent_id=None):
+    ts = ts or "2026-06-15T10:00:00.000000Z"
+    cur = conn.execute(
+        "INSERT INTO events(ts, tool, session_id, event, agent_id, text) VALUES (?,?,?,?,?,?)",
+        (ts, tool, session_id, event, agent_id, text),
+    )
+    return cur.lastrowid
+
+
+def _set_hook_from(conn, value=None):
+    """Simulate migration 5 running over the events inserted so far."""
+    if value is None:
+        value = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+    conn.execute("UPDATE notes_meta SET value=? WHERE key='hook_from'", (value,))
+
+
+def _notes_rows(conn, where="1=1"):
+    return conn.execute(f"SELECT * FROM notes WHERE {where} ORDER BY id").fetchall()
+
+
+TICK = "# Autonomous loop tick (dynamic pacing)"
+MILESTONE = "PR #23 is merged as 61cffa88 on main; the task is now in Completed."
+
+
+class NoteCommandTests(AgentBoardTestCase):
+    def test_note_resolves_session_like_link(self):
+        insert_session(self.conn, session_id="s1", cwd="/tmp/proj")
+        with mock.patch("agentboard.links.os.getcwd", return_value="/tmp/proj"), _no_auto_resolution():
+            rc, out, _ = _run_cmd(["note", "--kind", "needs_you", "--text", "approve the plan"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        (row,) = _notes_rows(self.conn)
+        self.assertEqual((row["tool"], row["session_id"]), ("claude", "s1"))
+        self.assertEqual(row["kind"], "needs_you")
+        self.assertEqual(row["source"], "cli")
+        self.assertIsNone(row["event_id"])
+
+    def test_note_explicit_session(self):
+        rc, _, _ = _run_cmd(["note", "--kind", "update", "--text", "PR #4 merged",
+                             "--session", "codex:abc"])
+        self.assertEqual(rc, 0)
+        (row,) = _notes_rows(self.conn)
+        self.assertEqual((row["tool"], row["session_id"]), ("codex", "abc"))
+
+    def test_note_unresolved_warns_and_exits_zero(self):
+        with mock.patch("agentboard.links.os.getcwd", return_value="/no/such/dir"), _no_auto_resolution():
+            rc, out, err = _run_cmd(["note", "--kind", "update", "--text", "x"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertIn("could not resolve a session", err)
+        self.assertEqual(_notes_rows(self.conn), [])
+
+    def test_note_empty_text_is_an_error(self):
+        rc, _, err = _run_cmd(["note", "--kind", "update", "--text", "  ", "--session", "claude:s1"])
+        self.assertEqual(rc, 1)
+        self.assertIn("--text is empty", err)
+
+    def test_note_kind_is_validated(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["note", "--kind", "chatter", "--text", "x"])
+
+    def test_note_flags_do_not_abbreviate(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["note", "--kind", "update", "--te", "x"])
+
+    def test_repeat_cli_note_bumps_count(self):
+        for _ in range(2):
+            _run_cmd(["note", "--kind", "update", "--text", "PR #4 merged", "--session", "claude:s1"])
+        (row,) = _notes_rows(self.conn)
+        self.assertEqual(row["count"], 2)
+
+
+class NotesCommandTests(AgentBoardTestCase):
+    def _add(self, text, session="claude:s1", kind="update"):
+        _run_cmd(["note", "--kind", kind, "--text", text, "--session", session])
+
+    def test_notes_json_shape(self):
+        self._add("USER_ACTION: approve", kind="needs_you")
+        rc, out, _ = _run_cmd(["notes", "--json"])
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        (note,) = data["notes"]
+        self.assertEqual(
+            set(note),
+            {"id", "key", "tool", "session_id", "kind", "text", "ts", "last_ts", "count",
+             "source", "dismissed_at"},
+        )
+        self.assertEqual(note["key"], "claude:s1")
+        self.assertEqual(note["kind"], "needs_you")
+        self.assertIsNone(note["dismissed_at"])
+
+    def test_notes_empty_json(self):
+        rc, out, _ = _run_cmd(["notes", "--json"])
+        self.assertEqual((rc, json.loads(out)), (0, {"notes": []}))
+
+    def test_notes_newest_first_and_session_filter(self):
+        self._add("first", session="claude:a")
+        self._add("second", session="claude:b")
+        data = json.loads(_run_cmd(["notes", "--json"])[1])
+        self.assertEqual([n["text"] for n in data["notes"]], ["second", "first"])
+        data = json.loads(_run_cmd(["notes", "--json", "--session", "claude:a"])[1])
+        self.assertEqual([n["text"] for n in data["notes"]], ["first"])
+
+    def test_dismiss_hides_note_unless_all(self):
+        self._add("one")
+        self._add("two")
+        ids = [n["id"] for n in json.loads(_run_cmd(["notes", "--json"])[1])["notes"]]
+        rc, out, _ = _run_cmd(["notes", "--dismiss", str(ids[0])])
+        self.assertEqual(rc, 0)
+        self.assertIn("dismissed 1 note(s)", out)
+        remaining = json.loads(_run_cmd(["notes", "--json"])[1])["notes"]
+        self.assertEqual([n["id"] for n in remaining], [ids[1]])
+        everything = json.loads(_run_cmd(["notes", "--json", "--all"])[1])["notes"]
+        self.assertEqual(len(everything), 2)
+        self.assertIsNotNone(
+            next(n for n in everything if n["id"] == ids[0])["dismissed_at"]
+        )
+
+    def test_dismiss_unknown_or_already_dismissed_counts_zero(self):
+        self._add("one")
+        note_id = json.loads(_run_cmd(["notes", "--json"])[1])["notes"][0]["id"]
+        _run_cmd(["notes", "--dismiss", str(note_id)])
+        rc, out, _ = _run_cmd(["notes", "--dismiss", str(note_id), "999", "--json"])
+        self.assertEqual((rc, json.loads(out)), (0, {"dismissed": 0}))
+
+    def test_dismiss_all_scoped_to_session(self):
+        self._add("a1", session="claude:a")
+        self._add("a2", session="claude:a")
+        self._add("b1", session="claude:b")
+        rc, out, _ = _run_cmd(["notes", "--dismiss-all", "--session", "claude:a"])
+        self.assertIn("dismissed 2 note(s)", out)
+        remaining = json.loads(_run_cmd(["notes", "--json"])[1])["notes"]
+        self.assertEqual([n["text"] for n in remaining], ["b1"])
+        _run_cmd(["notes", "--dismiss-all"])
+        self.assertEqual(json.loads(_run_cmd(["notes", "--json"])[1])["notes"], [])
+
+    def test_dismissed_note_recurs_as_new_row(self):
+        self._add("PR #4 merged")
+        _run_cmd(["notes", "--dismiss-all"])
+        self._add("PR #4 merged")
+        rows = _notes_rows(self.conn)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["count"], 1)
+
+    def test_days_without_rebuild_is_an_error(self):
+        rc, _, err = _run_cmd(["notes", "--days", "3"])
+        self.assertEqual(rc, 2)
+        self.assertIn("need --rebuild", err)
+
+    def test_dismiss_and_rebuild_are_exclusive(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["notes", "--dismiss", "1", "--rebuild"])
+
+    def test_text_listing(self):
+        self._add("PR #4 merged\nmore detail")
+        self._add("PR #4 merged\nmore detail")
+        rc, out, _ = _run_cmd(["notes"])
+        self.assertEqual(rc, 0)
+        self.assertIn("claude:s1", out)
+        self.assertIn("x2", out)
+        self.assertIn("PR #4 merged", out)
+        self.assertNotIn("more detail", out)
+
+
+class NotesRebuildTests(AgentBoardTestCase):
+    def _historic_corpus(self):
+        _insert_event(self.conn, "UserPromptSubmit", TICK, ts="2026-06-15T09:00:00.000000Z")
+        _insert_event(self.conn, "Stop", "USER_ACTION: approve the plan",
+                      ts="2026-06-15T09:01:00.000000Z")
+        _insert_event(self.conn, "UserPromptSubmit", TICK, ts="2026-06-15T09:10:00.000000Z")
+        _insert_event(self.conn, "Stop", "Quiet tick, backoff window, nothing changed.",
+                      ts="2026-06-15T09:11:00.000000Z")
+        _insert_event(self.conn, "UserPromptSubmit", TICK, ts="2026-06-15T09:20:00.000000Z")
+        _insert_event(self.conn, "Stop", "USER_ACTION: approve the plan",
+                      ts="2026-06-15T09:21:00.000000Z")
+        _insert_event(self.conn, "Stop", MILESTONE, ts="2026-06-15T09:22:00.000000Z")
+        # A subagent Stop and an attended milestone never become notes.
+        _insert_event(self.conn, "Stop", "USER_ACTION: sub", agent_id="a1",
+                      ts="2026-06-15T09:23:00.000000Z")
+        _insert_event(self.conn, "UserPromptSubmit", "please merge it", session_id="s2",
+                      ts="2026-06-15T09:30:00.000000Z")
+        _insert_event(self.conn, "Stop", MILESTONE, session_id="s2",
+                      ts="2026-06-15T09:31:00.000000Z")
+        _set_hook_from(self.conn)
+
+    def _counts(self):
+        return {(r["session_id"], r["kind"]): r["count"] for r in _notes_rows(self.conn)}
+
+    def test_rebuild_imports_historic_stop_events(self):
+        self._historic_corpus()
+        rc, out, _ = _run_cmd(["notes", "--rebuild"])
+        self.assertEqual(rc, 0)
+        self.assertIn("recorded=3", out)
+        self.assertEqual(self._counts(), {("s1", "needs_you"): 2, ("s1", "update"): 1})
+        needs_you = _notes_rows(self.conn, "kind='needs_you'")[0]
+        self.assertEqual(needs_you["source"], "backfill")
+        self.assertEqual(needs_you["ts"], "2026-06-15T09:01:00.000000Z")
+        self.assertEqual(needs_you["last_ts"], "2026-06-15T09:21:00.000000Z")
+        self.assertEqual((needs_you["event_id"], needs_you["last_event_id"]), (2, 6))
+
+    def test_rebuild_twice_leaves_counts_unchanged(self):
+        self._historic_corpus()
+        _run_cmd(["notes", "--rebuild"])
+        first = self._counts()
+        rc, out, _ = _run_cmd(["notes", "--rebuild"])
+        self.assertIn("recorded=0", out)
+        self.assertEqual(self._counts(), first)
+
+    def test_hook_written_note_does_not_block_older_events(self):
+        self._historic_corpus()
+        # The hook classifies an event above hook_from first.
+        with mock.patch("agentboard.hook.subprocess.run") as run, \
+             mock.patch("agentboard.hook.subprocess.Popen"):
+            run.return_value = mock.Mock(returncode=0, stdout="")
+            hook.process_payload(self.conn, "claude", {
+                "session_id": "s1", "cwd": "/tmp", "hook_event_name": "Stop",
+                "last_assistant_message": "USER_ACTION: approve the plan",
+            })
+        (hook_note,) = _notes_rows(self.conn)
+        self.assertGreater(hook_note["event_id"], 10)
+        _run_cmd(["notes", "--rebuild"])
+        note = _notes_rows(self.conn, "kind='needs_you'")[0]
+        self.assertEqual(note["count"], 3)
+        self.assertEqual(note["event_id"], 2)
+        self.assertEqual(note["last_event_id"], hook_note["event_id"])
+        # Replaying the older events never moved last_ts backwards.
+        self.assertEqual(note["last_ts"], hook_note["last_ts"])
+
+    def test_reset_keeps_dismissed_and_cli_notes_and_does_not_reopen(self):
+        self._historic_corpus()
+        _run_cmd(["notes", "--rebuild"])
+        _run_cmd(["note", "--kind", "update", "--text", "manual note", "--session", "claude:s1"])
+        needs_you_id = _notes_rows(self.conn, "kind='needs_you'")[0]["id"]
+        _run_cmd(["notes", "--dismiss", str(needs_you_id)])
+        rc, out, _ = _run_cmd(["notes", "--rebuild", "--reset"])
+        self.assertEqual(rc, 0)
+        self.assertIn("deleted=1", out)
+        self.assertIn("skipped_dismissed=2", out)
+        rows = _notes_rows(self.conn)
+        open_rows = [r for r in rows if r["dismissed_at"] is None]
+        self.assertEqual(sorted(r["text"] for r in open_rows), sorted([MILESTONE, "manual note"]))
+        dismissed = [r for r in rows if r["dismissed_at"] is not None]
+        self.assertEqual([r["id"] for r in dismissed], [needs_you_id])
+        # A second reset is stable.
+        _run_cmd(["notes", "--rebuild", "--reset"])
+        self.assertEqual(len([r for r in _notes_rows(self.conn) if r["dismissed_at"] is None]), 2)
+
+    def test_reset_then_plain_rebuild_is_noop(self):
+        self._historic_corpus()
+        _run_cmd(["notes", "--rebuild", "--reset"])
+        before = self._counts()
+        rc, out, _ = _run_cmd(["notes", "--rebuild"])
+        self.assertIn("recorded=0", out)
+        self.assertEqual(self._counts(), before)
+
+    def test_rebuild_days_narrows_window(self):
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        recent = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        _insert_event(self.conn, "Stop", "USER_ACTION: old request", ts=old)
+        _insert_event(self.conn, "Stop", "USER_ACTION: new request", ts=recent)
+        _set_hook_from(self.conn)
+        _run_cmd(["notes", "--rebuild", "--days", "3"])
+        self.assertEqual([r["text"] for r in _notes_rows(self.conn)], ["USER_ACTION: new request"])
+
+    def test_rebuild_json_stats(self):
+        self._historic_corpus()
+        rc, out, _ = _run_cmd(["notes", "--rebuild", "--json"])
+        stats = json.loads(out)
+        self.assertEqual(stats["recorded"], 3)
+        self.assertEqual(stats["upper"], 10)
+
+    def test_rebuild_on_empty_db(self):
+        rc, out, _ = _run_cmd(["notes", "--rebuild"])
+        self.assertEqual(rc, 0)
+        self.assertIn("recorded=0", out)
 
 
 class InstallHooksTests(AgentBoardTestCase):
@@ -2466,6 +2893,30 @@ class PruneTests(AgentBoardTestCase):
         self.assertIsNotNone(
             self.conn.execute("SELECT 1 FROM sessions WHERE session_id='recent'").fetchone()
         )
+
+    def test_prune_removes_notes_of_pruned_sessions_and_old_dismissed_notes(self):
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(days=120)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        recent = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        insert_session(self.conn, session_id="old", updated_at=old)
+        insert_session(self.conn, session_id="live", updated_at=recent)
+
+        def add(session_id, text, dismissed_at=None):
+            self.conn.execute(
+                "INSERT INTO notes(tool, session_id, ts, last_ts, kind, text, fingerprint, "
+                "source, dismissed_at) VALUES ('claude', ?, ?, ?, 'update', ?, ?, 'cli', ?)",
+                (session_id, recent, recent, text, f"update:{text}", dismissed_at),
+            )
+
+        add("old", "pruned with its session")
+        add("live", "open on a live session")
+        add("live", "recently dismissed", dismissed_at=recent)
+        add("live", "long dismissed", dismissed_at=old)
+        rc, out, _ = _run_cmd(["prune", "--days", "90"])
+        self.assertEqual(rc, 0)
+        self.assertIn("1 dismissed note(s)", out)
+        texts = sorted(r["text"] for r in self.conn.execute("SELECT text FROM notes"))
+        self.assertEqual(texts, ["open on a live session", "recently dismissed"])
 
 
 if __name__ == "__main__":

@@ -408,6 +408,60 @@ def spawn_codex_map(session_id, cwd, at) -> None:
     _diag("debug", "spawn", what="map-codex", session=f"codex:{session_id}", outcome="spawned")
 
 
+def _last_parent_prompt_text(conn, tool, session_id):
+    """Text of the session's newest parent (not subagent-tagged) prompt.
+
+    Read from events rather than sessions.last_prompt, which a subagent
+    UserPromptSubmit also overwrites, so the hook decides "unattended" from
+    the same prompt `notes --rebuild` tracks for the same Stop. Walks the
+    partial parent-events index backwards and stops at the first match.
+    """
+    found = conn.execute(
+        "SELECT text FROM events WHERE tool=? AND session_id=? AND agent_id IS NULL "
+        "AND event='UserPromptSubmit' AND text IS NOT NULL AND text <> '' "
+        "ORDER BY ts DESC, id DESC LIMIT 1",
+        (tool, session_id),
+    ).fetchone()
+    return found[0] if found else None
+
+
+def _record_stop_note(conn, tool, session_id, text, now, event_id) -> None:
+    """Classify a parent Stop's final message and keep it as a note.
+
+    Runs inside process_payload's transaction, under a savepoint, so a
+    classifier or note-write failure is logged and rolled back on its own
+    without losing the event. `notes` is imported here, only for parent
+    Stop events, so every other event adds no import or config read.
+    """
+    try:
+        conn.execute("SAVEPOINT stop_note")
+    except Exception as exc:
+        _diag("warn", "notes", session=f"{tool}:{session_id}", outcome="error",
+              exc=type(exc).__name__, msg=str(exc))
+        return
+    try:
+        from . import notes
+
+        config = notes.load_config(db.home_dir())
+        unattended = notes.is_unattended(
+            _last_parent_prompt_text(conn, tool, session_id),
+            notes.unattended_prefixes(config),
+        )
+        kind = notes.classify(text, markers=notes.markers(config), unattended=unattended)
+        if kind:
+            notes.record_note(conn, tool, session_id, kind, text, "stop", now, event_id=event_id)
+            _diag("debug", "note", session=f"{tool}:{session_id}", kind=kind, event_id=event_id)
+        conn.execute("RELEASE stop_note")
+    except Exception as exc:
+        try:
+            conn.execute("ROLLBACK TO stop_note")
+            conn.execute("RELEASE stop_note")
+        except Exception:
+            pass
+        _diag("warn", "notes", session=f"{tool}:{session_id}", outcome="error",
+              exc=type(exc).__name__, msg=str(exc))
+
+
 def process_payload(conn, tool: str, payload: dict) -> None:
     """Record one hook event. Raises on error; caller must swallow it."""
     event = payload.get("hook_event_name") or payload.get("event") or ""
@@ -441,7 +495,7 @@ def process_payload(conn, tool: str, payload: dict) -> None:
 
     conn.execute("BEGIN IMMEDIATE")
     try:
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO events(ts, tool, session_id, event, agent_id, "
             "notification_type, tool_name, text, extra) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
@@ -464,6 +518,9 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         ).fetchone()
 
         is_subagent_tagged = bool(agent_id) and event not in SUBAGENT_MARKER_EVENTS
+
+        if event == "Stop" and not is_subagent_tagged and text:
+            _record_stop_note(conn, tool, session_id, text, now, cursor.lastrowid)
 
         if event == "UserPromptSubmit" and not is_subagent_tagged:
             conn.execute(

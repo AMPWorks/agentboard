@@ -241,6 +241,57 @@ def clean_exit_session(tool="claude", end_reason="prompt_input_exit", todos_open
     return session
 
 
+class NeedsYouNoteTests(AgentBoardTestCase):
+    NOTE = {"last_ts": iso(NOW - timedelta(minutes=5)),
+            "text": "USER_ACTION: approve the plan\nmore detail"}
+
+    def state(self, session=None, triage=None, links=None, note=NOTE, prompt_at=None, alive=True):
+        return reconcile.compute_state(
+            session or base_session(last_event="Stop"), triage, links or [], now=NOW,
+            alive=alive, open_needs_you_note=note, last_prompt_at=prompt_at,
+        )
+
+    def test_open_note_raises_needs_you_with_first_line(self):
+        self.assertEqual(self.state(), ("needs_you", "USER_ACTION: approve the plan", False, None))
+
+    def test_headline_wins_over_first_line(self):
+        note = dict(self.NOTE, headline="USER_ACTION: deploy")
+        self.assertEqual(self.state(note=note)[1], "USER_ACTION: deploy")
+
+    def test_no_note_keeps_prior_state(self):
+        self.assertEqual(self.state(note=None)[0], "review")
+
+    def test_newer_prompt_releases(self):
+        later = iso(NOW - timedelta(minutes=1))
+        self.assertEqual(self.state(prompt_at=later)[0], "review")
+
+    def test_older_prompt_keeps_needs_you(self):
+        earlier = iso(NOW - timedelta(minutes=10))
+        self.assertEqual(self.state(prompt_at=earlier)[0], "needs_you")
+
+    def test_prompt_comparison_parses_mixed_precision_stamps(self):
+        # As strings "...:04Z" > "...:04.500000Z" though it is earlier.
+        note = dict(self.NOTE, last_ts="2026-06-15T11:00:04.500000Z")
+        self.assertEqual(self.state(note=note, prompt_at="2026-06-15T11:00:04Z")[0], "needs_you")
+        self.assertEqual(self.state(note=note, prompt_at="2026-06-15T11:00:05Z")[0], "review")
+
+    def test_hook_needs_you_reason_wins(self):
+        session = base_session(last_event="PermissionRequest", waiting_reason="Bash")
+        self.assertEqual(self.state(session=session)[:2], ("needs_you", "Bash"))
+
+    def test_snooze_wins(self):
+        triage = {"status": "snoozed", "until": iso(NOW + timedelta(hours=1))}
+        self.assertEqual(self.state(triage=triage)[0], "snoozed")
+
+    def test_manual_done_wins(self):
+        self.assertEqual(self.state(triage={"status": "done"})[0], "done")
+
+    def test_note_beats_running_and_links_done(self):
+        self.assertEqual(self.state(session=base_session(last_event="PreToolUse"))[0], "needs_you")
+        merged = [{"kind": "pr", "ref": "#1", "state": "MERGED"}]
+        self.assertEqual(self.state(links=merged)[0], "needs_you")
+
+
 class AutoDoneTests(AgentBoardTestCase):
     def test_all_conditions_hold_is_clean_exit_done(self):
         session = clean_exit_session()

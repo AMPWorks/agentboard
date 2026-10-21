@@ -677,6 +677,34 @@ class InstallScriptEndToEndTests(unittest.TestCase):
         self.assertIn("Run /hooks in Codex to trust the new hooks.", result.stdout)
         self.assertIn("hooks = true", result.stdout)
         self.assertIn("config.toml", result.stdout)
+        self.assertIn("rebuilt notes: scanned=0 recorded=0", result.stdout)
+
+    def test_dry_run_previews_the_notes_rebuild_after_backfill(self):
+        result = subprocess.run(
+            [str(INSTALL_SH), "--no-app", "--dry-run"],
+            capture_output=True, text=True, env=self.env, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        backfill = [line for line in lines if line.endswith(" backfill --days 30")]
+        self.assertEqual(len(backfill), 1, result.stdout)
+        installed_bin = backfill[0][len("would run: "):-len(" backfill --days 30")]
+        self.assertIn(f"would run: {installed_bin} notes --rebuild", lines)
+        self.assertLess(
+            lines.index(backfill[0]), lines.index(f"would run: {installed_bin} notes --rebuild")
+        )
+
+    def test_real_run_notes_rebuild_is_non_fatal(self):
+        source = INSTALL_SH.read_text()
+        rebuild_lines = [
+            line.strip() for line in source.splitlines()
+            if "notes --rebuild" in line and "would run" not in line
+            and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(
+            rebuild_lines,
+            ['"$INSTALLED_BIN" notes --rebuild || echo "warning: notes --rebuild failed" >&2'],
+        )
 
     def test_dry_run_leaves_everything_untouched(self):
         result = subprocess.run(

@@ -52,6 +52,8 @@ struct Counts: Codable, Sendable, Equatable {
     var unconcluded: Int = 0
     var snoozed: Int = 0
     var done: Int = 0
+    /// Open retained notes across the sessions the snapshot emits.
+    var notes: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case needsYou = "needs_you"
@@ -61,6 +63,98 @@ struct Counts: Codable, Sendable, Equatable {
         case unconcluded
         case snoozed
         case done
+        case notes
+    }
+
+    init() {}
+
+    /// Every key is optional: the synthesized decoder ignores property
+    /// defaults and would make a key added later (like `notes`) required,
+    /// so a snapshot from an older CLI or an old fixture file would fail to
+    /// decode and blank the whole app.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        needsYou = try c.decodeIfPresent(Int.self, forKey: .needsYou) ?? 0
+        interrupted = try c.decodeIfPresent(Int.self, forKey: .interrupted) ?? 0
+        running = try c.decodeIfPresent(Int.self, forKey: .running) ?? 0
+        review = try c.decodeIfPresent(Int.self, forKey: .review) ?? 0
+        unconcluded = try c.decodeIfPresent(Int.self, forKey: .unconcluded) ?? 0
+        snoozed = try c.decodeIfPresent(Int.self, forKey: .snoozed) ?? 0
+        done = try c.decodeIfPresent(Int.self, forKey: .done) ?? 0
+        notes = try c.decodeIfPresent(Int.self, forKey: .notes) ?? 0
+    }
+}
+
+/// A retained note: one of the few things a session said that is worth
+/// keeping (a request for the user, a milestone, an outage), deduplicated
+/// with a repeat count. See `agentboard notes`.
+struct Note: Codable, Sendable, Identifiable, Equatable, Hashable {
+    enum Kind: String, Codable, Sendable {
+        case needsYou = "needs_you"
+        case update
+        case error
+        case unknown
+
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Kind(rawValue: raw) ?? .unknown
+        }
+    }
+
+    var id: Int
+    var kind: Kind
+    var text: String
+    var ts: String
+    var lastTs: String
+    var count: Int
+    var source: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, text, ts
+        case lastTs = "last_ts"
+        case count, source
+    }
+
+    init(id: Int, kind: Kind, text: String, ts: String, lastTs: String, count: Int = 1, source: String = "cli") {
+        self.id = id
+        self.kind = kind
+        self.text = text
+        self.ts = ts
+        self.lastTs = lastTs
+        self.count = count
+        self.source = source
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        kind = try c.decodeIfPresent(Kind.self, forKey: .kind) ?? .unknown
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        ts = try c.decodeIfPresent(String.self, forKey: .ts) ?? ""
+        lastTs = try c.decodeIfPresent(String.self, forKey: .lastTs) ?? ts
+        count = try c.decodeIfPresent(Int.self, forKey: .count) ?? 1
+        source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
+    }
+
+    var lastDate: Date? { ISO8601DateParsing.date(from: lastTs) }
+
+    /// The first non-empty line, without surrounding markdown emphasis.
+    var firstLine: String {
+        for line in text.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "*"))
+                .trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
+    /// More than the first line to show (the row can expand). Counts
+    /// non-empty lines, so a single bold line (`**PR #9 merged**`, which
+    /// `firstLine` shows without its `**`) has nothing more to show.
+    var hasMore: Bool {
+        text.split(whereSeparator: \.isNewline)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count > 1
     }
 }
 
@@ -117,6 +211,10 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     var triage: Triage
     var autoDone: Bool?
     var doneReason: String?
+    /// Open notes, newest first (the CLI caps the list at 20).
+    var notes: [Note] = []
+    /// Open notes, uncapped.
+    var notesCount: Int = 0
 
     var id: String { key }
 
@@ -139,6 +237,8 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         case links, triage
         case autoDone = "auto_done"
         case doneReason = "done_reason"
+        case notes
+        case notesCount = "notes_count"
     }
 
     /// The CLI emits `null` for cwd/project/resume_command when a session's
@@ -175,9 +275,14 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
             ?? Triage(status: "open", until: nil, note: nil)
         autoDone = try c.decodeIfPresent(Bool.self, forKey: .autoDone)
         doneReason = try c.decodeIfPresent(String.self, forKey: .doneReason)
+        notes = try c.decodeIfPresent([Note].self, forKey: .notes) ?? []
+        notesCount = try c.decodeIfPresent(Int.self, forKey: .notesCount) ?? notes.count
     }
 
-    static func == (lhs: Session, rhs: Session) -> Bool { lhs.key == rhs.key && lhs.updatedAt == rhs.updatedAt && lhs.state == rhs.state }
+    static func == (lhs: Session, rhs: Session) -> Bool {
+        lhs.key == rhs.key && lhs.updatedAt == rhs.updatedAt && lhs.state == rhs.state
+            && lhs.notesCount == rhs.notesCount && lhs.notes == rhs.notes
+    }
     func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
     var updatedDate: Date? { ISO8601DateParsing.date(from: updatedAt) }

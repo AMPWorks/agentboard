@@ -128,6 +128,31 @@ struct AgentBoardCLI: Sendable {
         return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
+    /// `agentboard notes --dismiss ID...`: hides those notes from Updates
+    /// (and releases a needs_you a note was holding).
+    func dismissNotes(ids: [Int]) async throws {
+        guard !ids.isEmpty else { return }
+        if isFixtureMode {
+            log.notice("fixture mode: skipping notes --dismiss \(ids.map(String.init).joined(separator: " "), privacy: .public)")
+            return
+        }
+        guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
+        _ = try await runner.run(executable: executablePath, arguments: ["notes", "--dismiss"] + ids.map(String.init))
+    }
+
+    /// `agentboard notes --dismiss-all --session TOOL:ID`: every open note of one session.
+    func dismissNotes(tool: String, sessionId: String) async throws {
+        if isFixtureMode {
+            log.notice("fixture mode: skipping notes --dismiss-all \(tool, privacy: .public):\(sessionId, privacy: .public)")
+            return
+        }
+        guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
+        _ = try await runner.run(
+            executable: executablePath,
+            arguments: ["notes", "--dismiss-all", "--session", "\(tool):\(sessionId)"]
+        )
+    }
+
     func refreshLinks() async throws {
         if isFixtureMode { return }
         guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }

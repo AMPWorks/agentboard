@@ -22,13 +22,24 @@ struct MenuBarView: View {
         PopoverSections.make(from: store.snapshot.sessions, query: SessionSearch(store.popoverQuery))
     }
 
+    private var updates: [UpdatesFeed.Item] {
+        UpdatesFeed.make(from: store.snapshot.sessions, query: SessionSearch(store.popoverQuery))
+    }
+
     var body: some View {
         let sections = sections
+        let updates = updates
+        let updatesTotal = UpdatesFeed.total(from: store.snapshot.sessions,
+                                             query: SessionSearch(store.popoverQuery))
         VStack(spacing: 0) {
             searchBar(sections)
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
+                    // Above Needs you: what sessions said that is worth keeping.
+                    if !updates.isEmpty {
+                        UpdatesSectionView(items: updates, total: updatesTotal, store: store)
+                    }
                     ForEach(sections.sections) { section in
                         if section.kind == .unconcluded {
                             unconcludedSection(section, in: sections)
@@ -121,7 +132,8 @@ struct MenuBarView: View {
                 Text(notice)
                     .font(sections.noticeIsEmphasized ? .caption.bold() : .caption)
                     .foregroundStyle(sections.noticeIsEmphasized ? AnyShapeStyle(SessionColor.needsYou) : AnyShapeStyle(.secondary))
-                    .lineLimit(1)
+                    // Two lines, so a hidden-updates clause is never cut off.
+                    .lineLimit(2)
                     .padding(.horizontal, 4)
             }
         }

@@ -83,7 +83,14 @@ triage(tool, session_id, status TEXT /*done|snoozed|open*/, until TEXT, note TEX
        updated_at TEXT, PRIMARY KEY(tool, session_id))
 links(tool, session_id, kind TEXT /*pr|ticket*/, ref TEXT, url TEXT, state TEXT,
       title TEXT, checked_at TEXT, PRIMARY KEY(tool, session_id, kind, ref))
+notes(id INTEGER PK, tool TEXT, session_id TEXT, ts TEXT /*first seen*/, last_ts TEXT,
+      kind TEXT /*needs_you|update|error*/, text TEXT /*capped at 4000*/,
+      fingerprint TEXT /*kind + normalized first 200 chars*/, count INTEGER,
+      source TEXT /*stop|cli|inbox|provider|backfill*/, event_id INTEGER, last_event_id INTEGER,
+      dismissed_at TEXT)            -- UNIQUE(tool, session_id, fingerprint) WHERE dismissed_at IS NULL
+notes_meta(key TEXT PK, value INTEGER)   -- hook_from, rebuilt_through (events.id marks)
 ```
+(`notes`/`notes_meta` added after the original spec, migration 5.)
 Add a `schema_version` pragma (user_version) and simple migrations.
 
 ## State derivation (`reconcile.py`)
@@ -97,6 +104,11 @@ Per session, compute `state` in priority order:
 3. `needs_you` — last non-subagent event is PermissionRequest, or Notification with type in
    {permission_prompt, elicitation_dialog, agent_needs_input}, or StopFailure, and no later
    activity event. `waiting_reason` = tool_name / notification message / error.
+   (Added after the original spec.) Also `needs_you` when the session has an open (undismissed)
+   note of kind `needs_you` and no parent UserPromptSubmit is newer than the note's `last_ts`
+   (compared as parsed times); `waiting_reason` = the note's marker line, else its first line.
+   Checked after manual done, snooze, the hook-derived needs_you above and the registry
+   fallback, and before the activity checks; a hook-derived reason wins over the note's.
 4. `running` — last event is an activity event (UserPromptSubmit, Pre/PostToolUse, Subagent*,
    PreCompact/PostCompact) AND process alive (or no pid known and last event < 10 min old).
 5. `interrupted` — would be running but process dead or activity stale > 30 min. Shown with
@@ -179,6 +191,10 @@ agentboard hook --tool claude|codex          (stdin payload)
 agentboard snapshot [--json] [--all]         JSON to stdout (contract below); text table w/o --json
 agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
 agentboard backfill [--days 30]
+agentboard note --kind needs_you|update|error --text T [--session TOOL:ID]
+agentboard notes [--session TOOL:ID] [--all] [--json]          list open (or all) notes
+agentboard notes --dismiss ID... | --dismiss-all [--session TOOL:ID]
+agentboard notes --rebuild [--days N] [--reset] [--json]       replay recorded Stop events
 agentboard refresh-links
 agentboard install-hooks [--claude] [--codex] [--dry-run]
 agentboard uninstall-hooks [--claude] [--codex]
@@ -214,7 +230,7 @@ then select the tab/window and activate iTerm. Exit non-zero with message if not
 {
   "generated_at": "ISO8601",
   "counts": {"needs_you": 0, "interrupted": 0, "running": 0, "review": 0,
-             "unconcluded": 0, "snoozed": 0, "done": 0},
+             "unconcluded": 0, "snoozed": 0, "done": 0, "notes": 0},
   "sessions": [
     {
       "key": "claude:<session_id>",
@@ -232,7 +248,10 @@ then select the tab/window and activate iTerm. Exit non-zero with message if not
       "can_focus": true,
       "resume_command": "cd ... && claude --resume ...",
       "links": [{"kind": "pr|ticket", "ref": "ABC-123|#26", "url": "...", "state": "OPEN|MERGED|CLOSED|null", "title": "..."}],
-      "triage": {"status": "open|done|snoozed", "until": "ISO|null", "note": "string|null"}
+      "triage": {"status": "open|done|snoozed", "until": "ISO|null", "note": "string|null"},
+      "notes": [{"id": 1, "kind": "needs_you|update|error", "text": "...", "ts": "ISO",
+                 "last_ts": "ISO", "count": 1, "source": "stop|cli|inbox|provider|backfill"}],
+      "notes_count": 1
     }
   ]
 }
@@ -240,6 +259,17 @@ then select the tab/window and activate iTerm. Exit non-zero with message if not
 Sorted: state priority (needs_you, interrupted, review, running, unconcluded, snoozed, done),
 then updated_at desc. Default excludes done older than 7 days and non-interactive sessions;
 `--all` includes everything. Must run in < 500 ms with a few thousand sessions.
+(Added after the original spec.) `notes` lists a session's open notes, newest `last_ts` first,
+capped at 20; `notes_count` is the uncapped open count; `counts.notes` sums `notes_count` over
+the sessions this snapshot emits. Older CLIs omit all three; the app defaults them to empty/0.
+
+Notes (`notes.py`, added after the original spec): the hook classifies each parent Stop message
+inside its transaction (`needs_you` for a line starting with a `config.json` `note_markers`
+entry, default `USER_ACTION:`, in any turn; `update`/`error` only in a turn whose latest parent
+(non-subagent) prompt starts with a `note_unattended_prefixes` entry, default `# Autonomous
+loop`); a failure there never drops the event. A repeat of an open note bumps `count`/`last_ts`; a repeat of a dismissed one
+is a new row. `notes --rebuild` replays events at or below the `hook_from` mark recorded by the
+migration; inbox drops and provider rows accept an optional `"notes": [{"kind", "text"}]`.
 
 ## Mac app (SwiftUI, `app/`)
 
@@ -257,7 +287,11 @@ then updated_at desc. Default excludes done older than 7 days and non-interactiv
   only matches with counts, Unconcluded opens if it has matches, Snoozed and Done sections are
   added, and a line reports how many sessions are hidden (emphasized if one needs you). The
   menu bar icon ignores the query. Each row: tool badge (C / X), title, project · branch,
-  relative time, waiting_reason.
+  relative time, waiting_reason, and a badge with the open-notes count.
+  (Added after the original spec.) An **Updates** section above Needs you lists every open note
+  of the (filtered) sessions newest first: kind glyph, project, first line, `×N`, relative time;
+  click focuses the owning session, a chevron expands the full text, (x) dismisses, and the
+  header has a count and "Clear all" (`agentboard notes --dismiss`).
   Row click = focus; context menu & hover buttons: Focus, Resume, Copy resume cmd, Mark done,
   Snooze 1d, Open PR/ticket. Footer: "Open Dashboard", "Refresh", "Quit".
 - Dashboard `Window` scene: NavigationSplitView — sidebar of states with counts + filter by
@@ -268,7 +302,9 @@ then updated_at desc. Default excludes done older than 7 days and non-interactiv
   Clear button that also selects All) when the filters hide a needs_you or interrupted
   session; list; detail pane showing title, cwd, branch, links, timestamps, first prompt, last prompt, last assistant
   message (scrollable, selectable, rendered as plain text or basic markdown via AttributedString),
-  action buttons.
+  an Updates section above the last assistant message (each open note in full with count, time
+  and a Dismiss button), action buttons. The sidebar also shows the open-notes total the
+  filters keep, counted note by note like the popover's Updates header.
 - Global hotkey ⌃⌥⌘A toggles the dashboard window (Carbon `RegisterEventHotKey`).
 - Data: run `agentboard snapshot --json` (CLI located per Links section: bundled Resources copy, PATH, then UserDefaults `agentboardPath`) every 3 s while popover/window visible, every 15 s
   otherwise; also watch the db directory with DispatchSource / FSEvents and refresh (debounced
