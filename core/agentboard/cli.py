@@ -1,6 +1,7 @@
 """agentboard command-line entry point."""
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -8,12 +9,14 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import backfill as backfill_mod
 from . import codexmap
 from . import db
+from . import diag
 from . import hook as hook_mod
 from . import links
 from . import reconcile
@@ -54,6 +57,13 @@ def _bin_path() -> Path:
     # same install showed, and a dry-run run afterwards would show a
     # spurious diff rewriting every hook command.
     return Path(__file__).parent.parent / "bin" / "agentboard"
+
+
+def _report(level, event, message, **fields):
+    """Print `message` to stderr and log the same text, so stderr and
+    agentboard.log always agree about what went wrong."""
+    print(message, file=sys.stderr)
+    diag.log(level, "cli", event, msg=message, **fields)
 
 
 def _now_iso(now=None):
@@ -299,6 +309,11 @@ def cmd_mark(args):
         conn.execute("COMMIT")
     finally:
         conn.close()
+    diag.info(
+        "cli", "mark", key=f"{args.tool}:{args.session_id}", action=args.action,
+        status=status, until=until,
+        note=None if args.note is None else f"<redacted:{len(args.note)} chars>",
+    )
     return 0
 
 
@@ -310,10 +325,14 @@ def cmd_backfill(args):
         if args.session:
             tool, _, session_id = args.session.partition(":")
             if not tool or not session_id:
-                print(f"error: --session must be TOOL:ID, got {args.session!r}", file=sys.stderr)
+                _report("error", "backfill", f"error: --session must be TOOL:ID, got {args.session!r}")
                 return 1
             result = backfill_mod.backfill_single_session(
                 conn, tool, session_id, transcript_path=args.transcript
+            )
+            diag.log(
+                "debug" if result == "updated" else "info", "backfill", "session",
+                key=args.session, transcript=args.transcript, result=result,
             )
             print(f"session={args.session} result={result}")
             return 0
@@ -342,7 +361,8 @@ def cmd_link(args):
     try:
         resolved = links.resolve_session(conn, explicit=args.session)
         if not resolved:
-            print("agentboard link: could not resolve a session", file=sys.stderr)
+            _report("warn", "link", "agentboard link: could not resolve a session",
+                    explicit=args.session)
             return 0
         tool, session_id = resolved
         link = {
@@ -366,7 +386,8 @@ def cmd_status(args):
     try:
         resolved = links.resolve_session(conn, explicit=args.session)
         if not resolved:
-            print("agentboard status: could not resolve a session", file=sys.stderr)
+            _report("warn", "status", "agentboard status: could not resolve a session",
+                    explicit=args.session)
             return 0
         tool, session_id = resolved
         until = None
@@ -1249,18 +1270,23 @@ def cmd_enable_codex_hooks(args):
     try:
         old_text = _read_text_no_newline_translation(config_path) if existed_before else ""
     except (OSError, UnicodeDecodeError):
-        print(f"error: could not read {config_path} as UTF-8; skipping feature check", file=sys.stderr)
+        _report(
+            "error", "enable_codex_hooks",
+            f"error: could not read {config_path} as UTF-8; skipping feature check",
+        )
         return 1
     try:
         new_text, changed = _patch_codex_hooks_feature(old_text)
     except CodexTomlPatchError as exc:
-        print(f"error: {config_path}: {exc}", file=sys.stderr)
+        _report("error", "enable_codex_hooks", f"error: {config_path}: {exc}")
         _print_codex_manual_hint(old_text)
         return 1
     if not changed:
+        diag.info("cli", "enable_codex_hooks", file=config_path, outcome="already_set")
         print(f"{config_path}: hooks = true already set under [features]")
         return 0
     if args.dry_run:
+        diag.info("cli", "enable_codex_hooks", file=config_path, outcome="dry_run")
         print(_diff(old_text, new_text, str(config_path)))
         return 0
     if existed_before:
@@ -1271,6 +1297,10 @@ def cmd_enable_codex_hooks(args):
     _record_codex_config_action(config_path, "created" if not existed_before else "patched")
     if created_dir:
         _record_created_dir(config_path.parent)
+    diag.info(
+        "cli", "enable_codex_hooks", file=config_path,
+        outcome="patched" if existed_before else "created",
+    )
     print(f"Set hooks = true under [features] in {config_path}")
     return 0
 
@@ -1293,9 +1323,14 @@ def cmd_install_hooks(args):
         try:
             old_text, new_text, changed = install_claude_hooks(settings_path, command, args.dry_run)
         except MalformedConfigError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            _report("error", "install_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(settings_path))
         else:
+            diag.info(
+                "cli", "install_hooks", tool="claude", file=settings_path,
+                outcome="dry_run" if args.dry_run else ("changed" if changed else "unchanged"),
+                would_change=changed if args.dry_run else None,
+            )
             if args.dry_run:
                 diff = _diff(old_text, new_text, str(settings_path))
                 print(diff if diff else f"{settings_path}: no changes (already installed)")
@@ -1310,9 +1345,14 @@ def cmd_install_hooks(args):
         try:
             old_text, new_text, changed = install_codex_hooks(hooks_path, command, args.dry_run)
         except MalformedConfigError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            _report("error", "install_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(hooks_path))
         else:
+            diag.info(
+                "cli", "install_hooks", tool="codex", file=hooks_path,
+                outcome="dry_run" if args.dry_run else ("changed" if changed else "unchanged"),
+                would_change=changed if args.dry_run else None,
+            )
             if args.dry_run:
                 diff = _diff(old_text, new_text, str(hooks_path))
                 print(diff if diff else f"{hooks_path}: no changes (already installed)")
@@ -1323,10 +1363,10 @@ def cmd_install_hooks(args):
             _print_codex_hooks_reminder(hooks_path, command)
 
     if failed_paths:
-        print(
+        _report(
+            "error", "install_hooks",
             f"error: {len(failed_paths)} file(s) skipped due to invalid JSON: "
             + ", ".join(failed_paths),
-            file=sys.stderr,
         )
         return 1
     return 0
@@ -1397,9 +1437,15 @@ def cmd_uninstall_hooks(args):
         try:
             old_text, new_text, changed = uninstall_claude_hooks(settings_path, command, dry_run)
         except MalformedConfigError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            _report("error", "uninstall_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(settings_path))
         else:
+            diag.info(
+                "cli", "uninstall_hooks", tool="claude", file=settings_path,
+                outcome="dry_run" if dry_run else ("changed" if changed else "unchanged"),
+                would_change=changed if dry_run else None,
+                removed_file=(not dry_run and changed and not settings_path.exists()) or None,
+            )
             if dry_run:
                 diff = _diff(old_text, new_text, str(settings_path))
                 print(diff if diff else f"{settings_path}: no changes (no agentboard hooks installed)")
@@ -1412,9 +1458,15 @@ def cmd_uninstall_hooks(args):
         try:
             old_text, new_text, changed = uninstall_codex_hooks(hooks_path, command, dry_run)
         except MalformedConfigError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            _report("error", "uninstall_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(hooks_path))
         else:
+            diag.info(
+                "cli", "uninstall_hooks", tool="codex", file=hooks_path,
+                outcome="dry_run" if dry_run else ("changed" if changed else "unchanged"),
+                would_change=changed if dry_run else None,
+                removed_file=(not dry_run and changed and not hooks_path.exists()) or None,
+            )
             if dry_run:
                 diff = _diff(old_text, new_text, str(hooks_path))
                 print(diff if diff else f"{hooks_path}: no changes (no agentboard hooks installed)")
@@ -1429,10 +1481,10 @@ def cmd_uninstall_hooks(args):
             _maybe_remove_created_dir(hooks_path.parent)
 
     if failed_paths:
-        print(
+        _report(
+            "error", "uninstall_hooks",
             f"error: {len(failed_paths)} file(s) skipped due to invalid JSON: "
             + ", ".join(failed_paths),
-            file=sys.stderr,
         )
         return 1
     return 0
@@ -1453,6 +1505,7 @@ def cmd_map_codex(args):
         mapped = codexmap.map_codex_session(conn, args.session, args.cwd, at=args.at)
     finally:
         conn.close()
+    diag.debug("cli", "map_codex", session=args.session, mapped=bool(mapped))
     print("mapped" if mapped else "unmapped")
     return 0
 
@@ -1475,7 +1528,7 @@ on run argv
             delay 0.15
             tell t to select
             tell s to select
-            return "found"
+            return "found:uuid"
           end if
         end repeat
       end repeat
@@ -1493,7 +1546,7 @@ on run argv
                 delay 0.15
                 tell t to select
                 tell s to select
-                return "found"
+                return "found:tty"
               end if
             end try
           end repeat
@@ -1573,16 +1626,138 @@ def _tty_path(tty):
     return tty if tty.startswith("/dev/") else f"/dev/{tty}"
 
 
+def _returncode(result):
+    """A subprocess result's exit code, or None if it doesn't have a real one."""
+    code = getattr(result, "returncode", None)
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def _stdout_text(result):
+    out = getattr(result, "stdout", None)
+    if isinstance(out, bytes):
+        out = out.decode("utf-8", "replace")
+    return out.strip() if isinstance(out, str) else ""
+
+
+def _stderr_text(result):
+    err = getattr(result, "stderr", None)
+    if isinstance(err, bytes):
+        err = err.decode("utf-8", "replace")
+    return err.strip() if isinstance(err, str) else ""
+
+
+# A focus/resume AppleScript can block indefinitely (a first-run Automation
+# permission prompt, a hung terminal). Bounding it means the click still
+# ends in a logged outcome instead of a process that never reports back.
+OSASCRIPT_TIMEOUT_SECS = 10
+
+
+class _TimedOut:
+    """Stands in for the result of a command killed by its timeout."""
+
+    returncode = None
+    stdout = ""
+
+    def __init__(self, seconds):
+        self.stderr = f"timed out after {seconds}s"
+
+
+def _run_bounded(run, argv):
+    """`run(argv)` capturing text output, bounded by OSASCRIPT_TIMEOUT_SECS.
+    A timeout comes back as a `_TimedOut` result instead of raising."""
+    try:
+        return run(argv, capture_output=True, text=True, timeout=OSASCRIPT_TIMEOUT_SECS)
+    except subprocess.TimeoutExpired:
+        return _TimedOut(OSASCRIPT_TIMEOUT_SECS)
+
+
 def _activate_app(term_program, run_osascript):
-    """Last resort: bring a mapped terminal app to front, no tab match."""
+    """Last resort: bring a mapped terminal app to front, no tab match.
+
+    Returns the `open -a` result, or None if `term_program` has no app.
+    """
     app_name = TERM_PROGRAM_APP_NAMES.get(term_program)
     if not app_name:
-        return False
-    run_osascript(["open", "-a", app_name], capture_output=True, text=True)
-    return True
+        return None
+    return _run_bounded(run_osascript, ["open", "-a", app_name])
+
+
+# What the focus AppleScripts print, mapped to the logged `outcome`. A bare
+# "found" is what the iTerm script returned before it said which strategy
+# matched; an older script can't misreport which one ran.
+_ITERM_FOCUS_RESULTS = {
+    "found:uuid": "matched_uuid",
+    "found:tty": "matched_tty",
+    "found": "matched_unknown",
+}
+_TERMINAL_FOCUS_RESULTS = {
+    "found": "matched_tty",
+    "activated": "activated_only",
+}
+
+
+class _FocusTrace:
+    """Collects one focus attempt into a single `cli.focus` info line: the
+    recorded identity, each strategy tried, the AppleScript's exit code and
+    output, and the final outcome. Each step is also logged at debug."""
+
+    def __init__(self, key):
+        self.key = key
+        self.started = time.monotonic()
+        self.fields = {"key": key}
+        self.strategies = []
+
+    def identity(self, row):
+        self.fields.update(
+            term=row["term_program"] if row else None,
+            tty=row["tty"] if row else None,
+            iterm_id=row["iterm_session_id"] if row else None,
+        )
+
+    def tried(self, strategy, result, **extra):
+        self.strategies.append(strategy)
+        rc = _returncode(result)
+        out = _stdout_text(result)
+        err = _stderr_text(result)
+        diag.debug(
+            "cli", "focus.try", key=self.key, strategy=strategy, rc=rc,
+            stdout=diag.tail_text(out), stderr=diag.tail_text(err), **extra,
+        )
+        if strategy != "open_a":
+            self.fields.update(
+                osa_rc=rc, osa_out=diag.tail_text(out, 200), osa_err=diag.tail_text(err, 300),
+            )
+        else:
+            self.fields["open_rc"] = rc
+        return rc, out
+
+    def finish(self, outcome, level="info"):
+        diag.log(
+            level, "cli", "focus", **self.fields,
+            strategy=",".join(self.strategies) or None, outcome=outcome,
+            ms=diag.ms_since(self.started),
+        )
+
+
+def _open_a_outcome(result):
+    if isinstance(result, _TimedOut):
+        return "timeout"
+    rc = _returncode(result)
+    return "activate_failed" if rc not in (None, 0) else "activated_only"
+
+
+def _focus_timed_out(trace, key):
+    # The summary line (outcome=timeout, osa_err) is the log record; the
+    # stderr text is for the app.
+    trace.finish("timeout", level="warn")
+    print(f"focusing the terminal for {key} timed out after {OSASCRIPT_TIMEOUT_SECS}s",
+          file=sys.stderr)
+    return 1
 
 
 def cmd_focus(args, run_osascript=subprocess.run):
+    key = f"{args.tool}:{args.session_id}"
+    trace = _FocusTrace(key)
     conn = db.connect()
     try:
         row = conn.execute(
@@ -1592,40 +1767,71 @@ def cmd_focus(args, run_osascript=subprocess.run):
         ).fetchone()
     finally:
         conn.close()
+    trace.identity(row)
     if not row or row["term_program"] not in TERM_PROGRAM_APP_NAMES:
-        print(f"no terminal recorded for {args.tool}:{args.session_id}", file=sys.stderr)
+        outcome = "unsupported_terminal" if row and row["term_program"] else "no_terminal"
+        trace.finish(outcome)
+        print(f"no terminal recorded for {key}", file=sys.stderr)
         return 1
 
     term_program = row["term_program"]
     tty = _tty_path(row["tty"])
+    # Logged before the first osascript/open call, so a click whose
+    # AppleScript hangs still leaves a line at the default level.
+    diag.info("cli", "focus.begin", **trace.fields)
 
     if term_program == "iTerm.app":
         unique_id = _iterm_unique_id(row["iterm_session_id"]) or ""
-        result = run_osascript(
-            ["osascript", "-e", _ITERM_FOCUS_APPLESCRIPT, unique_id, tty or ""],
-            capture_output=True, text=True,
+        result = _run_bounded(
+            run_osascript, ["osascript", "-e", _ITERM_FOCUS_APPLESCRIPT, unique_id, tty or ""],
         )
-        if "found" in (result.stdout or "") and "not_found" not in (result.stdout or ""):
+        rc, out = trace.tried("iterm_script", result, unique_id=unique_id or None, tty=tty)
+        if isinstance(result, _TimedOut):
+            return _focus_timed_out(trace, key)
+        outcome = _ITERM_FOCUS_RESULTS.get(out) if rc in (None, 0) else None
+        if outcome:
+            trace.finish(outcome)
             return 0
-        if _activate_app(term_program, run_osascript):
+        fallback = _activate_app(term_program, run_osascript)
+        if fallback is not None:
+            trace.tried("open_a", fallback, app=TERM_PROGRAM_APP_NAMES[term_program])
+            if isinstance(fallback, _TimedOut):
+                return _focus_timed_out(trace, key)
+            trace.finish(_open_a_outcome(fallback))
             return 0
-        print(f"iTerm session for {args.tool}:{args.session_id} not found", file=sys.stderr)
+        trace.finish("unsupported_terminal")
+        print(f"iTerm session for {key} not found", file=sys.stderr)
         return 1
 
     if term_program == "Apple_Terminal":
-        run_osascript(
-            ["osascript", "-e", _TERMINAL_FOCUS_APPLESCRIPT, tty or ""],
-            capture_output=True, text=True,
+        result = _run_bounded(
+            run_osascript, ["osascript", "-e", _TERMINAL_FOCUS_APPLESCRIPT, tty or ""],
         )
+        rc, out = trace.tried("terminal_script", result, tty=tty)
+        if isinstance(result, _TimedOut):
+            return _focus_timed_out(trace, key)
+        outcome = _TERMINAL_FOCUS_RESULTS.get(out) if rc in (None, 0) else None
+        if not outcome:
+            # rc 0 with an answer the CLI does not recognise is not a failure.
+            outcome = "not_found" if rc not in (None, 0) else "matched_unknown"
+        trace.finish(outcome)
         return 0
 
-    if _activate_app(term_program, run_osascript):
+    fallback = _activate_app(term_program, run_osascript)
+    if fallback is not None:
+        trace.tried("open_a", fallback, app=TERM_PROGRAM_APP_NAMES[term_program])
+        if isinstance(fallback, _TimedOut):
+            return _focus_timed_out(trace, key)
+        trace.finish(_open_a_outcome(fallback))
         return 0
-    print(f"no way to focus terminal for {args.tool}:{args.session_id}", file=sys.stderr)
+    trace.finish("unsupported_terminal")
+    print(f"no way to focus terminal for {key}", file=sys.stderr)
     return 1
 
 
 def cmd_resume(args, run_osascript=subprocess.run):
+    key = f"{args.tool}:{args.session_id}"
+    started = time.monotonic()
     conn = db.connect()
     try:
         row = conn.execute(
@@ -1635,27 +1841,38 @@ def cmd_resume(args, run_osascript=subprocess.run):
     finally:
         conn.close()
     if not row:
-        print(f"unknown session {args.tool}:{args.session_id}", file=sys.stderr)
+        _report("error", "resume", f"unknown session {key}", key=key)
         return 1
     command = _resume_command(args.tool, row["cwd"], args.session_id)
     if args.print:
+        diag.debug("cli", "resume", key=key, strategy="print", command=command)
         print(command)
         return 0
 
     term_program = row["term_program"]
     if term_program == "Apple_Terminal":
-        run_osascript(
-            ["osascript", "-e", _TERMINAL_RESUME_APPLESCRIPT, command],
-            capture_output=True, text=True,
+        strategy = "terminal_script"
+        result = _run_bounded(
+            run_osascript, ["osascript", "-e", _TERMINAL_RESUME_APPLESCRIPT, command],
         )
-        return 0
-    if term_program == "iTerm.app" or not term_program:
-        run_osascript(
-            ["osascript", "-e", _ITERM_RESUME_APPLESCRIPT, command],
-            capture_output=True, text=True,
+    elif term_program == "iTerm.app" or not term_program:
+        strategy = "iterm_script"
+        result = _run_bounded(
+            run_osascript, ["osascript", "-e", _ITERM_RESUME_APPLESCRIPT, command],
         )
-        return 0
-    _activate_app(term_program, run_osascript)
+    else:
+        strategy = "open_a"
+        result = _activate_app(term_program, run_osascript)
+    timed_out = isinstance(result, _TimedOut)
+    diag.log(
+        "warn" if timed_out else "info", "cli", "resume", key=key, term=term_program, strategy=strategy, command=command,
+        rc=_returncode(result), stderr=diag.tail_text(_stderr_text(result), 300) or None,
+        outcome="timeout" if timed_out else None,
+        ms=diag.ms_since(started),
+    )
+    if timed_out:
+        print(f"resuming {key} timed out after {OSASCRIPT_TIMEOUT_SECS}s", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -1680,6 +1897,7 @@ def cmd_prune(args):
         conn.execute("COMMIT")
     finally:
         conn.close()
+    diag.info("cli", "prune", days=args.days, cutoff=cutoff, sessions=len(rows))
     print(f"pruned {len(rows)} session(s)")
     return 0
 
@@ -1708,11 +1926,176 @@ def cmd_paths(args):
     return 0
 
 
+# -- logs -------------------------------------------------------------------------
+#
+# Reads agentboard.log back (the rotated .1 first, so a --since window right
+# after a rotation is complete) and, only with --app, merges the app's own
+# OSLog lines from `log show`. Never called by snapshot or the app's polling.
+
+DEFAULT_LOG_LINES = 200
+APP_LOG_SUBSYSTEM = "io.github.agentboard"
+APP_LOG_DEFAULT_WINDOW = timedelta(hours=1)
+APP_LOG_TIMEOUT_SECS = 60
+_SINCE_RELATIVE_RE = re.compile(r"^(\d+)([smhd])$")
+_SINCE_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
+_APP_LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(.*)$")
+
+
+def _parse_since(value: str, now: datetime) -> datetime:
+    """`<n>s|m|h|d` before `now`, or an ISO-8601 timestamp (naive = local
+    time). Returns an aware UTC datetime; raises ValueError otherwise."""
+    text = value.strip()
+    match = _SINCE_RELATIVE_RE.match(text)
+    if match:
+        delta = timedelta(**{_SINCE_UNITS[match.group(2)]: int(match.group(1))})
+        return now - delta
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed.astimezone(timezone.utc)
+
+
+def _log_line_timestamp(line: str):
+    head = line.split(" ", 1)[0]
+    if len(head) < 20 or "T" not in head:
+        return None
+    try:
+        parsed = datetime.fromisoformat(head)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _read_log_lines(home: Path) -> list:
+    lines = []
+    for name in (diag.ROTATED_FILENAME, diag.LOG_FILENAME):
+        path = home / name
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                lines.extend(line.rstrip("\n") for line in fh)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            print(f"warning: could not read {path}: {exc}", file=sys.stderr)
+    return lines
+
+
+def _format_utc(ts: datetime) -> str:
+    return ts.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ts.microsecond // 1000:03d}Z"
+
+
+def _app_log_show_argv(start: datetime) -> list:
+    """`log show` for the app's OSLog lines since `start`. `--start` takes
+    an absolute local time, which works for both a relative and an ISO
+    --since (`--last` takes only m/h/d durations)."""
+    return [
+        "log", "show", "--style", "compact", "--info", "--debug",
+        "--start", start.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+        "--predicate", f'subsystem == "{APP_LOG_SUBSYSTEM}"',
+    ]
+
+
+def _read_app_log_lines(start: datetime, run) -> list:
+    """[(utc datetime, rendered line)] from `log show`, or [] with a
+    one-line warning on stderr if it is missing or fails."""
+    argv = _app_log_show_argv(start)
+    try:
+        result = run(argv, capture_output=True, text=True, timeout=APP_LOG_TIMEOUT_SECS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"warning: could not read app logs ({type(exc).__name__}: {exc}); "
+              "showing agentboard.log only", file=sys.stderr)
+        return []
+    rc = _returncode(result)
+    if rc not in (None, 0):
+        detail = _first_line(_stderr_text(result), 200) or f"exit {rc}"
+        print(f"warning: `log show` failed ({detail}); showing agentboard.log only",
+              file=sys.stderr)
+        return []
+    entries = []
+    for raw in _stdout_text(result).splitlines():
+        match = _APP_LINE_RE.match(raw)
+        if not match:
+            continue  # header row, or a continuation without a timestamp
+        try:
+            local = datetime.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        ts = local.astimezone().astimezone(timezone.utc)
+        entries.append((ts, f"{_format_utc(ts)} APP {match.group(2)}"))
+    return entries
+
+
+def cmd_logs(args, run=subprocess.run, now=None):
+    now = now or datetime.now(timezone.utc)
+    cutoff = None
+    if args.since:
+        try:
+            cutoff = _parse_since(args.since, now)
+        except ValueError:
+            print(
+                f"error: --since must be <n>s, <n>m, <n>h, <n>d or an ISO-8601 time, got {args.since!r}",
+                file=sys.stderr,
+            )
+            return 2
+
+    lines = _read_log_lines(db.home_dir())
+    stamped = []
+    previous = None
+    for line in lines:
+        ts = _log_line_timestamp(line)
+        if cutoff is not None and ts is not None and ts < cutoff:
+            previous = ts
+            continue
+        if args.grep and args.grep not in line:
+            previous = ts or previous
+            continue
+        stamped.append((ts or previous, line))
+        previous = ts or previous
+
+    limit = args.lines if args.lines is not None else (None if args.since else DEFAULT_LOG_LINES)
+    if limit is not None:
+        stamped = stamped[-limit:] if limit > 0 else []
+
+    output = stamped
+    if args.app:
+        start = cutoff
+        if start is None:
+            known = [ts for ts, _ in stamped if ts is not None]
+            start = min(known) if known else now - APP_LOG_DEFAULT_WINDOW
+        app_entries = [
+            entry for entry in _read_app_log_lines(start, run)
+            if not args.grep or args.grep in entry[1]
+        ]
+        floor = datetime.min.replace(tzinfo=timezone.utc)
+        output = sorted(stamped + app_entries, key=lambda entry: entry[0] or floor)
+
+    text = "".join(f"{line}\n" for _, line in output)
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # `agentboard logs | head`: stop quietly instead of a traceback.
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except (OSError, ValueError, AttributeError):
+            pass
+    return 0
+
+
 # -- argparse wiring --------------------------------------------------------------
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="agentboard")
-    sub = parser.add_subparsers(dest="command", required=True)
+    # allow_abbrev=False on the parser and every subparser (add_parser does
+    # not inherit it): an abbreviated flag (`--not` for `--note`) would
+    # otherwise be accepted and slip past diag.redact's exact-flag match.
+    parser = argparse.ArgumentParser(prog="agentboard", allow_abbrev=False)
+    sub = parser.add_subparsers(
+        dest="command", required=True,
+        parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False),
+    )
 
     p = sub.add_parser("hook")
     p.add_argument("--tool", choices=["claude", "codex"], required=True)
@@ -1800,13 +2183,73 @@ def build_parser():
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_paths)
 
+    p = sub.add_parser("logs", help="print the diagnostic log (agentboard.log.1 + agentboard.log)")
+    p.add_argument("--since", default=None, help="<n>s|m|h|d, or an ISO-8601 time")
+    p.add_argument("--grep", default=None, help="plain substring filter")
+    p.add_argument("--lines", "-n", type=int, default=None,
+                   help=f"show only the last N matching lines (default {DEFAULT_LOG_LINES} without --since)")
+    p.add_argument("--app", action="store_true",
+                   help="also merge the app's OSLog lines from `log show`")
+    p.set_defaults(func=cmd_logs)
+
     return parser
+
+
+# Subcommands the app calls every few seconds (or that only read state):
+# their start/end lines are debug, so a quiet `info` log isn't one line per
+# poll. A failure or a slow run (SLOW_QUIET_MS) is still logged at info.
+QUIET_COMMANDS = {"snapshot", "paths", "hook", "logs"}
+SLOW_QUIET_MS = 1000
+# The polled subset: a slow run of one of these is worth an info line.
+SLOW_WATCHED_COMMANDS = {"snapshot", "paths", "hook"}
+
+
+def _hook_spawned(command, args):
+    """The children hook.py spawns once per assistant turn or Codex prompt
+    (`backfill --session`, `map-codex`): routine successes stay at debug,
+    like the polled commands, so `info` keeps meaning real problems."""
+    return command == "map-codex" or (command == "backfill" and bool(getattr(args, "session", None)))
 
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
-    return args.func(args)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
+    command = args.command
+    spawned = _hook_spawned(command, args)
+    quiet = command in QUIET_COMMANDS or spawned
+    # `logs` stays side-effect free on success: neither a start line (which
+    # would be the last line it prints at debug level) nor an end line, so
+    # repeated `logs` runs while debugging do not fill the file with their
+    # own footprints. A failing `logs` still records its end line.
+    self_silent = command == "logs"
+    if not self_silent:
+        diag.debug("cli", "start", cmd=command, argv=diag.redact(raw_argv))
+    started = time.monotonic()
+    try:
+        rc = args.func(args)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        if not (self_silent and code == 0):
+            diag.log("debug" if quiet and code == 0 else "info", "cli", "end",
+                     cmd=command, exit=code, ms=diag.ms_since(started))
+        raise
+    except BaseException as exc:
+        diag.error("cli", "error", cmd=command, exc=type(exc).__name__,
+                   msg=str(exc), ms=diag.ms_since(started))
+        raise
+    elapsed = diag.ms_since(started)
+    exit_code = rc if isinstance(rc, int) else (0 if rc is None else 1)
+    level = "info"
+    slow = (
+        (command in SLOW_WATCHED_COMMANDS or spawned)
+        and elapsed is not None and elapsed > SLOW_QUIET_MS
+    )
+    if quiet and exit_code == 0 and not slow:
+        level = "debug"
+    if not (self_silent and exit_code == 0):
+        diag.log(level, "cli", "end", cmd=command, exit=exit_code, ms=elapsed)
+    return rc
 
 
 if __name__ == "__main__":

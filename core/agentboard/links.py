@@ -9,8 +9,11 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from . import diag
 
 NON_FEATURE_BRANCHES = {"main", "master", "develop"}
 GH_CACHE_MINUTES = 15
@@ -123,6 +126,12 @@ def should_check_generic_pr(existing_link, now):
 def fetch_generic_pr(branch: str, cwd: str, run_gh=_run_gh):
     if not branch or branch in NON_FEATURE_BRANCHES:
         return None
+    started = time.monotonic()
+
+    def trace(level, outcome, **fields):
+        diag.log(level, "links", "gh", branch=branch, cwd=cwd, outcome=outcome,
+                 ms=diag.ms_since(started), **fields)
+
     try:
         result = run_gh(
             [
@@ -131,17 +140,24 @@ def fetch_generic_pr(branch: str, cwd: str, run_gh=_run_gh):
             ],
             cwd,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        trace("warn", "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "oserror",
+              error=str(exc))
         return None
     if result.returncode != 0:
+        trace("warn", "nonzero", rc=result.returncode,
+              stderr=diag.tail_text(getattr(result, "stderr", None), 300))
         return None
     try:
         rows = json.loads(result.stdout)
     except ValueError:
+        trace("warn", "bad_json", stdout=diag.tail_text(result.stdout, 200))
         return None
     if not rows:
+        trace("debug", "none")
         return None
     row = rows[0]
+    trace("debug", "found", ref=f"#{row.get('number')}", state=row.get("state"))
     return {
         "kind": "pr",
         "ref": f"#{row['number']}",
@@ -300,10 +316,12 @@ def ingest_inbox(conn, home: Path, now_iso: str) -> int:
     for path in sorted(directory.glob("*.json")):
         try:
             data = json.loads(path.read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            diag.warn("links", "inbox_drop", file=path.name, reason="unreadable", error=str(exc))
             path.unlink(missing_ok=True)
             continue
         if not isinstance(data, dict):
+            diag.warn("links", "inbox_drop", file=path.name, reason="not_an_object")
             path.unlink(missing_ok=True)
             continue
         try:
@@ -328,6 +346,10 @@ def ingest_inbox(conn, home: Path, now_iso: str) -> int:
                         (status_text, tool, session_id),
                     )
                 count += 1
+                diag.debug("links", "inbox", file=path.name, session=f"{tool}:{session_id}")
+            else:
+                diag.info("links", "inbox_drop", file=path.name, reason="no_session",
+                          session=session, cwd=cwd)
         finally:
             path.unlink(missing_ok=True)
     return count
@@ -361,21 +383,37 @@ def run_providers(conn, config: dict, now_iso: str) -> int:
         command = provider.get("command")
         if not command:
             continue
+        name = provider.get("name") or (
+            command[0] if isinstance(command, list) and command else str(command)
+        )
+        started = time.monotonic()
+
+        def trace(level, outcome, **fields):
+            diag.log(level, "links", "provider", name=name, outcome=outcome,
+                     ms=diag.ms_since(started), **fields)
+
         try:
             result = subprocess.run(
                 command, input=payload, capture_output=True,
                 timeout=PROVIDER_TIMEOUT_SECS,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            trace("warn", "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "oserror",
+                  error=str(exc))
             continue
         if result.returncode != 0:
+            trace("warn", "nonzero", rc=result.returncode,
+                  stderr=diag.tail_text(result.stderr, 300))
             continue
         try:
             rows = json.loads(result.stdout.decode("utf-8", "replace"))
         except ValueError:
+            trace("warn", "bad_json", rc=0, stdout=diag.tail_text(result.stdout, 200))
             continue
         if not isinstance(rows, list):
+            trace("warn", "not_a_list", rc=0)
             continue
+        trace("info", "ok", rc=0, rows=len(rows))
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -405,12 +443,14 @@ def refresh_links(conn, run_gh=_run_gh, home: Path = None) -> int:
         checked += run_providers(conn, config, now_iso)
 
     sessions = conn.execute("SELECT * FROM sessions").fetchall()
+    has_gh = gh_available()
+    gh_checked = 0
     for session in sessions:
         session_dict = dict(session)
         for link in collect_offline_links(session_dict, config):
             upsert_link(conn, session["tool"], session["session_id"], link, now_iso)
 
-        if not gh_available():
+        if not has_gh:
             continue
         branch = session_dict.get("branch")
         if not branch or branch in NON_FEATURE_BRANCHES:
@@ -425,6 +465,12 @@ def refresh_links(conn, run_gh=_run_gh, home: Path = None) -> int:
             continue
         pr_link = fetch_generic_pr(branch, session_dict.get("cwd"), run_gh)
         checked += 1
+        gh_checked += 1
         if pr_link:
             upsert_link(conn, session["tool"], session["session_id"], pr_link, now_iso)
+    diag.info(
+        "links", "refresh", sessions=len(sessions), checked=checked,
+        gh="available" if has_gh else "missing", gh_checked=gh_checked,
+        providers=len(config.get("providers", []) or []),
+    )
     return checked

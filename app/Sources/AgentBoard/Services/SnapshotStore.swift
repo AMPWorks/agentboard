@@ -13,6 +13,10 @@ final class SnapshotStore: ObservableObject {
     /// Set by the popover when it needs the dashboard to open with a
     /// specific session selected; the dashboard clears it after reading it.
     @Published var pendingSelection: String?
+    /// AgentBoard's data directory (`home` from `agentboard paths --json`,
+    /// or the fallback when that fails), where agentboard.log lives. Nil
+    /// until resolved at start.
+    @Published private(set) var dataDirectory: String?
 
     private let cli: AgentBoardCLI
     private let watcher = DirectoryWatcher()
@@ -63,6 +67,7 @@ final class SnapshotStore: ObservableObject {
             guard let self else { return }
             let directory = await self.resolveDataDirectory()
             guard !Task.isCancelled else { return }
+            self.dataDirectory = directory
             self.watcher.start(path: directory) { [weak self] in
                 Task { await self?.refresh() }
             }
@@ -130,24 +135,24 @@ final class SnapshotStore: ObservableObject {
     // MARK: - Actions
 
     func markDone(_ session: Session) async {
-        await perform { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "done") }
+        await perform("mark done", session) { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "done") }
     }
 
     func markOpen(_ session: Session) async {
-        await perform { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "open") }
+        await perform("mark open", session) { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "open") }
     }
 
     func snooze(_ session: Session, hours: Int) async {
-        await perform { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "snooze", hours: hours) }
+        await perform("snooze \(hours)h", session) { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "snooze", hours: hours) }
     }
 
     func focus(_ session: Session) async {
-        await perform { try await cli.focus(tool: session.tool, sessionId: session.sessionId) }
+        await perform("focus", session) { try await cli.focus(tool: session.tool, sessionId: session.sessionId) }
     }
 
     /// Actually resumes the session (opens a new terminal tab running the resume command).
     func resume(_ session: Session) async {
-        await perform { try await cli.resume(tool: session.tool, sessionId: session.sessionId, printOnly: false) }
+        await perform("resume", session) { try await cli.resume(tool: session.tool, sessionId: session.sessionId, printOnly: false) }
     }
 
     /// Fetches the resume command text for copying, without launching anything.
@@ -165,13 +170,17 @@ final class SnapshotStore: ObservableObject {
         Task { await refresh() }
     }
 
-    private func perform(_ action: () async throws -> Void) async {
+    /// Runs a user action against the CLI and logs it by name, so `log
+    /// show` ties a row click to the CLIRunner invocation that follows it.
+    private func perform(_ name: String, _ session: Session, _ action: () async throws -> Void) async {
+        let key = session.key
+        log.notice("action \(name, privacy: .public) key=\(key, privacy: .public)")
         do {
             try await action()
             await refresh()
         } catch {
             self.lastError = error.localizedDescription
-            log.error("action failed: \(error.localizedDescription, privacy: .public)")
+            log.error("action \(name, privacy: .public) key=\(key, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

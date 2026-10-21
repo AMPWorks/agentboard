@@ -1,6 +1,8 @@
+import AppKit
 import SwiftUI
 
 struct SettingsView: View {
+    @ObservedObject var store: SnapshotStore
     @AppStorage("appearance") private var appearance: String = Appearance.system.rawValue
     @AppStorage("notifyOnNeedsYou") private var notifyOnNeedsYou: Bool = false
     @AppStorage(MenuBarIconSettings.coloredKey) private var menuBarIconColored: Bool = true
@@ -9,7 +11,13 @@ struct SettingsView: View {
     @AppStorage(AgentBoardCLI.pathDefaultsKey) private var cliPath: String = ""
     @AppStorage(AgentBoardCLI.useFixtureDefaultsKey) private var useFixture: Bool = false
     @AppStorage(AgentBoardCLI.fixturePathDefaultsKey) private var fixturePath: String = ""
+    @AppStorage(CLIRunner.verboseLoggingKey) private var verboseLogging: Bool = false
     @State private var launchAtLogin: Bool = false
+
+    /// `<data dir>/agentboard.log`, once the store has resolved the dir.
+    private var logURL: URL? {
+        store.dataDirectory.map { URL(fileURLWithPath: $0).appendingPathComponent("agentboard.log") }
+    }
 
     var body: some View {
         Form {
@@ -63,6 +71,17 @@ struct SettingsView: View {
                 if useFixture {
                     TextField("Fixture path (optional, uses bundled fixture if empty)", text: $fixturePath)
                 }
+            }
+
+            Section("Diagnostics") {
+                Toggle("Verbose logging", isOn: $verboseLogging)
+                Text("Also logs every background snapshot and the CLI's debug detail (hook events, each focus step). Read it back with `agentboard logs`.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Open log") {
+                    if let logURL { NSWorkspace.shared.activateFileViewerSelecting([logURL]) }
+                }
+                .disabled(!(logURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false))
             }
         }
         .formStyle(.grouped)
