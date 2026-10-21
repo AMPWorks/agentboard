@@ -13,6 +13,10 @@ final class SnapshotStore: ObservableObject {
     /// Set by the popover when it needs the dashboard to open with a
     /// specific session selected; the dashboard clears it after reading it.
     @Published var pendingSelection: String?
+    /// The popover's filter text. Held here, not in the view, so it
+    /// survives closing and reopening the popover; kept in memory only
+    /// (cleared on relaunch). The menu bar icon never reads it.
+    @Published var popoverQuery: String = ""
     /// AgentBoard's data directory (`home` from `agentboard paths --json`,
     /// or the fallback when that fails), where agentboard.log lives. Nil
     /// until resolved at start.

@@ -31,7 +31,7 @@ cd app && swift build -c release                                # compile the ap
 cd app && F=/Library/Developer/CommandLineTools/Library/Developer/Frameworks && \
   swift test -Xswiftc -F -Xswiftc $F -Xlinker -rpath -Xlinker $F  # app tests (Swift Testing); see note below
 scripts/build-app.sh --no-install                               # assemble app/build/AgentBoard.app
-AGENTBOARD_USE_FIXTURE=1 app/.build/release/AgentBoard          # run the app on the bundled fixture, no CLI
+AGENTBOARD_FIXTURE_PATH=app/Fixtures/snapshot.json app/.build/release/AgentBoard  # app on the sample fixture, no CLI
 bash -n scripts/*.sh
 scripts/install.sh --dry-run                                    # preview against the real ~/.claude and ~/.codex
 ```
