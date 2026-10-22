@@ -260,7 +260,7 @@ Sorted: state priority (needs_you, interrupted, review, running, unconcluded, sn
 then updated_at desc. Default excludes done older than 7 days and non-interactive sessions;
 `--all` includes everything. Must run in < 500 ms with a few thousand sessions.
 (Added after the original spec.) `notes` lists a session's open notes, newest `last_ts` first,
-capped at 20; `notes_count` is the uncapped open count; `counts.notes` sums `notes_count` over
+capped at 20 plus any older open `needs_you` notes (never capped out); `notes_count` is the uncapped open count; `counts.notes` sums `notes_count` over
 the sessions this snapshot emits. Older CLIs omit all three; the app defaults them to empty/0.
 
 Notes (`notes.py`, added after the original spec): the hook classifies each parent Stop message

@@ -13,6 +13,10 @@ final class SnapshotStore: ObservableObject {
     /// Set by the popover when it needs the dashboard to open with a
     /// specific session selected; the dashboard clears it after reading it.
     @Published var pendingSelection: String?
+    /// Set with `pendingSelection` when a popover update row asks the
+    /// dashboard to show one note; the session detail scrolls to it,
+    /// highlights it and clears it.
+    @Published var pendingNote: NoteFocus?
     /// The popover's filter text. Held here, not in the view, so it
     /// survives closing and reopening the popover; kept in memory only
     /// (cleared on relaunch). The menu bar icon never reads it.
@@ -174,22 +178,29 @@ final class SnapshotStore: ObservableObject {
         await perform("dismiss notes", session) { try await cli.dismissNotes(tool: session.tool, sessionId: session.sessionId) }
     }
 
-    /// The popover's "Clear all": dismisses exactly the notes it shows (the
-    /// filtered feed), not notes a query hides or the 20-per-session cap cut.
-    func dismissNotes(_ notes: [Note]) async {
-        let ids = notes.map(\.id)
-        guard !ids.isEmpty else { return }
-        log.notice("action dismiss notes count=\(ids.count, privacy: .public)")
+    /// The popover's grouped-row x and its "Clear all"/"Clear matching"
+    /// (`UpdatesFeed.clearPlan`): runs each dismissal in order, then
+    /// refreshes once.
+    func dismiss(_ dismissals: [NoteDismissal], action name: String) async {
+        guard !dismissals.isEmpty else { return }
+        log.notice("action \(name, privacy: .public) steps=\(dismissals.count, privacy: .public)")
         do {
-            try await cli.dismissNotes(ids: ids)
+            for dismissal in dismissals {
+                try await cli.dismiss(dismissal)
+            }
             await refresh()
         } catch {
             self.lastError = error.localizedDescription
-            log.error("action dismiss notes failed: \(error.localizedDescription, privacy: .public)")
+            log.error("action \(name, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            await refresh()
         }
     }
 
-    func requestSelection(_ key: String) {
+    /// Asks the dashboard to select a session and, with `note`, to scroll
+    /// its detail to that note. The note request is set first, so it is
+    /// already in place when the dashboard consumes the selection.
+    func requestSelection(_ key: String, note: Int? = nil) {
+        pendingNote = note.map { NoteFocus(sessionKey: key, noteId: $0) }
         pendingSelection = key
     }
 

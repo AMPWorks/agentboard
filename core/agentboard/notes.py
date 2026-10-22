@@ -43,13 +43,57 @@ ERROR_RE = re.compile(
 
 # Idle-worded answers restate what is already waiting, however long.
 QUIET_RE = re.compile(
-    r"(\*\*)?(Quiet|Idle|Nothing (to do|actionable|to act on|has changed|new|outstanding)"
+    r"(\*\*)?(Quiet|Idle|Nothing (to do|actionable|to act on|has changed|(else )?changed"
+    r"|new|outstanding)"
     r"|Unchanged|Still\b|Holding|No-op|Waiting on|Standing by|Awaiting"
-    r"|Loop (stays )?stopped|No change|Second|Third|Fourth)\b",
+    r"|Loop (stays )?stopped|No changes?|Second|Third|Fourth)\b",
     re.IGNORECASE,
 )
 
-# ...unless an idle-worded answer nonetheless reports something new.
+# A status line whose lead sentence only restates what is waiting on the
+# human ("Two things are still waiting on you:", "PR #5 still needs your
+# approval.") is as quiet as an idle-worded one, unless that sentence also
+# reports an event (EVENT_RE) or carries a link.
+WAITING_RE = re.compile(
+    r"\b(still (waiting|pending|blocked|needs? (you|your)\b|awaits? (you|your)\b)"
+    r"|waiting (on|for) (you|your)\b|blocked on (you|your)\b)",
+    re.IGNORECASE,
+)
+SENTENCE_END_RE = re.compile(r"(?<=[.!?:;])\s")
+
+# ...unless the message reports a hard event anywhere in it ("Nothing changed
+# on the plan, but CI went red on PR #5"), unless negated or pending ("has
+# not merged", "no tests failed", "None of the checks failed", "needs to be
+# merged") or background in a since/until/once/if/unless clause ("the queue
+# is empty since the logging work merged"). An adjectival "merged" ("the
+# merged PR", "PR #5 (merged yesterday)", "merged-upstream") is no event;
+# "I merged PR #7" is (see ADJECTIVAL_RE).
+# Softer events ("deployed", "approved", "pushed") behind a quiet or waiting
+# lead are restatements of a known state and stay quiet.
+STRONG_EVENT_RE = re.compile(
+    r"\b((?<!\()merged(?!-)"
+    r"|opened|filed|failed|CI (is |went )?red)\b",
+    re.IGNORECASE,
+)
+# A negator directly before the event, or "no"/"none"/"nothing" and a short
+# subject of the same clause ("no tests", "none of the checks", "nothing
+# has") with no conjunction or punctuation in between.
+NEGATED_RE = re.compile(
+    r"((\b(not|never|no|nothing)|n't)\s+(yet\s+)?((been|be|get)\s+)?"
+    r"|\bto\s+(be|get)\s+"
+    r"|\b(no|none|nothing)"
+    r"([^\S\n]+(?!(but|and|or|so|then|though|although|while|however)\b)[\w'#-]+){1,4}[^\S\n]+)$",
+    re.IGNORECASE,
+)
+BACKGROUND_RE = re.compile(r"\b(since|until|once|if|unless)\b", re.IGNORECASE)
+# A determiner directly before "merged" makes it adjectival ("the merged
+# PR", "its merged branch").
+ADJECTIVAL_RE = re.compile(
+    r"\b(the|a|an|this|that|these|those|its|his|her|their|our|your|my)\s+$",
+    re.IGNORECASE,
+)
+
+# ...or, however short, an idle-worded answer nonetheless reports news.
 NEWS_RE = re.compile(
     r"\b(repair(ed)?|heads-up|found|bug|wrong|correct(ion|ed)?|fixed|broke|regression)\b",
     re.IGNORECASE,
@@ -66,14 +110,31 @@ PROGRESS_MAX_CHARS = 400
 
 URL_RE = re.compile(r"https?://", re.IGNORECASE)
 
-# Something happened that the human may want to know about.
-MILESTONE_RE = re.compile(
-    r"\b\w+#\d+\b|\bPR #\d+|\b(merged|approved|LGTM|ready for (your )?review"
-    r"|CI (is |went )?(red|green)|heads-up|blocked|failed|repair|pushed|opened"
-    r"|deployed|filed|in Pending|Completed)\b|https?://",
+# Something happened that the human may want to know about. Events count
+# every time (becoming "blocked" is one; "still blocked" or "blocked on you"
+# restates a wait, see WAITING_RE); a PR/issue reference counts only while
+# the message names a reference the session's earlier notes have not (see
+# classify's seen_refs), and a status ("ready for review", "in Pending")
+# only while its own clause names no reference or a new one, so a loop
+# restating "PR #5 is ready for your review" every tick is kept once.
+EVENT_RE = re.compile(
+    r"\b(merged|approved|LGTM|CI (is |went )?(red|green)|heads-up|failed|repair|pushed"
+    r"|opened|deployed|filed|Completed|(?<!still )blocked(?! on (you|your)\b))\b",
     re.IGNORECASE,
 )
+STATUS_RE = re.compile(r"\b(ready for (your )?review|in Pending)\b", re.IGNORECASE)
+CLAUSE_END_RE = re.compile(r"[.;:!?](?=\s|$)|\n")
+MILESTONE_REF_RE = re.compile(r"\b\w+#\d+\b|\bPRs? #\d+", re.IGNORECASE)
 UPDATE_MIN_CHARS = 300
+
+# References a note mentions, for the seen-ref rule: "repo#12" keys as
+# "repo#12", and "PR #12", "PRs #12, #13" or a bare "#12" as "#12". An
+# ordinal ("step #2", "item #3") is not a reference.
+NAMED_REF_RE = re.compile(r"\b([A-Za-z_][\w.-]*)#(\d+)\b")
+BARE_REF_RE = re.compile(
+    r"(?<![\w#])(?<!step )(?<!item )(?<!part )(?<!phase )(?<!stage )(?<!option )#(\d+)\b",
+    re.IGNORECASE,
+)
 
 # Fingerprint normalization: ticks restate the same request with a fresh
 # timestamp, clock time, wait or count, so those are dropped before the
@@ -144,12 +205,75 @@ def has_marker_line(text: str, marker_list) -> bool:
     return False
 
 
-def classify(text, *, markers=DEFAULT_MARKERS, unattended=True):
+def refs(text) -> set:
+    """PR/issue references in text, normalized (see NAMED_REF_RE)."""
+    if not text or not isinstance(text, str):
+        return set()
+    found = {f"{name.lower()}#{num}" for name, num in NAMED_REF_RE.findall(text)}
+    found.update(f"#{num}" for num in BARE_REF_RE.findall(text))
+    return found
+
+
+def session_refs(conn, tool, session_id) -> set:
+    """Every reference the session's notes (open or dismissed) mention: the
+    seen_refs the hook passes to classify for that session's next Stop."""
+    seen = set()
+    for row in conn.execute(
+        "SELECT text FROM notes WHERE tool=? AND session_id=?", (tool, session_id)
+    ):
+        seen |= refs(row[0])
+    return seen
+
+
+def _lead_sentence(text: str) -> str:
+    return SENTENCE_END_RE.split(first_line(text), maxsplit=1)[0]
+
+
+def is_waiting_restatement(text: str) -> bool:
+    """True when the message's lead sentence only says what is still
+    waiting on the human, with no event or link in it."""
+    lead = _lead_sentence(text)
+    return bool(WAITING_RE.search(lead)) and not EVENT_RE.search(lead) and not URL_RE.search(lead)
+
+
+def has_strong_event(text: str) -> bool:
+    """A hard event (STRONG_EVENT_RE) anywhere in the text that is neither
+    negated nor background (see BACKGROUND_RE) in its own clause."""
+    for match in STRONG_EVENT_RE.finditer(text):
+        before = text[: match.start()]
+        clause = CLAUSE_END_RE.split(before)[-1]
+        if match.group().lower() == "merged" and ADJECTIVAL_RE.search(before):
+            continue
+        if not NEGATED_RE.search(before) and not BACKGROUND_RE.search(clause):
+            return True
+    return False
+
+
+def is_milestone(text: str, seen_refs=None) -> bool:
+    if EVENT_RE.search(text) or URL_RE.search(text):
+        return True
+    seen = set(seen_refs or ())
+    if MILESTONE_REF_RE.search(text) and refs(text) - seen:
+        return True
+    # A status is about its own clause: "PR #4 is in hand; the plan is ready
+    # for your review" reports a new thing to review even with #4 seen.
+    for clause in CLAUSE_END_RE.split(text):
+        if STATUS_RE.search(clause):
+            clause_refs = refs(clause)
+            if not clause_refs or clause_refs - seen:
+                return True
+    return False
+
+
+def classify(text, *, markers=DEFAULT_MARKERS, unattended=True, seen_refs=None):
     """Return "needs_you", "update", "error" or None for one final message.
 
     A marker line always counts (a request for the human is worth keeping
     in an attended turn too); "update" and "error" only count when the turn
     was unattended, since a human who is watching already read them.
+    `seen_refs` is the set of references (`refs`) the same session's
+    earlier notes already mention: a reference in it no longer makes a
+    short message a milestone on its own, while an event word still does.
     """
     if not text or not isinstance(text, str):
         return None
@@ -162,7 +286,9 @@ def classify(text, *, markers=DEFAULT_MARKERS, unattended=True):
         return None
     if ERROR_RE.match(text):
         return "error"
-    if QUIET_RE.match(text):
+    if QUIET_RE.match(text) or is_waiting_restatement(text):
+        if has_strong_event(text):
+            return "update"
         if NEWS_RE.search(text) and len(text) >= NEWS_MIN_CHARS:
             return "update"
         return None
@@ -172,7 +298,7 @@ def classify(text, *, markers=DEFAULT_MARKERS, unattended=True):
         and not URL_RE.search(text)
     ):
         return None
-    if MILESTONE_RE.search(text) or len(text) >= UPDATE_MIN_CHARS:
+    if is_milestone(text, seen_refs) or len(text) >= UPDATE_MIN_CHARS:
         return "update"
     return None
 
@@ -276,10 +402,11 @@ def is_valid_note(note) -> bool:
 
 # -- dismiss / rebuild ----------------------------------------------------------------
 
-def dismiss(conn, now_iso, ids=None, session=None) -> int:
+def dismiss(conn, now_iso, ids=None, session=None, kinds=None) -> int:
     """Set dismissed_at on open notes: the given ids, or every open note
-    (optionally only one (tool, session_id)'s) when ids is None. Returns the
-    number dismissed. Must run inside the caller's transaction."""
+    when ids is None, narrowed to one (tool, session_id)'s with `session`
+    and to the given kinds with `kinds`. Returns the number dismissed. Must
+    run inside the caller's transaction."""
     if ids is not None:
         ids = [int(i) for i in ids]
         if not ids:
@@ -290,16 +417,18 @@ def dismiss(conn, now_iso, ids=None, session=None) -> int:
             (now_iso, *ids),
         )
         return cur.rowcount
+    query = "UPDATE notes SET dismissed_at=? WHERE dismissed_at IS NULL"
+    params = [now_iso]
     if session is not None:
-        tool, session_id = session
-        cur = conn.execute(
-            "UPDATE notes SET dismissed_at=? WHERE dismissed_at IS NULL "
-            "AND tool=? AND session_id=?",
-            (now_iso, tool, session_id),
-        )
-        return cur.rowcount
-    cur = conn.execute("UPDATE notes SET dismissed_at=? WHERE dismissed_at IS NULL", (now_iso,))
-    return cur.rowcount
+        query += " AND tool=? AND session_id=?"
+        params.extend(session)
+    if kinds is not None:
+        kinds = [kind for kind in kinds if kind in KINDS]
+        if not kinds:
+            return 0
+        query += f" AND kind IN ({','.join('?' for _ in kinds)})"
+        params.extend(kinds)
+    return conn.execute(query, params).rowcount
 
 
 def _meta(conn) -> dict:
@@ -332,8 +461,11 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
     resurrected. `days` narrows the replay to Stop events newer than that.
     Each event's unattended flag comes from the nearest preceding parent
     UserPromptSubmit of the same session, the same prompt the hook reads
-    from events (hook._last_parent_prompt_text). Runs in one IMMEDIATE
-    transaction.
+    from events (hook._last_parent_prompt_text). Each event's seen_refs are
+    the references of the session's notes that predate it: kept notes first
+    seen at an earlier event (or, without an event, an earlier ts) plus the
+    notes this replay recorded so far, so a replay agrees with what the hook
+    would have decided at the time. Runs in one IMMEDIATE transaction.
     """
     marker_list = markers(config)
     prefixes = unattended_prefixes(config)
@@ -358,6 +490,16 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
 
         if upper > lower:
             last_prompt = {}
+            kept_refs = {}
+            for note_row in conn.execute(
+                "SELECT tool, session_id, event_id, ts, text FROM notes"
+            ).fetchall():
+                note_refs = refs(note_row[4])
+                if note_refs:
+                    kept_refs.setdefault((note_row[0], note_row[1]), []).append(
+                        (note_row[2], note_row[3], note_refs)
+                    )
+            replay_refs = {}
             rows = conn.execute(
                 "SELECT id, ts, tool, session_id, event, text FROM events "
                 "WHERE agent_id IS NULL AND id <= ? "
@@ -379,9 +521,18 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
                     if when is None or when < cutoff:
                         continue
                 stats["scanned"] += 1
+                seen = set(replay_refs.get(key, ()))
+                for note_event, note_ts, note_refs in kept_refs.get(key, ()):
+                    earlier = (
+                        note_event < event_id if note_event is not None
+                        else bool(note_ts and ts and note_ts < ts)
+                    )
+                    if earlier:
+                        seen |= note_refs
                 kind = classify(
                     text, markers=marker_list,
                     unattended=is_unattended(last_prompt.get(key), prefixes),
+                    seen_refs=seen,
                 )
                 if not kind:
                     continue
@@ -394,6 +545,7 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
                     stats["skipped_dismissed"] += 1
                     continue
                 record_note(conn, tool, session_id, kind, text, "backfill", ts, event_id=event_id)
+                replay_refs.setdefault(key, set()).update(refs(text))
                 stats["recorded"] += 1
 
         new_mark = max(upper, int(meta.get("rebuilt_through", 0))) if not reset else upper
