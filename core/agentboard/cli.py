@@ -125,6 +125,17 @@ def _session_status_text(session, now):
 SNAPSHOT_NOTES_PER_SESSION = 20
 
 
+def _listed_notes(session_notes):
+    """The notes a snapshot lists for one session: the newest
+    SNAPSHOT_NOTES_PER_SESSION, plus every older open needs_you note, so a
+    request for the user is never capped out by a loop's updates (the app
+    relies on this to count a session's unlisted notes as update/error
+    ones). Keeps the newest-first order."""
+    listed = session_notes[:SNAPSHOT_NOTES_PER_SESSION]
+    listed += [n for n in session_notes[SNAPSHOT_NOTES_PER_SESSION:] if n["kind"] == "needs_you"]
+    return listed
+
+
 def _open_notes_by_session(conn) -> dict:
     """{(tool, session_id): [open note rows, newest last_ts first]}."""
     by_key = {}
@@ -245,7 +256,7 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
                 "count": note["count"],
                 "source": note["source"],
             }
-            for note in session_notes[:SNAPSHOT_NOTES_PER_SESSION]
+            for note in _listed_notes(session_notes)
         ],
         "notes_count": len(session_notes),
     }
@@ -525,6 +536,10 @@ def cmd_notes(args):
     if (args.days is not None or args.reset) and not args.rebuild:
         _report("error", "notes", "agentboard notes: --days and --reset need --rebuild")
         return 2
+    if args.kind is not None and (args.dismiss is not None or args.rebuild):
+        _report("error", "notes",
+                "agentboard notes: --kind works with --dismiss-all or a listing only")
+        return 2
     session = None
     if args.session:
         session = _explicit_session(args.session)
@@ -555,13 +570,13 @@ def cmd_notes(args):
                 if args.dismiss is not None:
                     count = notes_mod.dismiss(conn, now_iso, ids=args.dismiss)
                 else:
-                    count = notes_mod.dismiss(conn, now_iso, session=session)
+                    count = notes_mod.dismiss(conn, now_iso, session=session, kinds=args.kind)
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
             diag.info("cli", "notes_dismiss", ids=args.dismiss, all=args.dismiss_all,
-                      session=args.session, dismissed=count)
+                      session=args.session, kinds=args.kind, dismissed=count)
             if args.json:
                 print(json.dumps({"dismissed": count}))
             else:
@@ -575,6 +590,9 @@ def cmd_notes(args):
         if session is not None:
             clauses.append("tool=? AND session_id=?")
             params.extend(session)
+        if args.kind is not None:
+            clauses.append(f"kind IN ({','.join('?' for _ in args.kind)})")
+            params.extend(args.kind)
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY last_ts DESC, id DESC"
@@ -2346,11 +2364,14 @@ def build_parser():
     p = sub.add_parser("notes", help="list, dismiss or rebuild retained notes")
     p.add_argument("--session", default=None, help="TOOL:ID: only this session's notes")
     p.add_argument("--all", action="store_true", help="include dismissed notes")
+    p.add_argument("--kind", nargs="+", choices=list(notes_mod.KINDS), default=None,
+                   help="only notes of these kinds (a listing or --dismiss-all)")
     p.add_argument("--json", action="store_true")
     action = p.add_mutually_exclusive_group()
     action.add_argument("--dismiss", nargs="+", type=int, metavar="ID", default=None)
     action.add_argument("--dismiss-all", action="store_true",
-                        help="dismiss every open note (only --session's with --session)")
+                        help="dismiss every open note (only --session's with --session, "
+                             "only --kind's with --kind)")
     action.add_argument("--rebuild", action="store_true",
                         help="classify recorded Stop events the hook has not seen")
     p.add_argument("--days", type=int, default=None,

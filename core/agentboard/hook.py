@@ -447,7 +447,12 @@ def _record_stop_note(conn, tool, session_id, text, now, event_id) -> None:
             _last_parent_prompt_text(conn, tool, session_id),
             notes.unattended_prefixes(config),
         )
-        kind = notes.classify(text, markers=notes.markers(config), unattended=unattended)
+        # The session's earlier notes are read only when this message names
+        # a PR/issue reference, so most Stops add no query.
+        seen_refs = notes.session_refs(conn, tool, session_id) if notes.refs(text) else None
+        kind = notes.classify(
+            text, markers=notes.markers(config), unattended=unattended, seen_refs=seen_refs
+        )
         if kind:
             notes.record_note(conn, tool, session_id, kind, text, "stop", now, event_id=event_id)
             _diag("debug", "note", session=f"{tool}:{session_id}", kind=kind, event_id=event_id)

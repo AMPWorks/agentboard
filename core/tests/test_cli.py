@@ -276,6 +276,17 @@ class SnapshotNotesTests(AgentBoardTestCase):
         self.assertEqual(entry["notes"][-1]["text"], "PR #5 merged")
         self.assertEqual(snapshot["counts"]["notes"], 25)
 
+    def test_cap_never_drops_an_open_needs_you_note(self):
+        self.session()
+        self.note("USER_ACTION: approve the plan", minutes_ago=200)
+        for i in range(25):
+            self.note(f"PR #{i} merged", kind="update", minutes_ago=100 - i)
+        _, entry = self.entry()
+        self.assertEqual(entry["notes_count"], 26)
+        self.assertEqual(len(entry["notes"]), cli.SNAPSHOT_NOTES_PER_SESSION + 1)
+        self.assertEqual(entry["notes"][-1]["text"], "USER_ACTION: approve the plan")
+        self.assertEqual([n["kind"] for n in entry["notes"][:-1]], ["update"] * 20)
+
     def test_ordering_follows_last_ts_not_insertion(self):
         self.session()
         self.note("PR #1 merged", kind="update", minutes_ago=50)
@@ -600,6 +611,56 @@ class NotesCommandTests(AgentBoardTestCase):
         _run_cmd(["notes", "--dismiss-all"])
         self.assertEqual(json.loads(_run_cmd(["notes", "--json"])[1])["notes"], [])
 
+    def test_dismiss_all_global_reaches_every_session_and_past_any_cap(self):
+        for i in range(25):
+            self._add(f"a{i}", session="claude:a")
+        self._add("b1", session="codex:b", kind="needs_you")
+        rc, out, _ = _run_cmd(["notes", "--dismiss-all", "--json"])
+        self.assertEqual((rc, json.loads(out)), (0, {"dismissed": 26}))
+        self.assertEqual(json.loads(_run_cmd(["notes", "--json"])[1])["notes"], [])
+
+    def test_dismiss_all_kind_scoped(self):
+        self._add("a-update", session="claude:a")
+        self._add("a-error", session="claude:a", kind="error")
+        self._add("a-ask", session="claude:a", kind="needs_you")
+        self._add("b-update", session="claude:b")
+        rc, out, _ = _run_cmd(["notes", "--dismiss-all", "--session", "claude:a",
+                               "--kind", "update", "error", "--json"])
+        self.assertEqual((rc, json.loads(out)), (0, {"dismissed": 2}))
+        remaining = json.loads(_run_cmd(["notes", "--json"])[1])["notes"]
+        self.assertEqual(sorted(n["text"] for n in remaining), ["a-ask", "b-update"])
+        # Without --session the kind scope covers every session.
+        rc, out, _ = _run_cmd(["notes", "--dismiss-all", "--kind", "update", "--json"])
+        self.assertEqual(json.loads(out), {"dismissed": 1})
+        remaining = json.loads(_run_cmd(["notes", "--json"])[1])["notes"]
+        self.assertEqual([n["text"] for n in remaining], ["a-ask"])
+
+    def test_dismiss_all_leaves_dismissed_notes_untouched(self):
+        self._add("old")
+        old_id = json.loads(_run_cmd(["notes", "--json"])[1])["notes"][0]["id"]
+        _run_cmd(["notes", "--dismiss", str(old_id)])
+        before = _notes_rows(self.conn, f"id={old_id}")[0]["dismissed_at"]
+        self._add("new")
+        rc, out, _ = _run_cmd(["notes", "--dismiss-all", "--json"])
+        self.assertEqual(json.loads(out), {"dismissed": 1})
+        self.assertEqual(_notes_rows(self.conn, f"id={old_id}")[0]["dismissed_at"], before)
+
+    def test_kind_filters_the_listing(self):
+        self._add("u1")
+        self._add("ask", kind="needs_you")
+        data = json.loads(_run_cmd(["notes", "--json", "--kind", "needs_you"])[1])
+        self.assertEqual([n["text"] for n in data["notes"]], ["ask"])
+
+    def test_kind_with_dismiss_ids_or_rebuild_is_an_error(self):
+        for argv in (["notes", "--dismiss", "1", "--kind", "update"],
+                     ["notes", "--rebuild", "--kind", "update"]):
+            with self.subTest(argv=argv):
+                rc, _, err = _run_cmd(argv)
+                self.assertEqual(rc, 2)
+                self.assertIn("--kind", err)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["notes", "--dismiss-all", "--kind", "chatter"])
+
     def test_dismissed_note_recurs_as_new_row(self):
         self._add("PR #4 merged")
         _run_cmd(["notes", "--dismiss-all"])
@@ -735,6 +796,37 @@ class NotesRebuildTests(AgentBoardTestCase):
         stats = json.loads(out)
         self.assertEqual(stats["recorded"], 3)
         self.assertEqual(stats["upper"], 10)
+
+    def test_rebuild_seen_refs_follow_event_order(self):
+        _insert_event(self.conn, "UserPromptSubmit", TICK, ts="2026-06-15T09:00:00.000000Z")
+        _insert_event(self.conn, "Stop", "The builder is still fixing PR #4's findings.",
+                      ts="2026-06-15T09:01:00.000000Z")
+        _insert_event(self.conn, "Stop", "The builder is still fixing PR #4's findings.",
+                      ts="2026-06-15T09:02:00.000000Z")
+        _insert_event(self.conn, "Stop", "Tick: PR #4 is in hand; PR #5 is ready for your review.",
+                      ts="2026-06-15T09:03:00.000000Z")
+        _insert_event(self.conn, "Stop", "PR #5 merged as abc1234.",
+                      ts="2026-06-15T09:04:00.000000Z")
+        _set_hook_from(self.conn)
+        _run_cmd(["notes", "--rebuild"])
+        rows = _notes_rows(self.conn)
+        self.assertEqual(
+            [(r["text"], r["count"]) for r in rows],
+            [("The builder is still fixing PR #4's findings.", 1),
+             ("Tick: PR #4 is in hand; PR #5 is ready for your review.", 1),
+             ("PR #5 merged as abc1234.", 1)],
+        )
+        # A reset replays the same way: a kept note first seen at a later
+        # event does not make an earlier first mention look repeated.
+        _run_cmd(["notes", "--dismiss", str(rows[2]["id"])])
+        rc, out, _ = _run_cmd(["notes", "--rebuild", "--reset"])
+        self.assertEqual(rc, 0)
+        open_texts = [r["text"] for r in _notes_rows(self.conn, "dismissed_at IS NULL")]
+        self.assertEqual(
+            open_texts,
+            ["The builder is still fixing PR #4's findings.",
+             "Tick: PR #4 is in hand; PR #5 is ready for your review."],
+        )
 
     def test_rebuild_on_empty_db(self):
         rc, out, _ = _run_cmd(["notes", "--rebuild"])

@@ -207,3 +207,162 @@ enum UpdatesFeed {
         header(listed: items.count, total: total)
     }
 }
+
+/// One way to dismiss open notes through the CLI: what a grouped row's x and
+/// the Updates "Clear all"/"Clear matching" button resolve to.
+enum NoteDismissal: Sendable, Equatable {
+    /// `notes --dismiss-all`: every open note, listed or not.
+    case all
+    /// `notes --dismiss-all --session TOOL:ID [--kind K...]`: every open note
+    /// of one session (only the given kinds when `kinds` is set).
+    case session(tool: String, sessionId: String, kinds: [Note.Kind]?)
+    /// `notes --dismiss ID...`: exactly these notes.
+    case ids([Int])
+}
+
+extension UpdatesFeed {
+    /// Kinds a session's feed row groups: everything but `needs_you`, which
+    /// always gets a row of its own.
+    static let groupedKinds: [Note.Kind] = [.update, .error]
+
+    /// The popover shows at most this many update/error rows until the
+    /// user expands the section.
+    static let compactLimit = 3
+
+    /// A row of the popover's Updates section: one note, or (`isGroup`) all
+    /// of one session's update/error notes the query keeps, which a loop
+    /// session piles up tick after tick.
+    struct Row: Sendable, Equatable, Identifiable {
+        let session: Session
+        /// The listed notes this row stands for, newest first; one unless
+        /// grouped.
+        let notes: [Note]
+        /// Open notes this row stands for, uncapped (a group of a session
+        /// with notes past the snapshot's cap counts those too).
+        let total: Int
+        let isGroup: Bool
+        /// What the row's x dismisses.
+        let dismissal: NoteDismissal
+
+        /// The newest note: its text and time lead the row.
+        var note: Note { notes[0] }
+        var id: String { isGroup ? "group:\(session.key)" : "note:\(note.id)" }
+        var sessionKey: String { session.key }
+        var project: String { session.project }
+        var toolBadge: String { session.toolBadge }
+        var isNeedsYou: Bool { !isGroup && note.kind == .needsYou }
+        /// The kind the row's glyph shows: a group with an error among its
+        /// notes shows the error, so an outage stays visible while collapsed.
+        var glyphKind: Note.Kind {
+            isGroup && notes.contains { $0.kind == .error } ? .error : note.kind
+        }
+        /// "×12 notes" on a group row, nil otherwise.
+        var groupLabel: String? { isGroup ? "×\(total) notes" : nil }
+    }
+
+    /// A session's open update/error notes, uncapped. The snapshot never
+    /// caps out a `needs_you` note, so every unlisted note is one of these.
+    static func groupedTotal(of session: Session) -> Int {
+        let listed = session.notes.filter { groupedKinds.contains($0.kind) }.count
+        return listed + max(0, session.notesCount - session.notes.count)
+    }
+
+    /// The feed as rows: each `needs_you` note on its own, and each
+    /// session's update/error notes folded into one row once there are two
+    /// or more of them, placed where its newest note would be. A query that
+    /// matches the session on its own fields keeps every note, so the group
+    /// counts and dismisses all of them; otherwise it holds, counts and
+    /// dismisses only the listed notes the query matched.
+    static func rows(from sessions: [Session], query: SessionSearch) -> [Row] {
+        let items = make(from: sessions, query: query)
+        var grouped: [String: [Note]] = [:]
+        for item in items where groupedKinds.contains(item.note.kind) {
+            grouped[item.sessionKey, default: []].append(item.note)
+        }
+        var emitted = Set<String>()
+        var rows: [Row] = []
+        for item in items {
+            let session = item.session
+            guard groupedKinds.contains(item.note.kind) else {
+                rows.append(single(item))
+                continue
+            }
+            let members = grouped[item.sessionKey] ?? [item.note]
+            let whole = query.matchesIgnoringNotes(session)
+            let total = whole ? max(groupedTotal(of: session), members.count) : members.count
+            guard total > 1 else {
+                rows.append(single(item))
+                continue
+            }
+            guard emitted.insert(item.sessionKey).inserted else { continue }
+            let dismissal: NoteDismissal = whole
+                ? .session(tool: session.tool, sessionId: session.sessionId, kinds: groupedKinds)
+                : .ids(members.map(\.id))
+            rows.append(Row(session: session, notes: members, total: total, isGroup: true,
+                            dismissal: dismissal))
+        }
+        return rows
+    }
+
+    private static func single(_ item: Item) -> Row {
+        Row(session: item.session, notes: [item.note], total: 1, isGroup: false,
+            dismissal: .ids([item.note.id]))
+    }
+
+    /// The popover's compact view of `rows`: every `needs_you` row, and the
+    /// first `limit` others, in feed order. Expanded, every row. `hidden`
+    /// is how many rows the compact view leaves out (0 when expanded).
+    static func compact(_ rows: [Row], expanded: Bool, limit: Int = compactLimit)
+        -> (shown: [Row], hidden: Int)
+    {
+        guard !expanded else { return (rows, 0) }
+        var others = 0
+        let shown = rows.filter { row in
+            if row.isNeedsYou { return true }
+            others += 1
+            return others <= limit
+        }
+        return (shown, rows.count - shown.count)
+    }
+
+    /// Whether the compact view of `rows` leaves anything out, i.e. the
+    /// section needs a "Show all N" / "Show fewer" toggle.
+    static func needsToggle(_ rows: [Row], limit: Int = compactLimit) -> Bool {
+        compact(rows, expanded: false, limit: limit).hidden > 0
+    }
+
+    /// What the Updates section's clear button does for this query.
+    struct ClearPlan: Sendable, Equatable {
+        let title: String
+        let help: String
+        let dismissals: [NoteDismissal]
+    }
+
+    /// With no query, "Clear all" dismisses every open note: past the
+    /// snapshot's per-session cap and on sessions the popover does not list.
+    /// With a query, "Clear matching" dismisses every note the query keeps:
+    /// all open notes of each session it matches on its own fields, plus
+    /// the listed notes it matches elsewhere.
+    static func clearPlan(from sessions: [Session], query: SessionSearch) -> ClearPlan {
+        guard !query.isEmpty else {
+            return ClearPlan(title: "Clear all",
+                             help: "Dismiss every open update, including ones not listed here",
+                             dismissals: [.all])
+        }
+        var dismissals: [NoteDismissal] = []
+        var ids: [Int] = []
+        for session in sessions {
+            if query.matchesIgnoringNotes(session) {
+                if session.notesCount > 0 || !session.notes.isEmpty {
+                    dismissals.append(.session(tool: session.tool, sessionId: session.sessionId, kinds: nil))
+                }
+            } else {
+                ids += session.notes.filter { query.matches($0, in: session) }.map(\.id)
+            }
+        }
+        if !ids.isEmpty { dismissals.append(.ids(ids)) }
+        return ClearPlan(title: "Clear matching",
+                         help: "Dismiss every update that matches the filter",
+                         dismissals: dismissals)
+    }
+}

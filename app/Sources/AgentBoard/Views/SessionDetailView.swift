@@ -5,7 +5,42 @@ struct SessionDetailView: View {
     let session: Session
     @ObservedObject var store: SnapshotStore
 
+    /// The note a popover update click opened, outlined until another
+    /// session is shown.
+    @State private var highlightedNote: Int?
+
     var body: some View {
+        ScrollViewReader { proxy in
+            content
+                .onAppear { consumeNoteFocus(proxy) }
+                .onChange(of: store.pendingNote) { _, _ in consumeNoteFocus(proxy) }
+                .onChange(of: session.key) { _, _ in
+                    highlightedNote = nil
+                    consumeNoteFocus(proxy)
+                }
+        }
+    }
+
+    /// Scrolls to the note a popover update row asked for, once this
+    /// detail shows that note's session, and clears the request either way,
+    /// so a session with nothing to scroll to never keeps it for a later
+    /// manual selection.
+    private func consumeNoteFocus(_ proxy: ScrollViewProxy) {
+        guard let focus = store.pendingNote, focus.sessionKey == session.key else { return }
+        store.pendingNote = nil
+        guard let target = focus.scrollTarget(in: session) else { return }
+        highlightedNote = focus.noteId
+        // Let the detail lay out for the new session before scrolling, and
+        // scroll again once a newly opened dashboard window has laid out
+        // (the first attempt can land before it has; repeating is a no-op).
+        Task { @MainActor in
+            withAnimation { proxy.scrollTo(target, anchor: .top) }
+            try? await Task.sleep(for: .milliseconds(300))
+            withAnimation { proxy.scrollTo(target, anchor: .top) }
+        }
+    }
+
+    private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
@@ -16,7 +51,7 @@ struct SessionDetailView: View {
                 textSection(title: "First prompt", text: session.firstPrompt)
                 textSection(title: "Last prompt", text: session.lastPrompt)
                 if !session.notes.isEmpty {
-                    SessionNotesSection(session: session, store: store)
+                    SessionNotesSection(session: session, store: store, highlighted: highlightedNote)
                 }
                 textSection(title: "Last assistant message", text: session.lastAssistant, markdown: true)
             }

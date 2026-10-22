@@ -28,7 +28,10 @@ class CorpusTests(unittest.TestCase):
         self.assertGreaterEqual(len(rows), 40)
         mismatches = []
         for row in rows:
-            got = notes.classify(row["text"], unattended=row["unattended"])
+            got = notes.classify(
+                row["text"], unattended=row["unattended"],
+                seen_refs=set(row.get("seen_refs", ())),
+            )
             if got != row["expected"]:
                 mismatches.append((row["why"], got, row["expected"]))
         self.assertEqual(mismatches, [])
@@ -101,6 +104,126 @@ class ClassifyTests(unittest.TestCase):
         self.assertTrue(notes.is_unattended("# Autonomous loop tick (dynamic pacing)\n\nRun", prefixes))
         self.assertFalse(notes.is_unattended("please fix the bug", prefixes))
         self.assertFalse(notes.is_unattended(None, prefixes))
+
+
+class QuietFormTests(unittest.TestCase):
+    QUIET = [
+        "Nothing changed this tick.",
+        "Nothing changed. PR #5 still needs you to post its review drafts.",
+        "Nothing else changed: the plan still needs your approval.",
+        "No changes since the last check.",
+        "No change since the previous tick.",
+        "Quiet tick, backoff window.",
+        "Still quiet; nothing to act on.",
+        "Still waiting on the human review of PR #9.",
+        "Two things are still waiting on you:\n- **PR #5.** Approve it.\n- **Plan.** Approve it.",
+        "Both items are still waiting on you: PR #5 and the lifecycle plan.",
+        "PR #3 still needs your `/ack-tested` after you test the installed build.",
+        "The export plan is still waiting for your approval.",
+        "**PR #5 is still waiting on you.** Post its saved review drafts first.",
+    ]
+
+    def test_each_quiet_form_is_dropped(self):
+        for text in self.QUIET:
+            with self.subTest(text=text):
+                self.assertIsNone(notes.classify(text, unattended=True))
+
+    def test_long_quiet_restatement_without_news_is_dropped(self):
+        text = ("Nothing changed this tick. PR #5 still needs you to post its saved review "
+                "drafts, approve it and run the manual checks. " * 4)
+        self.assertGreaterEqual(len(text), notes.UPDATE_MIN_CHARS)
+        self.assertIsNone(notes.classify(text, unattended=True))
+
+    def test_repair_or_bug_news_is_still_an_update(self):
+        repair = ("Nothing changed this tick, but one repair: the cron-id marker had vanished "
+                  "again, so I restored it and the handler is back on the local scope for the "
+                  "next tick.")
+        bug = ("Two things are still waiting on you. Separately I found a bug: the backoff "
+               "timer read the wrong marker file, so it never fired on any of the submodule "
+               "tasks at all.")
+        for text in (repair, bug):
+            with self.subTest(text=text):
+                self.assertGreaterEqual(len(text), notes.NEWS_MIN_CHARS)
+                self.assertEqual(notes.classify(text, unattended=True), "update")
+
+    def test_short_news_word_stays_quiet(self):
+        self.assertIsNone(notes.classify("Nothing changed; found nothing new.", unattended=True))
+
+    def test_event_in_the_lead_sentence_is_not_a_restatement(self):
+        self.assertEqual(
+            notes.classify("Opened PR #12; it is waiting for your review.", unattended=True),
+            "update",
+        )
+        self.assertEqual(
+            notes.classify("PR #9 merged. The plan is still waiting on you.", unattended=True),
+            "update",
+        )
+
+    def test_waiting_phrase_later_in_the_message_does_not_quiet_it(self):
+        text = "Opened the export task's plan in Pending. PR #9 is still waiting on you."
+        self.assertEqual(notes.classify(text, unattended=True), "update")
+
+
+class SeenRefsTests(unittest.TestCase):
+    def test_refs_normalization(self):
+        self.assertEqual(
+            notes.refs("PR #5, PRs #6 and #7, acme/Widgets#8, issue #9, abc#x"),
+            {"#5", "#6", "#7", "widgets#8", "#9"},
+        )
+        self.assertEqual(notes.refs("no refs here, 3# or a#"), set())
+        self.assertEqual(notes.refs(None), set())
+
+    def test_first_mention_is_update_repeat_is_not(self):
+        text = "The builder is still fixing PR #4's review findings."
+        self.assertEqual(notes.classify(text, unattended=True), "update")
+        self.assertEqual(notes.classify(text, unattended=True, seen_refs=set()), "update")
+        self.assertIsNone(notes.classify(text, unattended=True, seen_refs={"#4"}))
+
+    def test_event_word_counts_for_a_seen_ref(self):
+        for text in ("PR #4 merged as abc1234.", "Opened PR #4.", "PR #4 is deployed.",
+                     "CI went red on PR #4.", "Filed a follow-up for PR #4."):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    notes.classify(text, unattended=True, seen_refs={"#4"}), "update"
+                )
+
+    def test_new_ref_among_seen_ones_is_update(self):
+        text = "Two subagents are in flight on PR #4 and PR #5."
+        self.assertIsNone(notes.classify(text, unattended=True, seen_refs={"#4", "#5"}))
+        self.assertEqual(notes.classify(text, unattended=True, seen_refs={"#4"}), "update")
+
+    def test_status_word_with_only_seen_refs_is_dropped(self):
+        text = "Tick: scope intact; PR #4 is ready for your review."
+        self.assertEqual(notes.classify(text, unattended=True), "update")
+        self.assertIsNone(notes.classify(text, unattended=True, seen_refs={"#4"}))
+        # Without any reference a status word still counts.
+        self.assertEqual(
+            notes.classify("The export plan is in Pending.", unattended=True, seen_refs={"#4"}),
+            "update",
+        )
+
+    def test_url_counts_for_a_seen_ref(self):
+        text = "See https://github.com/acme/widgets/pull/4 for PR #4."
+        self.assertEqual(notes.classify(text, unattended=True, seen_refs={"#4"}), "update")
+
+    def test_long_message_with_seen_ref_is_still_update(self):
+        text = ("The builder is still fixing PR #4's review findings in the sidebar layout. "
+                * 5)
+        self.assertGreaterEqual(len(text), notes.UPDATE_MIN_CHARS)
+        self.assertEqual(notes.classify(text, unattended=True, seen_refs={"#4"}), "update")
+
+
+class SessionRefsTests(AgentBoardTestCase):
+    def test_session_refs_cover_open_and_dismissed_notes_of_that_session(self):
+        self.conn.execute("BEGIN")
+        notes.record_note(self.conn, "claude", "s1", "update", "Opened PR #4", "stop", T1)
+        dismissed = notes.record_note(self.conn, "claude", "s1", "update",
+                                      "Pushed acme#7", "stop", T2)
+        notes.record_note(self.conn, "claude", "s2", "update", "Opened PR #9", "stop", T1)
+        notes.dismiss(self.conn, T3, ids=[dismissed])
+        self.conn.execute("COMMIT")
+        self.assertEqual(notes.session_refs(self.conn, "claude", "s1"), {"#4", "acme#7"})
+        self.assertEqual(notes.session_refs(self.conn, "codex", "s1"), set())
 
 
 class FingerprintTests(unittest.TestCase):

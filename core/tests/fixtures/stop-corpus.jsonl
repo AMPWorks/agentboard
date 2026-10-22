@@ -46,3 +46,49 @@
 {"text": "Done.", "unattended": true, "expected": null, "why": "too short"}
 {"text": "", "unattended": true, "expected": null, "why": "empty"}
 {"text": "   \n  ", "unattended": true, "expected": null, "why": "whitespace only"}
+{"text": "Nothing changed this tick:\n- **PR #5.** It still needs your post-deploy checks and `/ack-tested`.\n- **Lifecycle plan.** It's still waiting for your approval.", "unattended": true, "expected": null, "why": "nothing changed this tick, bulleted restatement"}
+{"text": "Nothing changed this tick. PR #5 still needs you to post its saved review drafts, approve it and run the manual checks. The lifecycle plan still needs your approval.", "unattended": true, "expected": null, "why": "nothing changed, prose restatement"}
+{"text": "Nothing changed. Both items are still waiting on you:\n- **PR #5.** Post its saved review drafts, then approve it.\n- **Lifecycle plan.** It still needs your approval.", "unattended": true, "expected": null, "why": "nothing changed, both items waiting"}
+{"text": "Nothing else changed: PR #8 still awaits your review and the export plan still needs your approval.", "unattended": true, "expected": null, "why": "nothing else changed"}
+{"text": "No changes since the last check; PR #8 still awaits your review.", "unattended": true, "expected": null, "why": "no changes"}
+{"text": "Still quiet: PR #8 is waiting for your review.", "unattended": true, "expected": null, "why": "still quiet"}
+{"text": "Two things are still waiting on you:\n- **PR #5.** Retained updates are deployed and need your post-deploy checks, then `/ack-tested` on the PR.\n- **Lifecycle plan.** It needs your approval.", "unattended": true, "expected": null, "why": "waiting restatement, first line"}
+{"text": "Both items are still waiting on you: PR #5 needs your review drafts posted, and the lifecycle plan needs your approval.", "unattended": true, "expected": null, "why": "both items still waiting"}
+{"text": "PR #3 is still waiting on your `/ack-tested` after you test the installed build, and nothing else needs doing.", "unattended": true, "expected": null, "why": "still waiting on your ack-tested"}
+{"text": "The search plan is still waiting for your approval and your answers to the four open questions. You can reply \"approved, defaults\" to take every recommended option.", "unattended": true, "expected": null, "why": "plan still waiting for your approval"}
+{"text": "PR #5 is still waiting on you. Post its saved review drafts, then approve the PR and run the manual checks. The lifecycle plan also still needs your approval.", "unattended": true, "expected": null, "why": "lead sentence restates waiting"}
+{"text": "Nothing changed this tick, but one repair: the local cron-id marker had vanished again, so I restored it and filed the bug on the handler queue; the scope is back to local and the job is intact.", "unattended": true, "expected": "update", "why": "nothing changed with a repair is news"}
+{"text": "Two things are still waiting on you, and a heads-up: I found that the backoff timer was reading the wrong marker file, so it never fired; I fixed the path and logged a note on the queue.", "unattended": true, "expected": "update", "why": "waiting restatement with news is kept"}
+{"text": "PR #9 merged; the export plan is still waiting on you.", "unattended": true, "expected": "update", "why": "event before the waiting sentence"}
+{"text": "Opened PR #12 for the export task; it is waiting for your review.", "unattended": true, "expected": "update", "why": "event in the waiting lead"}
+{"text": "Tick: scope intact; PR #140 is ready for your review.", "unattended": true, "expected": null, "why": "seen ref with a status word is a restatement", "seen_refs": ["#140"]}
+{"text": "Tick: scope intact; PRs #139, #140 and #141 still await review.", "unattended": true, "expected": "update", "why": "one unseen ref among seen ones", "seen_refs": ["#139", "#140"]}
+{"text": "PR #140 merged as abc1234; the follow-up is in Pending.", "unattended": true, "expected": "update", "why": "event word counts for a seen ref", "seen_refs": ["#140"]}
+{"text": "The builder is still fixing PR #4's review findings.", "unattended": true, "expected": null, "why": "seen ref alone is not a milestone", "seen_refs": ["#4"]}
+{"text": "The builder is still fixing PR #4's review findings.", "unattended": true, "expected": "update", "why": "first mention of a ref is a milestone"}
+{"text": "Nothing changed on the plan, but CI went red on PR #5 after the rebase.", "unattended": true, "expected": "update", "why": "hard event after a quiet lead", "seen_refs": ["#5"]}
+{"text": "No changes needed to the schema; I opened PR #7 with the fix.", "unattended": true, "expected": "update", "why": "opened after a no-changes lead"}
+{"text": "PR #5 is still waiting on you. Meanwhile PR #7 merged and is deployed.", "unattended": true, "expected": "update", "why": "merged after a waiting lead", "seen_refs": ["#5", "#7"]}
+{"text": "Two things are still waiting on you:\n- **PR #5.** Retained updates are deployed and need your post-deploy checks.\n- CI went red on PR #6 after the rebase; I am investigating.", "unattended": true, "expected": "update", "why": "CI red in a waiting list", "seen_refs": ["#5", "#6"]}
+{"text": "Still waiting on you: PR #5 has not merged yet, and the export plan has not been opened.", "unattended": true, "expected": null, "why": "negated hard events stay quiet", "seen_refs": ["#5"]}
+{"text": "Nothing changed: PR #5 is approved and deployed, waiting on your post-deploy checks.", "unattended": true, "expected": null, "why": "accepted loss: soft events behind a quiet lead restate a known state", "seen_refs": ["#5"]}
+{"text": "PR #5 is now blocked: merge conflict with main.", "unattended": true, "expected": "update", "why": "a seen PR becoming blocked is an event", "seen_refs": ["#5"]}
+{"text": "PR #5 is blocked on a failing check.", "unattended": true, "expected": "update", "why": "blocked on a check is an event", "seen_refs": ["#5"]}
+{"text": "PR #5 is still blocked on your review.", "unattended": true, "expected": null, "why": "still blocked restates a wait", "seen_refs": ["#5"]}
+{"text": "PR #5 is blocked on your approval; nothing else to do.", "unattended": true, "expected": null, "why": "blocked on you restates a wait", "seen_refs": ["#5"]}
+{"text": "Tick: PR #4 is in hand; the export plan is ready for your review.", "unattended": true, "expected": "update", "why": "status about a new thing beside a seen ref", "seen_refs": ["#4"]}
+{"text": "Step #2 of the migration is ready for your review.", "unattended": true, "expected": "update", "why": "an ordinal is not a ref", "seen_refs": ["#2"]}
+{"text": "Nothing to do this tick: the queue is empty since the logging work merged, and the loop is in its idle backoff.", "unattended": true, "expected": null, "why": "a hard event in a since-clause is background"}
+{"text": "Still waiting on you: PR #5 needs to be merged after your approval, and nothing else moves until PR #6 is opened.", "unattended": true, "expected": null, "why": "pending and until-clause events stay quiet", "seen_refs": ["#5", "#6"]}
+{"text": "Nothing changed this tick: no tests failed, the loop is idle.", "unattended": true, "expected": null, "why": "a negator with a short subject negates a hard event"}
+{"text": "Still waiting on you; nothing has failed and no PR opened.", "unattended": true, "expected": null, "why": "nothing has failed / no PR opened are negated"}
+{"text": "Nothing changed. None of the checks failed.", "unattended": true, "expected": null, "why": "none of the checks failed is negated"}
+{"text": "Still waiting on you: PR #5 (merged yesterday) needs your post-deploy checks.", "unattended": true, "expected": null, "why": "a parenthetical merged is adjectival", "seen_refs": ["#5"]}
+{"text": "Quiet tick: a merged-upstream file is unchanged.", "unattended": true, "expected": null, "why": "merged-upstream is adjectival"}
+{"text": "Nothing changed on the plan, but no tests ran and PR #7 merged.", "unattended": true, "expected": "update", "why": "a negation does not reach past a conjunction", "seen_refs": ["#7"]}
+{"text": "Nothing changed on the plan, but I merged PR #7 after your approval.", "unattended": true, "expected": "update", "why": "verb-form merged with an object is an event", "seen_refs": ["#7"]}
+{"text": "Nothing else changed; merged PR #6 after your approval and deployed it.", "unattended": true, "expected": "update", "why": "verb-form merged PR is an event", "seen_refs": ["#6"]}
+{"text": "Still waiting on you: the loop merged branch feature/x into main.", "unattended": true, "expected": "update", "why": "verb-form merged branch is an event"}
+{"text": "Still waiting on you: the merged PR #5 needs your post-deploy checks.", "unattended": true, "expected": null, "why": "a determiner makes merged adjectival", "seen_refs": ["#5"]}
+{"text": "Nothing new\n- CI failed", "unattended": true, "expected": "update", "why": "a negation does not cross a newline"}
+{"text": "Nothing changed this tick: no PR #7 merged yet.", "unattended": true, "expected": null, "why": "a ref is part of a negated subject", "seen_refs": ["#7"]}

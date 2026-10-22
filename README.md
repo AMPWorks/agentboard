@@ -404,7 +404,33 @@ The hook classifies each parent (non-subagent) `Stop` message with generic prose
 starts with one of the configured prefixes, `# Autonomous loop` by default) a transient failure
 (`API Error`, `Request timed out`, ...) is an `error` note, idle and progress one-liners are
 dropped, and a milestone (an `owner/repo#N` or `PR #N`, merged, approved, CI red/green, pushed,
-opened, deployed, blocked, a URL, ...) or any message of 300+ characters is an `update` note. A
+opened, deployed, blocked, a URL, ...) or any message of 300+ characters is an `update` note.
+
+Loop sessions mostly restate what is waiting, so these count as quiet (dropped, however long):
+
+- a message that starts with idle wording: "Quiet", "Idle", "Nothing changed", "Nothing else
+  changed", "Nothing new", "No change(s)", "Unchanged", "Still ..." ("Still quiet", "Still
+  waiting"), "Holding", "Standing by", "Awaiting", ...;
+- a message whose lead sentence only restates what waits on you ("Two things are still waiting
+  on you:", "Both items are still waiting on you", "PR #5 still needs your `/ack-tested`", "PR #5
+  is still blocked on your review", "The plan is still waiting for your approval"), unless that
+  sentence also reports an event (merged, opened, deployed, filed, ...) or carries a link.
+
+Either kind is still an `update` when it reports a hard event anywhere in the message (merged,
+opened, filed, failed, CI red: "Nothing changed on the plan, but CI went red on PR #5"; not when
+negated or pending, "PR #5 has not merged yet", "no tests failed", "None of the checks failed",
+"needs to be merged", nor adjectival, "the merged PR", "PR #5 (merged yesterday)", "merged-upstream"
+(while "I merged PR #7" counts), nor as
+background in a since/until/once/if/unless clause, "the queue is empty since the logging work
+merged"), or
+news (a repair, a bug, a fix, something found or wrong, a heads-up) in 160+ characters. Softer events behind a quiet lead ("Nothing changed: PR #5 is
+approved and deployed") restate a known state and stay quiet. A PR or issue reference makes a
+milestone only the first time the session's notes (open or dismissed) mention that reference: "The
+builder is still fixing PR #4's findings" is kept once, not every tick, while an event about it
+("PR #4 merged", "opened", "deployed", "CI went red", "filed", "is now blocked") is kept every
+time. A status ("ready for review", "in Pending") counts unless its own clause names only
+references already seen ("Tick: PR #4 is in hand; the plan is ready for your review" is kept);
+ordinals such as "step #2" are not references. A
 repeat of an open note (same session, same kind, same first 200 characters once timestamps, clock
 times, durations and tick counts are ignored; errors compare their first line only) bumps its count
 (shown as `×N`) instead of adding a row; a repeat of a dismissed note starts a new one. Both knobs
@@ -418,10 +444,15 @@ Anything can also add a note directly:
 
 ```
 agentboard note --kind needs_you|update|error --text T [--session TOOL:ID]
-agentboard notes [--session TOOL:ID] [--all] [--json]
-agentboard notes --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID]
+agentboard notes [--session TOOL:ID] [--kind K ...] [--all] [--json]
+agentboard notes --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID] [--kind K ...]
 agentboard notes --rebuild [--days N] [--reset]
 ```
+
+`--dismiss-all` dismisses every open note, listed in the app or not; `--session` narrows it to one
+session and `--kind needs_you|update|error` (one or more) to those kinds, so
+`notes --dismiss-all --session claude:ID --kind update error` clears a loop session's updates but
+keeps its requests. `--kind` also filters a listing.
 
 `note` resolves the session exactly like `agentboard link` and, like it, warns and exits 0 when
 it cannot. Inbox drop files and provider rows take the same shape in an optional `"notes"` key,
@@ -443,10 +474,22 @@ session or you dismiss the note. Manual done and snooze still win, and a permiss
 reason wins over the note's. The note stays in Updates after a prompt releases the state; if the
 next turn repeats the request, the note's count goes up and the session is red again.
 
-In the popover, Updates sits above Needs you with a count and **Clear all**: each row shows the
+In the popover, Updates sits above Needs you with a count and a clear button: each row shows the
 kind (red bubble for needs you, red triangle for an error), the project, the first line, `×N` and
-the time; a click focuses the owning session like a session row, the chevron expands the full text,
-and (x) dismisses it. The popover query filters it note by note: a note shows when the query
+the time; a click opens the dashboard on the owning session, scrolled to that note's full text
+and outlined (the session's context menu still has Focus), the chevron expands the full text in
+place, and (x) dismisses it. The section is compact so it never pushes the sessions out of view: it lists
+every `needs_you` note, but at most 3 other rows, with **Show all N** to expand it in place and
+**Show fewer** to collapse it again. A session with two or more open update/error notes (a loop
+session, in practice) gets one row: its newest note's text and time and `×N notes`, the session's
+open update/error count; its chevron lists the notes (each with its own x), and its (x) dismisses
+all of that session's open update/error notes (`notes --dismiss-all --session TOOL:ID --kind update
+error`), never its `needs_you` notes, which always keep rows of their own. With an empty search,
+**Clear all** runs `notes --dismiss-all`: every open note, including ones past the 20-per-session
+list and on sessions the popover does not show. With a search, the button reads **Clear matching**
+and dismisses every note the query keeps: all open notes of each session it matches on the
+session's own fields, plus the notes it matches by their own text elsewhere. Its tooltip says
+which. The session detail and the dashboard are not grouped or capped. The popover query filters it note by note: a note shows when the query
 matches its own text or its session's fields (never a sibling note's text; a session's waiting
 reason and last assistant message can repeat its newest note, so a term from them keeps all of its
 notes). When a query hides an open `needs_you` note on a session in Review, Snoozed or Done, the
@@ -455,8 +498,13 @@ warns the same way; a hidden session in Needs you or Interrupted is counted once
 session row shows a small badge with its number of open updates, the session detail lists them in
 full with a Dismiss button each, and the dashboard sidebar shows the total the filters keep,
 counted note by note like the popover's Updates header. Totals count all open notes
-(`notes_count`), not only the listed ones; the snapshot lists at most 20 per session, so a header
-shows "Updates (20 of 25)" when some are not listed.
+(`notes_count`), not only the listed ones; the snapshot lists the newest 20 per session plus any
+older open `needs_you` note (a request is never capped out), so a header shows "Updates (20 of 25)"
+when some are not listed.
+
+After an upgrade that changes these rules, `agentboard notes --rebuild --reset` re-applies them to
+the recorded history: it drops the open notes it made and replays every `Stop` through the new
+rules, so earlier loop noise disappears, and it never reopens a dismissed note.
 
 Terminal focus/resume support iTerm2 (`ITERM_SESSION_ID`) and Apple Terminal
 (`TERM_SESSION_ID`); for anything else, `agentboard focus`/`resume` just activates the app by
@@ -480,8 +528,8 @@ agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
 agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state ...] [--title T] [--session TOOL:ID]
 agentboard status --text TEXT [--ttl MIN] [--session TOOL:ID]
 agentboard note --kind needs_you|update|error --text T [--session TOOL:ID]
-agentboard notes [--session TOOL:ID] [--all] [--json]
-agentboard notes --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID]
+agentboard notes [--session TOOL:ID] [--kind K ...] [--all] [--json]
+agentboard notes --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID] [--kind K ...]
 agentboard notes --rebuild [--days N] [--reset] [--json]
 agentboard backfill [--days 30]
 agentboard refresh-links

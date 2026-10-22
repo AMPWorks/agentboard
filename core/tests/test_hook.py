@@ -700,6 +700,36 @@ class HookNotesTests(AgentBoardTestCase):
         self._stop(self.MILESTONE)
         self.assertEqual(self._notes()[0]["kind"], "update")
 
+    def test_repeat_mention_of_a_noted_ref_records_nothing(self):
+        self._prompt("# Autonomous loop tick")
+        self._stop("The builder is still fixing PR #4's review findings.")
+        (first,) = self._notes()
+        self.assertEqual(first["kind"], "update")
+        self._notes_dismissed_all()
+        # The ref is already in a (dismissed) note of this session...
+        self._stop("The builder is still on PR #4; I will re-review when it reports back.")
+        self.assertEqual(len(self._notes()), 1)
+        # ...but an event about it is still news, and another session's
+        # notes never count as seen.
+        self._stop("PR #4 merged as abc1234.")
+        self._prompt("# Autonomous loop tick", session_id="s2")
+        self._stop("The builder is still on PR #4; I will re-review when it reports back.",
+                   session_id="s2")
+        self.assertEqual(
+            [(n["session_id"], n["text"]) for n in self._notes()[1:]],
+            [("s1", "PR #4 merged as abc1234."),
+             ("s2", "The builder is still on PR #4; I will re-review when it reports back.")],
+        )
+
+    def test_waiting_restatement_records_no_note(self):
+        self._prompt("# Autonomous loop tick")
+        self._stop("Nothing changed this tick:\n- **PR #5.** It still needs your approval.")
+        self._stop("Two things are still waiting on you:\n- **PR #5.** Approve it.")
+        self.assertEqual(self._notes(), [])
+
+    def _notes_dismissed_all(self):
+        self.conn.execute("UPDATE notes SET dismissed_at='2026-10-20T00:00:00.000000Z'")
+
     def test_classifier_failure_keeps_the_event_and_session_update(self):
         with mock.patch("agentboard.notes.classify", side_effect=RuntimeError("boom")):
             self._stop("USER_ACTION: approve the plan")

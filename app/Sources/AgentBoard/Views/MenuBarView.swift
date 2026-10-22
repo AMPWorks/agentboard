@@ -22,23 +22,27 @@ struct MenuBarView: View {
         PopoverSections.make(from: store.snapshot.sessions, query: SessionSearch(store.popoverQuery))
     }
 
-    private var updates: [UpdatesFeed.Item] {
-        UpdatesFeed.make(from: store.snapshot.sessions, query: SessionSearch(store.popoverQuery))
-    }
-
     var body: some View {
         let sections = sections
-        let updates = updates
-        let updatesTotal = UpdatesFeed.total(from: store.snapshot.sessions,
-                                             query: SessionSearch(store.popoverQuery))
+        let sessions = store.snapshot.sessions
+        let query = SessionSearch(store.popoverQuery)
+        let updates = UpdatesFeed.rows(from: sessions, query: query)
         VStack(spacing: 0) {
             searchBar(sections)
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     // Above Needs you: what sessions said that is worth keeping.
+                    // Compact (UpdatesSectionView), so it never pushes the
+                    // sessions out of view.
                     if !updates.isEmpty {
-                        UpdatesSectionView(items: updates, total: updatesTotal, store: store)
+                        UpdatesSectionView(
+                            rows: updates,
+                            listed: updates.reduce(0) { $0 + $1.notes.count },
+                            total: UpdatesFeed.total(from: sessions, query: query),
+                            clearPlan: UpdatesFeed.clearPlan(from: sessions, query: query),
+                            store: store
+                        )
                     }
                     ForEach(sections.sections) { section in
                         if section.kind == .unconcluded {

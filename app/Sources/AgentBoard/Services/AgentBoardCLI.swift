@@ -140,17 +140,61 @@ struct AgentBoardCLI: Sendable {
         _ = try await runner.run(executable: executablePath, arguments: ["notes", "--dismiss"] + ids.map(String.init))
     }
 
-    /// `agentboard notes --dismiss-all --session TOOL:ID`: every open note of one session.
-    func dismissNotes(tool: String, sessionId: String) async throws {
+    /// `agentboard notes --dismiss-all --session TOOL:ID [--kind K...]`: every
+    /// open note of one session, or only those of the given kinds.
+    /// A kind list with no CLI name in it dismisses nothing (it never widens
+    /// to the whole session).
+    func dismissNotes(tool: String, sessionId: String, kinds: [Note.Kind]? = nil) async throws {
+        guard let arguments = Self.sessionDismissArguments(tool: tool, sessionId: sessionId, kinds: kinds) else {
+            log.notice("notes --dismiss-all \(tool, privacy: .public):\(sessionId, privacy: .public) skipped: no dismissable kind")
+            return
+        }
         if isFixtureMode {
-            log.notice("fixture mode: skipping notes --dismiss-all \(tool, privacy: .public):\(sessionId, privacy: .public)")
+            log.notice("fixture mode: skipping \(arguments.joined(separator: " "), privacy: .public)")
             return
         }
         guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
-        _ = try await runner.run(
-            executable: executablePath,
-            arguments: ["notes", "--dismiss-all", "--session", "\(tool):\(sessionId)"]
-        )
+        _ = try await runner.run(executable: executablePath, arguments: arguments)
+    }
+
+    /// The CLI arguments for a per-session dismiss-all, or nil when `kinds`
+    /// scopes it to no kind the CLI knows (so there is nothing to dismiss).
+    static func sessionDismissArguments(tool: String, sessionId: String, kinds: [Note.Kind]?) -> [String]? {
+        guard let kindArgs = kindArguments(kinds) else { return nil }
+        return ["notes", "--dismiss-all", "--session", "\(tool):\(sessionId)"] + kindArgs
+    }
+
+    /// `agentboard notes --dismiss-all`: every open note of every session,
+    /// including ones past the snapshot's per-session cap.
+    func dismissAllNotes() async throws {
+        if isFixtureMode {
+            log.notice("fixture mode: skipping notes --dismiss-all")
+            return
+        }
+        guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
+        _ = try await runner.run(executable: executablePath, arguments: ["notes", "--dismiss-all"])
+    }
+
+    /// `--kind update error` for a kind-scoped dismiss; empty for no scope
+    /// (`kinds == nil`). `.unknown` has no CLI name and is left out, and a
+    /// scope left with no names is nil: it must not become an unscoped
+    /// dismiss.
+    static func kindArguments(_ kinds: [Note.Kind]?) -> [String]? {
+        guard let kinds else { return [] }
+        let names = kinds.filter { $0 != .unknown }.map(\.rawValue)
+        return names.isEmpty ? nil : ["--kind"] + names
+    }
+
+    /// Runs one dismissal (a grouped row's x, or a step of Clear all).
+    func dismiss(_ dismissal: NoteDismissal) async throws {
+        switch dismissal {
+        case .all:
+            try await dismissAllNotes()
+        case let .session(tool, sessionId, kinds):
+            try await dismissNotes(tool: tool, sessionId: sessionId, kinds: kinds)
+        case let .ids(ids):
+            try await dismissNotes(ids: ids)
+        }
     }
 
     func refreshLinks() async throws {
