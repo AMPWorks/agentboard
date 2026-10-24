@@ -5,7 +5,12 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .hook import ACTIVITY_EVENTS, NEEDS_YOU_NOTIFICATION_TYPES, NEEDS_YOU_TOOL_SENTINEL
+from .hook import (
+    ACTIVITY_EVENTS,
+    NEEDS_YOU_NOTIFICATION_TYPES,
+    NEEDS_YOU_TOOL_SENTINEL,
+    SUBAGENT_MARKER_EVENTS,
+)
 from .links import awaiting_reason, links_done_reason, pr_awaits_you
 from .notes import first_line
 
@@ -29,6 +34,9 @@ REOPENED_REASON = "Reopened"
 YOUR_TURN_REASON = "Your turn"
 INTERRUPTED_REASON = "Interrupted: your turn"
 ENDED_MID_TURN_REASON = "Ended mid-turn"
+# A Stop that listed background tasks still in flight: the session is
+# waiting on its own work, not on the user.
+BACKGROUND_WAIT_REASON = "Waiting on {count} background task{plural}"
 NEEDS_YOU_EVENTS = {"PermissionRequest", "StopFailure", NEEDS_YOU_TOOL_SENTINEL}
 
 RUNNING_FRESH_MINUTES = 10
@@ -138,6 +146,69 @@ def effective_liveness(tool, pid, session_id, claude_registry, transcript_path=N
         now = now or datetime.now(timezone.utc)
         return bool(_rollout_mtime_alive(transcript_path, now)), None
     return None, None
+
+
+# ~/.claude/sessions/<pid>.json statuses that carry a signal. Anything else
+# (e.g. "shell", while a ! command runs) says nothing about the turn.
+REGISTRY_SIGNAL_STATUSES = {"busy", "idle"}
+
+
+def _registry_updated_at(entry):
+    """statusUpdatedAt (ms since the epoch) as an aware datetime, or None."""
+    value = entry.get("statusUpdatedAt")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def registry_signal(entry, last_event_at, last_event, last_turn_start_at):
+    """"busy", "idle" or None from a ~/.claude/sessions/<pid>.json entry.
+
+    The status counts when it was written after the session's last_event_at
+    (it is newer news than the hooks). An "idle" also counts when last_event
+    is a SubagentStart/SubagentStop and the status is newer than the
+    session's newest parent prompt (`last_turn_start_at`, any kind): a
+    marker event after the turn cannot have made Claude busy again, while an
+    idle older than the latest prompt predates the turn now running. Unknown
+    statuses ("shell") and entries without a statusUpdatedAt give None.
+    """
+    if not entry:
+        return None
+    status = entry.get("status")
+    if status not in REGISTRY_SIGNAL_STATUSES:
+        return None
+    updated = _registry_updated_at(entry)
+    if updated is None:
+        return None
+    event_at = _aware(last_event_at)
+    if event_at is None or updated > event_at:
+        return status
+    if status == "idle" and last_event in SUBAGENT_MARKER_EVENTS:
+        turn_start = _aware(last_turn_start_at)
+        if turn_start is None or updated > turn_start:
+            return "idle"
+    return None
+
+
+def background_wait_reason(session):
+    """The running reason for a finished turn still waiting on background
+    tasks, or None when its last Stop listed none (or none is known)."""
+    count = session.get("background_tasks")
+    if not isinstance(count, int) or count <= 0:
+        return None
+    reason = BACKGROUND_WAIT_REASON.format(count=count, plural="" if count == 1 else "s")
+    try:
+        types = json.loads(session.get("background_types") or "[]")
+    except (TypeError, ValueError):
+        types = []
+    labels = []
+    for label in types if isinstance(types, list) else []:
+        if isinstance(label, str) and label not in labels:
+            labels.append(label)
+    return f"{reason}: {', '.join(labels)}" if labels else reason
 
 
 def get_last_notification_type(conn, tool, session_id):
@@ -263,6 +334,7 @@ def compute_state(
     last_prompt_at=None,
     open_update_note=None,
     unattended=False,
+    last_turn_start_at=None,
 ):
     """Compute (state, waiting_reason, auto_done, done_reason) for one session.
 
@@ -271,8 +343,13 @@ def compute_state(
     mappings (with the migration-6 columns: branch, closed_at, source,
     created_at, responded_at, self_authored). `alive` is the result of
     effective_liveness (True/False/None). `registry_entry` is the matching
-    ~/.claude/sessions/<pid>.json payload, used only as a fallback when
-    hook-driven state gives no signal. `notification_type` is the
+    ~/.claude/sessions/<pid>.json payload: its "waiting" status is a
+    needs_you fallback when the hooks recorded nothing, and its busy/idle
+    status (see registry_signal, which `last_turn_start_at`, the ts of the
+    newest parent prompt of any kind, bounds) breaks ties: idle turns a
+    stale activity event (a lost Stop, a legacy SubagentStop) or an unknown
+    one (SessionStart) into a finished turn, busy turns a finished or
+    unknown one into running while the process is alive. `notification_type` is the
     notification_type of the most recent Notification event, looked up
     from the events table by the caller when `last_event == "Notification"`.
     `turn_finished` is the caller's precomputed `last_turn_finished(conn,
@@ -299,11 +376,12 @@ def compute_state(
     waiting on anyone.
 
     Precedence: manual done, snooze, hook needs_you, registry needs_you,
-    open needs_you note; running/interrupted; an owned PR awaiting the user
-    (review); a mark-open after the end ("Reopened"); done-by-link; the
-    ended-session rules (clean exit done, open todos, unclean end); then a
-    live session's update note, "Your turn", loop idle; else unconcluded.
-    Every review carries a reason.
+    open needs_you note; the registry tie-breaker; running/interrupted; an
+    owned PR awaiting the user (review); a mark-open after the end
+    ("Reopened"); done-by-link; the ended-session rules (clean exit done,
+    open todos, unclean end); a finished turn still waiting on background
+    tasks (running); then a live session's update note, "Your turn", loop
+    idle; else unconcluded. Every review carries a reason.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -347,6 +425,25 @@ def compute_state(
     is_activity = last_event in ACTIVITY_EVENTS
     last_event_at = parse_ts(session.get("last_event_at"))
     age = (now - last_event_at) if last_event_at else None
+
+    # The registry breaks ties the hooks leave open. "Unknown" is a
+    # last_event that is none of activity, review-shaped, needs_you or None:
+    # SessionStart, or a SessionEnd whose ended_at a resume cleared.
+    review_shaped = last_event in REVIEW_EVENTS or (
+        last_event == "Notification" and notification_type == "idle_prompt"
+    )
+    unknown_event = bool(last_event) and not is_activity and not review_shaped and not ended_at
+    signal = registry_signal(
+        registry_entry, session.get("last_event_at"), last_event, last_turn_start_at
+    )
+    if signal == "idle" and ((is_activity and alive is True) or unknown_event):
+        # A finished turn the hooks did not see end (or a legacy row stuck
+        # on a background SubagentStop): read it as a Stop.
+        last_event = "Stop"
+        is_activity = False
+        review_shaped = True
+    elif signal == "busy" and alive is True and (review_shaped or unknown_event):
+        return "running", None, False, None
 
     if is_activity:
         if alive is True:
@@ -395,6 +492,13 @@ def compute_state(
             return "done", None, True, "clean exit"
         return "unconcluded", f"Ended ({end_reason})" if end_reason else "Ended", False, None
 
+    # A finished turn whose Stop listed background tasks still in flight is
+    # waiting on that work, ahead of any note or "Your turn".
+    if review_shaped and alive is True:
+        background_reason = background_wait_reason(session)
+        if background_reason:
+            return "running", background_reason, False, None
+
     window = timedelta(hours=REVIEW_WINDOW_HOURS)
     if open_update_note and note_still_raises(open_update_note, last_prompt_at):
         note_ts = _aware(open_update_note.get("last_ts"))
@@ -403,10 +507,7 @@ def compute_state(
             if headline:
                 return "review", headline, False, None
 
-    is_review_event = last_event in REVIEW_EVENTS or (
-        last_event == "Notification" and notification_type == "idle_prompt"
-    )
-    if is_review_event:
+    if review_shaped:
         if unattended:
             if alive is True:
                 return "running", LOOP_IDLE_REASON, False, None

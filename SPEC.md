@@ -64,7 +64,15 @@ PostToolUseFailure(tool_name), PermissionRequest(tool_name), Notification(notifi
 message), Stop(last_assistant_message), StopFailure(reason, error_message), SubagentStart/
 SubagentStop(agent_id), SessionEnd(reason). Common: session_id, transcript_path, cwd,
 hook_event_name. Events carrying `agent_id` come from subagents: record them but they only
-ever count as "running" activity, never Stop/review for the parent.
+ever count as "running" activity, never Stop/review for the parent. (Added later:) a tagged
+SubagentStart/SubagentStop after the parent's turn ended (last_event Stop, Interrupt, a
+relevant Notification, PermissionRequest, StopFailure or a needs_you tool) keeps that
+last_event, and a kept finished turn keeps its `last_event_at`. A `SessionStart` with
+`source` `compact`, or `resume` while the session has not ended, keeps the session's
+`last_event`/`waiting_reason` (the event row is still recorded). A parent Stop stores the
+count and `type` labels of its `background_tasks` still in flight (status not terminal) and
+the count and prompts of its `session_crons`; a tagged SubagentStop after the turn removes one
+`subagent` entry.
 
 Codex events (hooks.json): SessionStart, SessionEnd, UserPromptSubmit(prompt),
 PreToolUse/PostToolUse, PermissionRequest, Stop(last_assistant_message), Interrupt,
@@ -125,7 +133,12 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
 4. `running` — last event is an activity event (UserPromptSubmit, Pre/PostToolUse, Subagent*,
    PreCompact/PostCompact) AND process alive (or no pid known and last event < 10 min old).
    `interrupted` — would be running but process dead or activity stale > 30 min (older than
-   24 h: `unconcluded`, reason "interrupted").
+   24 h: `unconcluded`, reason "interrupted"). Before this rule the session registry breaks
+   ties (see Liveness): `idle` turns an activity event of a live process, or an unknown last
+   event (SessionStart, a SessionEnd a resume un-ended), into a finished turn (read as Stop);
+   `busy` turns a finished or unknown one into `running` while the process is alive.
+   SessionStart never changes state on compaction, nor on resume of a live session (the hook
+   keeps the previous last_event).
 5. `review`, "PR #N awaits your review" — the session owns a PR that awaits the user (see
    Links: owned, OPEN, no human response yet), live or ended, ahead of every done rule. When
    the PR's author is the active gh login the reason reads "PR #N open, no response yet".
@@ -143,18 +156,26 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
    `unconcluded`, "Ended (<reason>)". SessionEnd is never a review event, and update notes do
    not hold ended sessions. Only owned PRs (rule 5) keep an exited session visible; PRs that
    merely share its branch from before never do.
-9. Live sessions: an open `update` note newer than the last parent prompt and under 24 h old →
-   `review` with its headline. Last event Stop, Interrupt or Notification idle_prompt within
+9. Live sessions: a finished turn (Stop, Interrupt, Notification idle_prompt) whose last Stop
+   listed background tasks still in flight, with the process alive → `running`, "Waiting on N
+   background task(s): <types>", ahead of the notes below. An open `update` note newer than the
+   last parent prompt and under 24 h old → `review` with its headline. Last event Stop, Interrupt or Notification idle_prompt within
    24 h of `updated_at`, in an attended turn → `review`, "Your turn: <first line of the last
    assistant message>" ("Your turn" alone when there is none; Interrupt: "Interrupted: your
    turn"). In an unattended turn (the last prompt starts with a `note_unattended_prefixes`
-   entry) → `running`, "Loop idle between ticks" while the process is alive, else
-   `unconcluded`.
+   entry, or is one of the session's `session_crons` prompts) → `running`, "Loop idle between
+   ticks" while the process is alive, else `unconcluded`.
 10. Otherwise `unconcluded`.
 
 Liveness: `kill -0 pid` (os.kill(pid, 0); PermissionError counts as alive). For Claude, also
 treat `~/.claude/sessions/<pid>.json` with matching `sessionId` as confirmation; files there
-may contain only `{pid, sessionId}` — use `status`/`waitingFor` only if present.
+may contain only `{pid, sessionId}` — use `status`/`waitingFor` only if present. (Added later:)
+the file is read for every Claude session, pid known or not (never one whose pid differs from
+the session's known pid). Its `status` is a tie-breaker: `busy`/`idle` count when
+`statusUpdatedAt` (ms since the epoch) is newer than the session's `last_event_at`, and `idle`
+also counts when last_event is SubagentStart/SubagentStop and it is newer than the session's
+latest parent prompt (any kind). Any other status (e.g. `shell`) is no signal; `waiting` with
+no hook event at all is still the needs_you fallback.
 Codex rollout `event_msg` payload types `task_started` / `task_complete` / `turn_aborted` may
 be used as a fallback when hooks are missing for a codex session.
 

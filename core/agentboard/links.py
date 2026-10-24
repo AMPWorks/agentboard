@@ -811,7 +811,7 @@ class GhContext:
         return self.mid_turn_by_session[key]
 
 
-def last_parent_prompt_at(conn, tool, session_id):
+def last_parent_prompt_at(conn, tool, session_id, *, any_kind=False):
     """The ts of a session's newest parent UserPromptSubmit, or None."""
     row = conn.execute(
         "SELECT ts FROM events WHERE tool=? AND session_id=? AND event='UserPromptSubmit' "
@@ -821,7 +821,7 @@ def last_parent_prompt_at(conn, tool, session_id):
     return row[0] if row else None
 
 
-def last_parent_prompt_times(conn) -> dict:
+def last_parent_prompt_times(conn, *, any_kind=False) -> dict:
     """last_parent_prompt_at for every session in one pass:
     {(tool, session_id): ts}. A session with no parent prompt is absent."""
     return {
@@ -833,6 +833,13 @@ def last_parent_prompt_times(conn) -> dict:
             ") newest ON e.id = newest.id"
         )
     }
+
+
+def last_parent_prompt_times_any(conn) -> dict:
+    """{(tool, session_id): ts} of each session's newest parent prompt of any
+    kind, injected ones included: when its latest turn started, which
+    bounds how old a registry "idle" may be (reconcile.registry_signal)."""
+    return last_parent_prompt_times(conn, any_kind=True)
 
 
 TURN_START_EVENTS = ("UserPromptSubmit",)

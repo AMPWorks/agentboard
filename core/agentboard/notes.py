@@ -186,11 +186,33 @@ def load_markers(home: Path) -> tuple:
     return markers(load_config(home))
 
 
-def is_unattended(prompt, prefixes) -> bool:
+CRON_PROMPT_CHARS = 200
+
+
+def cron_key(text) -> str:
+    """How a prompt is compared with a stored cron prompt: whitespace
+    collapsed, first CRON_PROMPT_CHARS characters (the hook stores each
+    session cron's prompt the same way, see hook._background_info)."""
+    return " ".join(str(text).split())[:CRON_PROMPT_CHARS]
+
+
+def is_cron_prompt(prompt, cron_prompts) -> bool:
+    if not prompt or not isinstance(prompt, str) or not cron_prompts:
+        return False
+    key = cron_key(prompt)
+    return bool(key) and key in cron_prompts
+
+
+def is_unattended(prompt, prefixes, cron_prompts=()) -> bool:
+    """True for a loop's prompt: it starts with one of `prefixes`
+    (`note_unattended_prefixes`), or it is one of the session's scheduled
+    crons (`cron_prompts`, as stored from its last Stop)."""
     if not prompt or not isinstance(prompt, str):
         return False
     text = prompt.lstrip()
-    return any(text.startswith(prefix) for prefix in prefixes)
+    if any(text.startswith(prefix) for prefix in prefixes):
+        return True
+    return is_cron_prompt(prompt, cron_prompts)
 
 
 # -- classification --------------------------------------------------------------

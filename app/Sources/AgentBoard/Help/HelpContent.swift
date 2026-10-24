@@ -64,7 +64,7 @@ enum HelpContent {
                 HelpRow(key: "Needs you (red)", value: "The session is blocked on you: a permission prompt, a question or input request, a turn that failed, or an open **needs_you** update that no newer prompt has answered. The reason (the tool asking, the message) is the row's last line."),
                 HelpRow(key: "Interrupted (orange)", value: "It was working, but its process died or nothing happened for 30 minutes. After 24 hours it becomes Unconcluded."),
                 HelpRow(key: "Review (teal while running, amber once exited)", value: "It has something for you to act on, and the row always says what (see **Review reasons**)."),
-                HelpRow(key: "Running (green)", value: "It is working right now: recent activity and a live process (or, with no process known, an event in the last 10 minutes). A loop session idling between ticks is Running with “Loop idle between ticks”."),
+                HelpRow(key: "Running (green)", value: "It is working right now: recent activity and a live process (or, with no process known, an event in the last 10 minutes). A loop session idling between ticks is Running with “Loop idle between ticks”. A session whose last turn left background tasks running (subagents, shells, monitors) is Running with “Waiting on N background task(s): …” until they finish."),
                 HelpRow(key: "Unconcluded (amber)", value: "Anything not finished and not waiting on you: ended another way (“Ended (clear)”), ended mid-turn, todos left open (“N todos left open”), reopened after an exit (“Reopened”), or a Review that is older than a day."),
             ]),
             .heading("Review reasons"),
@@ -74,6 +74,7 @@ enum HelpContent {
                 "**The headline of an open update**: an `update` note newer than your last prompt and under a day old (a loop session reporting a milestone).",
                 "**Your turn: <first line of its last message>**: an attended session stopped and is waiting for your next prompt, within 24 hours. An interrupted turn reads **Interrupted: your turn**.",
             ]),
+            .paragraph("A background agent finishing after a turn, and a compaction (or resuming a live session), never change a session's state. For a live Claude session AgentBoard also reads Claude Code's own `~/.claude/sessions/<pid>.json` status when it is newer than the last hook event: **idle** turns a stale activity event into a finished turn, **busy** makes a finished one Running. Other statuses carry no signal."),
             .heading("Sessions that finish on their own"),
             .paragraph("A session can reach Done by itself. Its row then shows a small **auto** badge whose tooltip gives the reason:"),
             .keyValue([

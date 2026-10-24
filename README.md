@@ -243,9 +243,19 @@ Updates below); live activity means `running`; a dead process or stale activity 
 - "Your turn: <first line of its last message>" — an attended session stopped (or "Interrupted:
   your turn"), within 24 h.
 
-A loop session (its last prompt starts with a `note_unattended_prefixes` entry) idling between
-ticks is not waiting on you: it is `running` with "Loop idle between ticks" while its process is
-alive.
+A loop session (its last prompt starts with a `note_unattended_prefixes` entry, or is one of the
+crons its last Stop listed in `session_crons`) idling between ticks is not waiting on you: it is
+`running` with "Loop idle between ticks" while its process is alive. A session whose last Stop
+listed background tasks still in flight (Claude Code's `background_tasks`: subagents, shells,
+monitors, ...) is `running` with "Waiting on N background task(s): <types>" until they finish,
+then "Your turn". A background agent finishing after the turn, and a compaction (or a resume of
+a live session), never change a session's state.
+
+Claude Code also writes `~/.claude/sessions/<pid>.json` with a `busy`/`idle` status; AgentBoard
+reads it for every live Claude session as a tie-breaker when it is newer than the last hook
+event: `idle` turns a stale activity event (a lost `Stop`) or a bare `SessionStart` into a
+finished turn, and `busy` makes a finished or unknown one `running`. Other statuses (e.g.
+`shell`) carry no signal.
 By default the snapshot excludes sessions marked `interactive: false` (non-interactive `claude -p`
 / SDK runs, Codex `exec` runs) and `done` sessions older than 7 days; `--all` includes everything.
 

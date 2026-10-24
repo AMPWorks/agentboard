@@ -72,6 +72,41 @@ class SnapshotTests(AgentBoardTestCase):
         self.assertEqual(entry["key"], "claude:s1")
         self.assertEqual(entry["project"], "proj")
 
+    def test_registry_consulted_when_pid_known(self):
+        # A live session whose last_event is a background agent's late
+        # SubagentStop; its ~/.claude/sessions/<pid>.json (under the test's
+        # fake HOME) says idle, written after the latest prompt.
+        now = datetime(2026, 10, 24, 6, 0, tzinfo=timezone.utc)
+        pid = os.getpid()
+        insert_session(
+            self.conn, session_id="s1", pid=pid, last_event="SubagentStop",
+            last_event_at="2026-10-24T05:47:22.900000Z",
+            updated_at="2026-10-24T05:47:22.900000Z", last_assistant="All set.",
+        )
+        self.conn.execute(
+            "INSERT INTO events(ts, tool, session_id, event, text) VALUES "
+            "('2026-10-24T05:42:46.990000Z', 'claude', 's1', 'UserPromptSubmit', 'go')"
+        )
+        sessions_dir = self.fake_home / ".claude" / "sessions"
+        sessions_dir.mkdir()
+        idle_at = datetime(2026, 10, 24, 5, 44, 21, 15000, tzinfo=timezone.utc)
+        registry_file = sessions_dir / f"{pid}.json"
+        registry_file.write_text(json.dumps({
+            "pid": pid, "sessionId": "s1", "status": "idle",
+            "statusUpdatedAt": int(idle_at.timestamp() * 1000),
+        }))
+        entry = cli.build_snapshot(self.conn, include_all=True, now=now)["sessions"][0]
+        self.assertEqual((entry["state"], entry["waiting_reason"]),
+                         ("review", "Your turn: All set."))
+        # A file another process wrote (a stale pid) is not this session's.
+        registry_file.rename(sessions_dir / "1.json")
+        (sessions_dir / "1.json").write_text(json.dumps({
+            "pid": 1, "sessionId": "s1", "status": "idle",
+            "statusUpdatedAt": int(idle_at.timestamp() * 1000),
+        }))
+        entry = cli.build_snapshot(self.conn, include_all=True, now=now)["sessions"][0]
+        self.assertEqual(entry["state"], "running")
+
     def test_default_excludes_noninteractive(self):
         insert_session(self.conn, session_id="s1", interactive=0)
         snapshot = cli.build_snapshot(self.conn, include_all=False)

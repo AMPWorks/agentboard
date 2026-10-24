@@ -156,8 +156,33 @@ def _open_notes_by_session(conn) -> dict:
     return by_key
 
 
+def _registry_entry_for(session, claude_registry):
+    """The ~/.claude/sessions/<pid>.json entry for a Claude session, or
+    None. Consulted even when the hook knows the pid (it breaks ties, see
+    reconcile.registry_signal), but never one written by a different
+    process than the session's known pid: a file a crashed earlier process
+    left behind says nothing about the current one."""
+    if session.get("tool") != "claude":
+        return None
+    entry = claude_registry.get(session.get("session_id"))
+    if not entry:
+        return None
+    pid = session.get("pid")
+    if pid is not None and entry.get("pid") is not None and entry.get("pid") != pid:
+        return None
+    return entry
+
+
+def _cron_prompts(session):
+    try:
+        value = json.loads(session.get("cron_prompts") or "[]")
+    except (TypeError, ValueError):
+        return ()
+    return tuple(item for item in value if isinstance(item, str)) if isinstance(value, list) else ()
+
+
 def _build_session_entry(conn, session, triage_by_key, claude_registry, config, now,
-                         notes_by_key=None, prompt_times=None):
+                         notes_by_key=None, prompt_times=None, turn_start_times=None):
     session = dict(session)
     tool = session["tool"]
     session_id = session["session_id"]
@@ -169,9 +194,7 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
     if session.get("last_event") == "Notification":
         notification_type = reconcile.get_last_notification_type(conn, tool, session_id)
 
-    registry_entry = None
-    if tool == "claude" and session.get("pid") is None:
-        registry_entry = claude_registry.get(session_id)
+    registry_entry = _registry_entry_for(session, claude_registry)
 
     alive, resolved_pid = reconcile.effective_liveness(
         tool, session.get("pid"), session_id, claude_registry,
@@ -201,8 +224,13 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
         last_prompt_at = links.last_parent_prompt_at(conn, tool, session_id)
     else:
         last_prompt_at = prompt_times.get((tool, session_id))
+    if turn_start_times is None:
+        last_turn_start_at = links.last_parent_prompt_at(conn, tool, session_id, any_kind=True)
+    else:
+        last_turn_start_at = turn_start_times.get((tool, session_id))
     unattended = notes_mod.is_unattended(
-        session.get("last_prompt"), notes_mod.unattended_prefixes(config)
+        session.get("last_prompt"), notes_mod.unattended_prefixes(config),
+        cron_prompts=_cron_prompts(session),
     )
 
     state, waiting_reason, auto_done, done_reason = reconcile.compute_state(
@@ -210,7 +238,7 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
         registry_entry=registry_entry, notification_type=notification_type,
         turn_finished=turn_finished, open_needs_you_note=open_needs_you_note,
         last_prompt_at=last_prompt_at, open_update_note=open_update_note,
-        unattended=unattended,
+        unattended=unattended, last_turn_start_at=last_turn_start_at,
     )
 
     cwd = session.get("cwd")
@@ -292,10 +320,11 @@ def build_snapshot(conn, include_all=False, now=None):
     notes_by_key = _open_notes_by_session(conn)
     # One grouped query, not one per session on every 3 s poll.
     prompt_times = links.last_parent_prompt_times(conn)
+    turn_start_times = links.last_parent_prompt_times_any(conn)
 
     entries = [
         _build_session_entry(conn, session, triage_by_key, claude_registry, config, now,
-                             notes_by_key, prompt_times)
+                             notes_by_key, prompt_times, turn_start_times)
         for session in sessions
     ]
 
