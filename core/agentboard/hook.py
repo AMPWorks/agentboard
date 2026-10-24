@@ -34,6 +34,12 @@ REPARSE_GUARD_SECONDS = 5
 # to, not just at SessionStart.
 CODEX_MAP_TRIGGER_EVENTS = {"SessionStart", "UserPromptSubmit"}
 
+# Parent events after which the session's git branch is re-read: the turn
+# boundaries. Stop and SessionEnd matter because a branch created mid-turn
+# (a PR opened from a fresh feature branch) must be seen once the session
+# goes idle or exits, or a merged PR on the old branch would still retire it.
+BRANCH_REFRESH_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
+
 # Event names that represent in-progress activity (not needing the user,
 # not a finished turn).
 ACTIVITY_EVENTS = {
@@ -249,9 +255,54 @@ def _find_agent_pid(start_pid: int):
     return None, first_hop_tty, False
 
 
+HEAD_REF_PREFIX = "ref: refs/heads/"
+GIT_HEAD_MAX_BYTES = 4096
+
+
+def _head_file_branch(cwd: str):
+    """Read the branch straight from the repository's HEAD file, the way
+    `git branch --show-current` resolves it, without starting a process
+    (git costs tens of ms per call, the hook's whole budget). Returns
+    (True, branch-or-None) when a HEAD was found and understood (None:
+    detached), else (False, None) so the caller falls back to git: no
+    `.git` found, a `.git` file that isn't `gitdir: ...`, or a HEAD in a
+    form this does not know (e.g. reftable's placeholder)."""
+    try:
+        directory = Path(cwd)
+        for candidate in (directory, *directory.parents):
+            dot_git = candidate / ".git"
+            if dot_git.is_dir():
+                git_dir = dot_git
+            elif dot_git.is_file():
+                text = dot_git.read_text(errors="replace")[:GIT_HEAD_MAX_BYTES].strip()
+                if not text.startswith("gitdir:"):
+                    return False, None
+                git_dir = Path(text[len("gitdir:"):].strip())
+                if not git_dir.is_absolute():
+                    git_dir = candidate / git_dir
+            else:
+                continue
+            with open(git_dir / "HEAD", encoding="utf-8", errors="replace") as fh:
+                head = fh.read(GIT_HEAD_MAX_BYTES).strip()
+            if head.startswith(HEAD_REF_PREFIX):
+                name = head[len(HEAD_REF_PREFIX):].strip()
+                if not name or name == ".invalid":
+                    return False, None
+                return True, normalize_branch(name)
+            if re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", head):
+                return True, None
+            return False, None
+    except (OSError, ValueError):
+        return False, None
+    return False, None
+
+
 def _git_branch(cwd: str):
     if not cwd:
         return None
+    found, branch = _head_file_branch(cwd)
+    if found:
+        return branch
     try:
         out = subprocess.run(
             ["git", "-C", cwd, "branch", "--show-current"],
@@ -535,7 +586,7 @@ def process_payload(conn, tool: str, payload: dict) -> None:
             )
 
         branch = None
-        if event in ("SessionStart", "UserPromptSubmit") or (row and not row["branch"]):
+        if (event in BRANCH_REFRESH_EVENTS and not is_subagent_tagged) or (row and not row["branch"]):
             branch = _git_branch(cwd)
 
         pid = None
@@ -721,8 +772,16 @@ def process_payload(conn, tool: str, payload: dict) -> None:
             pass
 
 
+# Set by AgentBoard around commands it runs itself (the retitle command's
+# `claude -p`), so their sessions are not recorded. Matches
+# titles.HOOK_SKIP_ENV (not imported: this module stays light).
+HOOK_SKIP_ENV = "AGENTBOARD_HOOK_SKIP"
+
+
 def run(tool: str, stdin_stream=None) -> None:
     """Entry point used by the CLI. Never raises, never prints."""
+    if os.environ.get(HOOK_SKIP_ENV):
+        return
     if stdin_stream is None:
         stdin_stream = sys.stdin
     try:

@@ -121,12 +121,23 @@ class SnapshotTests(AgentBoardTestCase):
     def test_pr_merged_marks_done_in_snapshot(self):
         insert_session(self.conn, session_id="s1", branch="feature-x",
                         last_event="Stop", updated_at="2026-06-15T10:00:00.000000Z")
+        insert_session(self.conn, session_id="legacy", branch="feature-x",
+                        last_event="Stop", updated_at="2026-06-15T10:00:00.000000Z")
+        self.conn.execute(
+            "INSERT INTO links(tool, session_id, kind, ref, url, state, title, checked_at, branch) "
+            "VALUES ('claude','s1','pr','#1','u','MERGED','t','2026-06-15T10:00:00.000000Z',"
+            "'feature-x')"
+        )
+        # Counter-case: a legacy link with no recorded branch never retires.
         self.conn.execute(
             "INSERT INTO links(tool, session_id, kind, ref, url, state, title, checked_at) "
-            "VALUES ('claude','s1','pr','#1','u','MERGED','t','2026-06-15T10:00:00.000000Z')"
+            "VALUES ('claude','legacy','pr','#1','u','MERGED','t','2026-06-15T10:00:00.000000Z')"
         )
         snapshot = cli.build_snapshot(self.conn, include_all=True)
-        self.assertEqual(snapshot["sessions"][0]["state"], "done")
+        by_key = {e["key"]: e for e in snapshot["sessions"]}
+        self.assertEqual(by_key["claude:s1"]["state"], "done")
+        self.assertEqual(by_key["claude:s1"]["done_reason"], "pr merged")
+        self.assertNotEqual(by_key["claude:legacy"]["state"], "done")
 
     def test_old_dead_session_is_unconcluded_not_interrupted(self):
         old = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -233,7 +244,7 @@ class SnapshotNotesTests(AgentBoardTestCase):
         self.assertEqual(self.entry()[1]["state"], "needs_you")
         self.prompt(minutes_ago=1)
         _, entry = self.entry()
-        self.assertEqual(entry["state"], "review")
+        self.assertEqual((entry["state"], entry["waiting_reason"]), ("review", "Your turn"))
         self.assertEqual(entry["notes_count"], 1, "a released note stays listed")
 
     def test_subagent_prompt_does_not_release(self):
@@ -247,13 +258,16 @@ class SnapshotNotesTests(AgentBoardTestCase):
         note_id = self.note("USER_ACTION: approve")
         self.conn.execute("UPDATE notes SET dismissed_at=? WHERE id=?", (self.stamp(0), note_id))
         _, entry = self.entry()
-        self.assertEqual(entry["state"], "review")
+        self.assertEqual((entry["state"], entry["waiting_reason"]), ("review", "Your turn"))
         self.assertEqual((entry["notes"], entry["notes_count"]), ([], 0))
 
     def test_update_note_does_not_raise(self):
+        # An update note never raises needs_you; on a live session it is
+        # the Review reason while it is newer than the last prompt.
         self.session()
-        self.note("PR #4 merged", kind="update")
-        self.assertEqual(self.entry()[1]["state"], "review")
+        self.note("**PR #4 merged**\nall checks green", kind="update")
+        _, entry = self.entry()
+        self.assertEqual((entry["state"], entry["waiting_reason"]), ("review", "PR #4 merged"))
 
     def test_snooze_wins(self):
         self.session()
@@ -313,6 +327,150 @@ class SnapshotNotesTests(AgentBoardTestCase):
         snapshot, entry = self.entry()
         self.assertEqual((entry["notes"], entry["notes_count"]), ([], 0))
         self.assertEqual(snapshot["counts"]["notes"], 0)
+
+
+class SnapshotLifecycleTests(AgentBoardTestCase):
+    """The A/B/C cases of the session-lifecycle rules, end to end through
+    `agentboard snapshot --json --all`."""
+
+    def setUp(self):
+        super().setUp()
+        self.now = datetime.now(timezone.utc)
+
+    def stamp(self, minutes_ago):
+        return (self.now - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def snapshot(self):
+        rc, out, _err = _run_cmd(["snapshot", "--json", "--all"])
+        self.assertEqual(rc, 0)
+        return {e["session_id"]: e for e in json.loads(out)["sessions"]}
+
+    def link(self, session_id, ref, state, branch, source, created_minutes_ago=None,
+             closed_minutes_ago=None, responded=False, url=True):
+        self.conn.execute(
+            "INSERT INTO links(tool, session_id, kind, ref, url, state, title, checked_at, "
+            "branch, closed_at, source, created_at, responded_at) "
+            "VALUES ('claude',?, 'pr', ?, ?, ?, 't', ?, ?, ?, ?, ?, ?)",
+            (session_id, ref,
+             f"https://github.com/acme/widgets/pull/{ref.lstrip('#')}" if url else None,
+             state, self.stamp(1), branch,
+             self.stamp(closed_minutes_ago) if closed_minutes_ago is not None else None,
+             source,
+             self.stamp(created_minutes_ago) if created_minutes_ago is not None else None,
+             self.stamp(2) if responded else None),
+        )
+
+    def clean_exit(self, session_id, branch="feature-x", **overrides):
+        overrides.setdefault("end_reason", "prompt_input_exit")
+        insert_session(
+            self.conn, session_id=session_id, branch=branch, last_event="SessionEnd",
+            started_at=self.stamp(120),
+            ended_at=self.stamp(5), updated_at=self.stamp(5), last_event_at=self.stamp(5),
+            **overrides,
+        )
+        _insert_event(self.conn, "SessionEnd", session_id=session_id, ts=self.stamp(5))
+
+    def test_a_merged_pr_on_an_old_branch_does_not_hide_a_live_session(self):
+        # cd48bb3b: PR #1 merged long ago on feature-1; the session now
+        # sits on main reporting PRs #3/#4 the user has already answered.
+        insert_session(self.conn, session_id="handler", branch="main", started_at=self.stamp(600),
+                       updated_at=self.stamp(1), last_event_at=self.stamp(1),
+                       last_assistant="Waiting for the next tick.")
+        _insert_event(self.conn, "UserPromptSubmit", "go", session_id="handler", ts=self.stamp(3))
+        self.link("handler", "#1", "MERGED", "feature-1", "cli", 500, closed_minutes_ago=400)
+        self.link("handler", "#3", "OPEN", "handler-3", "cli", 100, responded=True)
+        entry = self.snapshot()["handler"]
+        self.assertNotEqual(entry["state"], "done")
+        self.assertEqual((entry["state"], entry["waiting_reason"]),
+                         ("review", "Your turn: Waiting for the next tick."))
+        by_ref = {link["ref"]: link for link in entry["links"]}
+        self.assertEqual(by_ref["#1"]["branch"], "feature-1")
+        self.assertTrue(by_ref["#3"]["owned"])
+        self.assertFalse(by_ref["#3"]["awaits_you"])
+
+    def test_a_new_prompt_after_the_merge_reopens(self):
+        insert_session(self.conn, session_id="s1", branch="feature-1", started_at=self.stamp(600),
+                       updated_at=self.stamp(1), last_event_at=self.stamp(1))
+        self.link("s1", "#1", "MERGED", "feature-1", "gh", 500, closed_minutes_ago=60)
+        self.assertEqual(self.snapshot()["s1"]["state"], "done")
+        _insert_event(self.conn, "UserPromptSubmit", "more", session_id="s1", ts=self.stamp(30))
+        self.assertNotEqual(self.snapshot()["s1"]["state"], "done")
+
+    def test_b_clean_exit_with_an_inherited_pr_is_done(self):
+        # 3647203a: PR #2 was on the branch before the session started.
+        self.clean_exit("inherit", branch="claude/units")
+        self.link("inherit", "#2", "OPEN", "claude/units", "gh", created_minutes_ago=3000)
+        entry = self.snapshot()["inherit"]
+        self.assertEqual((entry["state"], entry["done_reason"]), ("done", "clean exit"))
+        [link] = entry["links"]
+        self.assertEqual((link["owned"], link["awaits_you"]), (False, False))
+
+    def test_b_clean_exit_with_only_a_session_end_event_is_done(self):
+        # b263c21f: hooks installed mid-session, one SessionEnd event.
+        self.clean_exit("late-hooks")
+        entry = self.snapshot()["late-hooks"]
+        self.assertEqual((entry["state"], entry["done_reason"]), ("done", "clean exit"))
+
+    def test_b_unclean_end_and_open_todos_are_unconcluded_with_a_reason(self):
+        self.clean_exit("cleared", end_reason="clear")
+        self.clean_exit("todos", todos_open=2)
+        snap = self.snapshot()
+        self.assertEqual((snap["cleared"]["state"], snap["cleared"]["waiting_reason"]),
+                         ("unconcluded", "Ended (clear)"))
+        self.assertEqual((snap["todos"]["state"], snap["todos"]["waiting_reason"]),
+                         ("unconcluded", "2 todos left open"))
+
+    def test_c_owned_awaiting_pr_keeps_a_clean_exit_in_review(self):
+        self.clean_exit("owner")
+        self.link("owner", "#5", "OPEN", "feature-x", "gh", created_minutes_ago=60)
+        entry = self.snapshot()["owner"]
+        self.assertEqual((entry["state"], entry["waiting_reason"]),
+                         ("review", "PR #5 awaits your review"))
+        [link] = entry["links"]
+        self.assertEqual((link["owned"], link["awaits_you"], link["branch"]),
+                         (True, True, "feature-x"))
+        self.conn.execute("UPDATE links SET responded_at=?", (self.stamp(1),))
+        entry = self.snapshot()["owner"]
+        self.assertEqual((entry["state"], entry["done_reason"]), ("done", "clean exit"))
+
+    def test_c_urlless_reported_pr_never_awaits_you(self):
+        self.clean_exit("nourl")
+        self.link("nourl", "#6", "OPEN", "feature-x", "cli", url=False)
+        entry = self.snapshot()["nourl"]
+        self.assertEqual(entry["state"], "done")
+        self.assertEqual((entry["links"][0]["owned"], entry["links"][0]["awaits_you"]),
+                         (True, False))
+
+    def test_update_note_newer_than_last_prompt_on_a_live_session_is_review(self):
+        from agentboard import notes
+
+        insert_session(self.conn, session_id="live", updated_at=self.stamp(10),
+                       last_event_at=self.stamp(10), last_assistant="All done.")
+        _insert_event(self.conn, "UserPromptSubmit", "hi", session_id="live", ts=self.stamp(20))
+        notes.record_note(self.conn, "claude", "live", "update",
+                          "Tick summary\n**CI went red on PR #9**", "cli", self.stamp(10))
+        entry = self.snapshot()["live"]
+        self.assertEqual((entry["state"], entry["waiting_reason"]), ("review", "Tick summary"))
+        _insert_event(self.conn, "UserPromptSubmit", "ok", session_id="live", ts=self.stamp(5))
+        entry = self.snapshot()["live"]
+        self.assertEqual((entry["state"], entry["waiting_reason"]), ("review", "Your turn: All done."))
+
+    def test_unattended_loop_idle_is_running_while_alive(self):
+        insert_session(self.conn, session_id="loop", pid=os.getpid(), updated_at=self.stamp(2),
+                       last_event_at=self.stamp(2), last_prompt="# Autonomous loop tick")
+        entry = self.snapshot()["loop"]
+        self.assertEqual((entry["state"], entry["waiting_reason"]),
+                         ("running", "Loop idle between ticks"))
+        self.conn.execute("UPDATE sessions SET pid=? WHERE session_id='loop'", (2**30,))
+        self.assertEqual(self.snapshot()["loop"]["state"], "unconcluded")
+
+    def test_unattended_prefixes_come_from_config(self):
+        (self.agentboard_home / "config.json").write_text(
+            json.dumps({"note_unattended_prefixes": ["[cron]"]})
+        )
+        insert_session(self.conn, session_id="cron", pid=os.getpid(), updated_at=self.stamp(2),
+                       last_event_at=self.stamp(2), last_prompt="[cron] check")
+        self.assertEqual(self.snapshot()["cron"]["state"], "running")
 
 
 class MarkTests(AgentBoardTestCase):
@@ -388,7 +546,7 @@ class AutoDoneEndToEndTests(AgentBoardTestCase):
         cli.cmd_mark(cli.build_parser().parse_args(["mark", "claude", "s1", "open"]))
         snapshot = cli.build_snapshot(self.conn, include_all=True)
         entry = snapshot["sessions"][0]
-        self.assertNotEqual(entry["state"], "done")
+        self.assertEqual((entry["state"], entry["waiting_reason"]), ("unconcluded", "Reopened"))
         self.assertFalse(entry["auto_done"])
 
     def test_resume_after_clean_exit_clears_ended_at_and_reopens(self):

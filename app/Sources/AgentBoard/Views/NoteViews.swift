@@ -139,7 +139,7 @@ struct UpdateRowView: View {
                         .frame(width: 14, height: 14)
                         .background(row.session.tool == "codex" ? Color.purple.opacity(0.25) : Color.blue.opacity(0.25))
                         .clipShape(Circle())
-                    Text(row.project.isEmpty ? row.session.title : row.project)
+                    Text(row.project.isEmpty ? row.session.displayTitle : row.project)
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

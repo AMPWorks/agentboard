@@ -188,7 +188,7 @@
       "session_id": "sess-running-1",
       "state": "running",
       "waiting_reason": null,
-      "status_text": "writing dashboard split view",
+      "status_text": "Building the dashboard split view (subtask 3/5)",
       "title": "Implement SwiftUI dashboard window",
       "cwd": "/Users/dev/projects/agentboard/app",
       "project": "app",
@@ -279,7 +279,7 @@
       "tool": "claude",
       "session_id": "sess-review-1",
       "state": "review",
-      "waiting_reason": null,
+      "waiting_reason": "Your turn: Summary",
       "status_text": null,
       "title": "Metrics rollup over-count writeup",
       "cwd": "/Users/dev/projects/metrics-pipeline",
@@ -323,7 +323,7 @@
       "tool": "claude",
       "session_id": "sess-review-2",
       "state": "review",
-      "waiting_reason": null,
+      "waiting_reason": "PR #231 awaits your review",
       "status_text": null,
       "title": "Fix missing counter switch case",
       "cwd": "/Users/dev/projects/billing-api",
@@ -345,14 +345,50 @@
           "ref": "ABC-130",
           "url": "https://example.atlassian.net/browse/ABC-130",
           "state": null,
-          "title": "Missing counter switch case"
+          "title": "Missing counter switch case",
+          "branch": null,
+          "owned": false,
+          "awaits_you": false
         },
         {
           "kind": "pr",
           "ref": "#231",
           "url": "https://github.com/example/billing-api/pull/231",
           "state": "OPEN",
-          "title": "Fix missing switch case for block counter"
+          "title": "Fix missing switch case for block counter",
+          "branch": "fix-counter-switch-case",
+          "owned": true,
+          "awaits_you": true
+        },
+        {
+          "kind": "pr",
+          "ref": "#229",
+          "url": "https://github.com/example/billing-api/pull/229",
+          "state": "MERGED",
+          "title": "Add block counter metrics",
+          "branch": "block-counter-metrics",
+          "owned": true,
+          "awaits_you": false
+        },
+        {
+          "kind": "pr",
+          "ref": "#227",
+          "url": "https://github.com/example/billing-api/pull/227",
+          "state": "CLOSED",
+          "title": "Try a counter refactor",
+          "branch": "counter-refactor",
+          "owned": true,
+          "awaits_you": false
+        },
+        {
+          "kind": "pr",
+          "ref": "#224",
+          "url": "https://github.com/example/billing-api/pull/224",
+          "state": "MERGED",
+          "title": "Policy type enum cleanup",
+          "branch": "policy-enum",
+          "owned": false,
+          "awaits_you": false
         }
       ],
       "triage": { "status": "open", "until": null, "note": null }
@@ -362,7 +398,7 @@
       "tool": "codex",
       "session_id": "sess-review-3",
       "state": "review",
-      "waiting_reason": null,
+      "waiting_reason": "Your turn: Added lookup_name(org_id, item_id) plus a doc note",
       "status_text": null,
       "title": "Lookup helper doc + unique-key note",
       "cwd": "/Users/dev/projects/directory-tools",

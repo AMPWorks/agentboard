@@ -566,6 +566,126 @@ class UpsertBackfillSessionTests(AgentBoardTestCase):
         self.assertEqual(row["title"], "new")
 
 
+def _user(text, ts="2026-01-01T00:00:00.000Z"):
+    return {"type": "user", "message": {"role": "user", "content": text}, "timestamp": ts,
+            "cwd": "/tmp", "gitBranch": "main"}
+
+
+def _assistant(text, ts="2026-01-01T00:05:00.000Z"):
+    return {"type": "assistant", "timestamp": ts,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
+class TitleSourceTests(AgentBoardTestCase):
+    def parse(self, entries):
+        path = self.tmp_path / "t.jsonl"
+        write_jsonl(path, entries)
+        return backfill.parse_claude_transcript(path)
+
+    def test_newest_ai_title_wins(self):
+        result = self.parse([
+            _user("start"), {"type": "ai-title", "aiTitle": "A"}, _assistant("x"),
+            {"type": "ai-title", "aiTitle": "B"}, _assistant("y", "2026-01-01T00:06:00.000Z"),
+        ])
+        self.assertEqual((result["title"], result["title_source"]), ("B", "ai"))
+
+    def test_custom_title_beats_a_newer_ai_title(self):
+        result = self.parse([
+            _user("start"), {"type": "custom-title", "customTitle": "My name"},
+            _assistant("x"), {"type": "ai-title", "aiTitle": "Later AI"},
+            _assistant("y", "2026-01-01T00:06:00.000Z"),
+        ])
+        self.assertEqual((result["title"], result["title_source"]), ("My name", "custom"))
+
+    def test_custom_title_far_back_in_the_tail_is_still_found(self):
+        filler = [_assistant(f"line {i} " + "x" * 200, "2026-01-01T00:05:00.000Z")
+                  for i in range(2000)]
+        result = self.parse(
+            [_user("start"), {"type": "custom-title", "customTitle": "Named"}]
+            + filler + [{"type": "ai-title", "aiTitle": "AI"}, _user("last")]
+        )
+        self.assertEqual((result["title"], result["title_source"]), ("Named", "custom"))
+
+    def test_custom_title_hunt_stops_after_its_budget(self):
+        # Past CUSTOM_TITLE_SCAN_BYTES the hunt gives up; a custom title the
+        # row already stores is kept by the backfill merge rule instead.
+        filler = [_assistant(f"line {i} " + "x" * 200, "2026-01-01T00:05:00.000Z")
+                  for i in range(200)]
+        entries = ([_user("start"), {"type": "custom-title", "customTitle": "Named"}]
+                   + filler + [{"type": "ai-title", "aiTitle": "AI"}, _user("last")])
+        with mock.patch.object(backfill, "CUSTOM_TITLE_SCAN_BYTES", 10_000):
+            result = self.parse(entries)
+        self.assertEqual((result["title"], result["title_source"]), ("AI", "ai"))
+        self.assertEqual(result["last_prompt"], "last")
+        self.assertEqual(result["last_assistant"], "line 199 " + "x" * 200)
+
+    def test_summary_title_source(self):
+        result = self.parse([_user("start"), {"type": "summary", "summary": "Sum"}])
+        self.assertEqual((result["title"], result["title_source"]), ("Sum", "summary"))
+
+    def test_fallback_title_source(self):
+        result = self.parse([_user("first line\nsecond")])
+        self.assertEqual((result["title"], result["title_source"]), ("first line", "fallback"))
+
+    def test_newest_branch_in_the_tail_wins(self):
+        old = dict(_user("start"), gitBranch="old-branch")
+        new = dict(_assistant("x"), gitBranch="new-branch")
+        self.assertEqual(self.parse([old, new])["branch"], "new-branch")
+
+    def _hook_row(self, title, title_source=None):
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, title, title_source, origin) "
+            "VALUES ('claude','s1',?,?,'hook')", (title, title_source),
+        )
+
+    def _row(self):
+        return self.conn.execute(
+            "SELECT title, title_source FROM sessions WHERE session_id='s1'"
+        ).fetchone()
+
+    def test_hook_row_title_updated_from_a_newer_ai_title(self):
+        self._hook_row("PR #4 author investigation")
+        fields = self.parse([_user("start"), {"type": "ai-title", "aiTitle": "Current work"}])
+        backfill.upsert_backfill_session(self.conn, "claude", "s1", fields)
+        self.assertEqual(tuple(self._row()), ("Current work", "ai"))
+
+    def test_hook_row_title_kept_when_transcript_only_has_a_first_prompt(self):
+        self._hook_row("Old real title")
+        fields = self.parse([_user("just a prompt")])
+        backfill.upsert_backfill_session(self.conn, "claude", "s1", fields)
+        self.assertEqual(tuple(self._row()), ("Old real title", None))
+
+    def test_custom_title_row_is_not_replaced_by_a_newer_ai_title(self):
+        self._hook_row("My own name", "custom")
+        fields = self.parse([_user("start"), {"type": "ai-title", "aiTitle": "Newer AI"}])
+        backfill.upsert_backfill_session(self.conn, "claude", "s1", fields)
+        self.assertEqual(tuple(self._row()), ("My own name", "custom"))
+        fields = self.parse([_user("start"), {"type": "custom-title", "customTitle": "Renamed"}])
+        backfill.upsert_backfill_session(self.conn, "claude", "s1", fields)
+        self.assertEqual(tuple(self._row()), ("Renamed", "custom"))
+
+    def test_generated_and_cli_titles_yield_only_to_custom(self):
+        for source in ("generated", "cli"):
+            self.conn.execute("DELETE FROM sessions")
+            backfill.upsert_backfill_session(self.conn, "claude", "s1",
+                                             {"title": "first", "title_source": "ai"})
+            self.conn.execute("UPDATE sessions SET title='Retitled', title_source=?", (source,))
+            backfill.upsert_backfill_session(self.conn, "claude", "s1",
+                                             {"title": "AI again", "title_source": "ai"})
+            self.assertEqual(tuple(self._row()), ("Retitled", source))
+            backfill.upsert_backfill_session(self.conn, "claude", "s1",
+                                             {"title": "Mine", "title_source": "custom"})
+            self.assertEqual(tuple(self._row()), ("Mine", "custom"))
+
+    def test_title_update_rules(self):
+        update = backfill.title_update
+        self.assertEqual(update(None, None, "t", "fallback"), ("t", "fallback"))
+        self.assertEqual(update("old", "fallback", "new", "fallback"), ("new", "fallback"))
+        self.assertIsNone(update("same", "ai", "same", "ai"))
+        self.assertEqual(update("fb", "fallback", "AI", "ai"), ("AI", "ai"))
+        self.assertIsNone(update("t", "ai", None, None))
+
+
 class CorrectDaemonPidRowsTests(AgentBoardTestCase):
     def _insert(self, session_id, pid):
         self.conn.execute(

@@ -68,8 +68,13 @@ struct SessionDetailView: View {
                     .frame(width: 20, height: 20)
                     .background(session.tool == "codex" ? Color.purple.opacity(0.25) : Color.blue.opacity(0.25))
                     .clipShape(Circle())
-                Text(session.title)
+                Text(session.displayTitle)
                     .font(.title2.bold())
+            }
+            if let title = SessionDisplay.secondaryTitle(session) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
             }
             Text(session.state.displayName)
                 .font(.subheadline)
@@ -78,12 +83,6 @@ struct SessionDetailView: View {
                 Text(reason)
                     .font(.callout)
                     .foregroundStyle(.orange)
-            }
-            if let status = session.statusText, !status.isEmpty {
-                Text(status)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .italic()
             }
             if session.state == .done, let reason = session.doneReason, !reason.isEmpty {
                 Text("Done: \(reason)")
@@ -158,10 +157,20 @@ struct SessionDetailView: View {
                         Text(linkLabel(link))
                     }
                     if let state = link.state {
+                        let tint = link.isPR ? PRStyle.color(for: link) : Color.secondary
                         Text(state)
                             .font(.caption2)
                             .padding(.horizontal, 5)
-                            .background(.secondary.opacity(0.2), in: Capsule())
+                            .background(tint.opacity(0.2), in: Capsule())
+                            .foregroundStyle(link.isPR ? tint : Color.primary)
+                    }
+                    if link.awaitsYou == true {
+                        Label("awaits you", systemImage: "person.crop.circle.badge.exclamationmark")
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 5)
+                            .background(Color.orange.opacity(0.2), in: Capsule())
+                            .foregroundStyle(.orange)
+                            .help("You opened this PR and nobody but automation has reviewed or commented yet")
                     }
                 }
             }

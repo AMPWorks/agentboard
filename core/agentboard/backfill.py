@@ -13,6 +13,10 @@ from .reconcile import is_pid_alive
 HEAD_SCAN_MAX_LINES = 500
 HEAD_SCAN_MAX_BYTES = 2 * 1024 * 1024
 TAIL_SCAN_MAX_BYTES = 8 * 1024 * 1024
+# Once the tail scan knows everything but a custom title, it keeps looking
+# for one this much further (a custom title already stored is kept anyway,
+# since backfill never replaces a custom title with an ai-title).
+CUSTOM_TITLE_SCAN_BYTES = 2 * 1024 * 1024
 TAIL_CHUNK_SIZE = 65536
 
 def claude_projects_dir() -> Path:
@@ -89,6 +93,13 @@ def _within_days(path, days):
 # -- Claude -----------------------------------------------------------------
 
 TITLE_TYPES = {"summary": "summary", "custom-title": "customTitle", "ai-title": "aiTitle"}
+
+# Where a session's title came from (sessions.title_source). Precedence, top
+# wins: a user's own /rename ("custom"); the newest of an LLM retitle
+# ("generated") or `agentboard title` ("cli"); Claude Code's own summary
+# ("ai"/"summary"); the first prompt's first line ("fallback").
+TITLE_SOURCES = {"summary": "summary", "custom-title": "custom", "ai-title": "ai"}
+CUSTOM_TITLE_MARKER = '"custom-title"'
 
 
 SYNTHETIC_USER_TAGS = (
@@ -227,6 +238,7 @@ def parse_claude_transcript(path: Path) -> dict:
         "entrypoint": None,
         "userType": None,
         "todos_open": None,
+        "title_source": None,
     }
 
     for raw in iter_head_lines(path):
@@ -255,10 +267,33 @@ def parse_claude_transcript(path: Path) -> dict:
             break
 
     last_substantive_type = None
+    tail_branch = None
+    custom_title = None
+    other_title = None
+    other_source = None
+    scanned = 0
+    hunt_started = None
     for raw in iter_tail_lines(path):
+        scanned += len(raw) + 1
         raw = raw.strip()
         if not raw:
             continue
+        # Once everything else is known, the tail is scanned only for a
+        # user's custom title, which beats any newer ai-title, and only for
+        # CUSTOM_TITLE_SCAN_BYTES more: skip the JSON parse of every other
+        # line.
+        if (
+            result["last_prompt"] is not None
+            and result["last_assistant"] is not None
+            and result["updated_at"] is not None
+            and other_title is not None
+        ):
+            if hunt_started is None:
+                hunt_started = scanned
+            elif scanned - hunt_started > CUSTOM_TITLE_SCAN_BYTES:
+                break
+            if CUSTOM_TITLE_MARKER not in raw:
+                continue
         try:
             entry = json.loads(raw)
         except ValueError:
@@ -268,17 +303,18 @@ def parse_claude_transcript(path: Path) -> dict:
             result["updated_at"] = entry["timestamp"]
         if entry.get("cwd") and result["cwd"] is None:
             result["cwd"] = entry["cwd"]
-        if entry.get("gitBranch"):
-            branch = normalize_branch(entry["gitBranch"])
-            if branch:
-                result["branch"] = branch
+        if entry.get("gitBranch") and tail_branch is None:
+            tail_branch = normalize_branch(entry["gitBranch"])
 
         entry_type = entry.get("type")
-        if entry_type in TITLE_TYPES and result["title"] is None:
-            key = TITLE_TYPES[entry_type]
-            value = entry.get(key)
-            if value:
-                result["title"] = value
+        if entry_type in TITLE_TYPES:
+            value = entry.get(TITLE_TYPES[entry_type])
+            if value and isinstance(value, str):
+                if entry_type == "custom-title":
+                    if custom_title is None:
+                        custom_title = value
+                elif other_title is None:
+                    other_title, other_source = value, TITLE_SOURCES[entry_type]
 
         if entry_type == "user" and not entry.get("isMeta"):
             text = _claude_user_text(entry.get("message", {}).get("content"))
@@ -296,10 +332,17 @@ def parse_claude_transcript(path: Path) -> dict:
         if (
             result["last_prompt"] is not None
             and result["last_assistant"] is not None
-            and result["title"] is not None
+            and custom_title is not None
             and result["updated_at"] is not None
         ):
             break
+
+    if tail_branch:
+        result["branch"] = tail_branch
+    if custom_title:
+        result["title"], result["title_source"] = custom_title, "custom"
+    elif other_title:
+        result["title"], result["title_source"] = other_title, other_source
 
     if last_substantive_type == "user":
         result["last_event"] = "UserPromptSubmit"
@@ -310,6 +353,7 @@ def parse_claude_transcript(path: Path) -> dict:
 
     if not result["title"]:
         result["title"] = _first_line(result["first_prompt"])
+        result["title_source"] = "fallback" if result["title"] else None
 
     if result["entrypoint"] == "sdk-cli":
         result["interactive"] = 0
@@ -569,27 +613,75 @@ def _is_known_bad_value(col, value):
     return False
 
 
+# Title sources that only the user or an explicit retitle set, which a
+# transcript re-parse must not undo: "custom" yields only to a newer custom
+# title, "generated"/"cli" only to a custom one.
+PROTECTED_TITLE_SOURCES = {"custom", "generated", "cli"}
+
+
+def title_update(current_title, current_source, new_title, new_source):
+    """(title, title_source) a re-parse should write, or None to keep.
+
+    The hook never writes titles, so unlike the other columns a title may
+    be replaced on a hook-origin row too (a documented exception, like
+    _is_known_bad_value): by a parsed custom/ai/summary title that differs.
+    A first-prompt fallback never replaces a real title (or a legacy one
+    whose source is unknown); a custom title yields only to a different
+    custom title; a generated or `agentboard title` title only to a custom
+    one. A missing new source counts as "ai" (an older caller's title).
+    """
+    if not new_title:
+        if current_title is not None and _is_known_bad_value("title", current_title):
+            return None, None
+        return None
+    new_source = new_source or "ai"
+    if current_title is None or _is_known_bad_value("title", current_title):
+        return new_title, new_source
+    if current_source == "custom":
+        if new_source == "custom" and new_title != current_title:
+            return new_title, new_source
+        return None
+    if current_source in PROTECTED_TITLE_SOURCES:
+        return (new_title, new_source) if new_source == "custom" else None
+    if new_source == "fallback":
+        if current_source == "fallback" and new_title != current_title:
+            return new_title, new_source
+        return None
+    if new_title != current_title or new_source != current_source:
+        return new_title, new_source
+    return None
+
+
 def upsert_backfill_session(conn, tool, session_id, fields: dict):
     row = conn.execute(
         "SELECT * FROM sessions WHERE tool=? AND session_id=?", (tool, session_id)
     ).fetchone()
 
     values = {col: fields.get(col) for col in BACKFILL_COLUMNS}
+    title_source = fields.get("title_source") or ("ai" if values["title"] else None)
 
     if row is None:
-        columns = ["tool", "session_id", "origin"] + BACKFILL_COLUMNS
+        columns = ["tool", "session_id", "origin"] + BACKFILL_COLUMNS + ["title_source"]
         placeholders = ",".join("?" for _ in columns)
-        params = [tool, session_id, "backfill"] + [values[c] for c in BACKFILL_COLUMNS]
+        params = ([tool, session_id, "backfill"] + [values[c] for c in BACKFILL_COLUMNS]
+                  + [title_source])
         conn.execute(
             f"INSERT INTO sessions({','.join(columns)}) VALUES ({placeholders})",
             params,
         )
         return "inserted"
 
+    title = title_update(row["title"], row["title_source"], values["title"], title_source)
+
     if row["origin"] == "hook":
         sets = []
         params = []
+        if title is not None:
+            sets += ["title=?", "title_source=?"]
+            params += list(title)
         for col in BACKFILL_COLUMNS:
+            if col == "title":
+                continue
             current = row[col]
             new_value = values[col]
             if col in ALWAYS_OVERWRITE_COLUMNS:
@@ -611,8 +703,13 @@ def upsert_backfill_session(conn, tool, session_id, fields: dict):
         )
         return "filled"
 
-    sets = [f"{col}=?" for col in BACKFILL_COLUMNS]
-    params = [values[col] for col in BACKFILL_COLUMNS] + [tool, session_id]
+    columns = [col for col in BACKFILL_COLUMNS if col != "title"]
+    sets = [f"{col}=?" for col in columns]
+    params = [values[col] for col in columns]
+    if title is not None:
+        sets += ["title=?", "title_source=?"]
+        params += list(title)
+    params += [tool, session_id]
     conn.execute(
         f"UPDATE sessions SET {','.join(sets)} WHERE tool=? AND session_id=?",
         params,

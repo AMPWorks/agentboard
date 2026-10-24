@@ -192,8 +192,11 @@ caught and logged to `$AGENTBOARD_HOME/hook-errors.log` (capped at ~1 MB) instea
 
 It targets well under 50 ms per call. The only things that ever shell out are:
 
-- `git -C <cwd> branch --show-current`, and only on `SessionStart` / `UserPromptSubmit`, or the
-  first time a session's branch is still unknown.
+- `git -C <cwd> branch --show-current`, and only when the branch can't be read straight from
+  the repository's `HEAD` file (which is how it is normally read: one git call costs most of the
+  50 ms budget). The branch is re-read on `SessionStart` / `UserPromptSubmit` and on the parent
+  `Stop` / `SessionEnd` (so a branch created mid-turn is seen once the session goes idle or
+  exits), or whenever a session's branch is still unknown.
 - A short, targeted `ps` walk (at most 3 hops) to find the actual `claude`/`codex` process above
   the hook's immediate parent, recorded once per session the same way the branch is.
 
@@ -223,9 +226,24 @@ sessions. Each session is assigned exactly one `state`, in priority order:
 
 `done` → `snoozed` → `needs_you` → `interrupted` → `review` → `running` → `unconcluded`
 
-(see `core/agentboard/reconcile.py` for the exact rules — permission requests and failures mean
-`needs_you`, and so does an open `needs_you` note no newer prompt has answered (see Updates below); live activity means `running`; a dead process or stale activity means `interrupted`;
-a finished turn less than 24h old means `review`, older or never-concluded means `unconcluded`).
+(see `core/agentboard/reconcile.py` and SPEC.md for the exact rules — permission requests and
+failures mean `needs_you`, and so does an open `needs_you` note no newer prompt has answered (see
+Updates below); live activity means `running`; a dead process or stale activity means
+`interrupted`; anything not finished and not waiting on you is `unconcluded`).
+
+**Review always says what to do.** A session is `review` only with a concrete reason in
+`waiting_reason`, which the row shows as its second line:
+
+- "PR #N awaits your review" — the session opened a PR that nobody but automation has reviewed or
+  commented on yet (see Links below; "PR #N open, no response yet" when you and the session share
+  one GitHub account). This holds even after the session exits, until you respond or it merges.
+- the headline of an open `update` note newer than your last prompt, under a day old;
+- "Your turn: <first line of its last message>" — an attended session stopped (or "Interrupted:
+  your turn"), within 24 h.
+
+A loop session (its last prompt starts with a `note_unattended_prefixes` entry) idling between
+ticks is not waiting on you: it is `running` with "Loop idle between ticks" while its process is
+alive.
 By default the snapshot excludes sessions marked `interactive: false` (non-interactive `claude -p`
 / SDK runs, Codex `exec` runs) and `done` sessions older than 7 days; `--all` includes everything.
 
@@ -243,12 +261,22 @@ agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
 
 A new prompt in a session that was marked `done` reopens it automatically.
 
-A session can also reach `done` on its own, surfaced as `auto_done: true` with a `done_reason`
-("pr merged", "link done", or "clean exit" — a session that exited cleanly, with its last turn
-actually finished, no open todos/tasks, and no open PR) in the snapshot; `done_reason: "manual"`
-and `auto_done: false` means a human marked it done. `agentboard mark <tool> <id> open` after a
-clean exit rejects the auto-done call for that session until it genuinely resumes (a new prompt
-clears the exit marker and makes it live again).
+A session can also reach `done` on its own, surfaced as `auto_done: true` with a `done_reason` in
+the snapshot; `done_reason: "manual"` and `auto_done: false` means a human marked it done:
+
+- **"clean exit"** — you exited it (`/exit`, logout; for Codex, any end after a finished turn).
+  An exited session goes out of sight (Show hidden / the dashboard's Done still list it) unless
+  it opened a PR that awaits you (it stays in Review), has an open `needs_you` note, or left
+  todos open (`unconcluded`, "N todos left open"). A PR that was already on the branch before
+  the session started never keeps it around. Any other end (`/clear`, `/resume`) is
+  `unconcluded`, "Ended (<reason>)".
+- **"pr merged"** — every PR recorded for the session's *current* feature branch is merged or
+  closed and you haven't prompted it since. A merged PR on an older branch, or on
+  main/master/develop, never hides a session that moved on.
+- **"link done"** — any link reports `DONE`.
+
+`agentboard mark <tool> <id> open` after an exit rejects these for that session ("Reopened")
+until it genuinely resumes (a new prompt clears the exit marker and makes it live again).
 
 ## Menu bar icon
 
@@ -351,9 +379,17 @@ these generic mechanisms, all handled in `core/agentboard/links.py`:
    free-form current-activity label, for the session it's running in:
 
    ```
-   agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state OPEN|MERGED|CLOSED|DONE] [--title T] [--session TOOL:ID]
+   agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state OPEN|MERGED|CLOSED|DONE] [--title T] [--branch B] [--session TOOL:ID]
    agentboard status --text "phase/label" [--ttl MIN] [--session TOOL:ID]
+   agentboard title --text "what this session is doing" [--session TOOL:ID]
    ```
+
+   A PR reported this way counts as the session's own work (see below). `--branch` records the
+   PR's head branch (default: the session's current branch); a link keeps its branch when the
+   session later moves on. A status text is shown as the row's title while it lasts, with the
+   session's own title under it. `agentboard title` names the session until the work moves on
+   far enough for a generated retitle; a title you set yourself in Claude Code (`/rename`) is
+   never replaced.
 
    If `--session` is omitted, the session is resolved in order: a session-identifying
    environment variable the calling tool set (`CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID` /
@@ -379,16 +415,60 @@ these generic mechanisms, all handled in `core/agentboard/links.py`:
    `examples/providers/` for a fully generic example (reads git trailers).
 
 4. **Built-in generic detectors**, both optional and silently skipped if unavailable:
-   - A GitHub PR for the session's branch, via `gh pr list` — only if `gh` is installed, and
-     only during `refresh-links` (the one command allowed to touch the network). Results are
-     cached in the `links` table; an `OPEN` PR is re-checked after 15 minutes, `MERGED`/`CLOSED`
-     never again.
+   - A GitHub PR for the session's current branch, via `gh pr list` — only if `gh` is installed,
+     and only during `refresh-links` (the one command allowed to touch the network). Results are
+     cached in the `links` table with the PR's head branch, creation and merge/close times; an
+     `OPEN` PR is re-checked after 15 minutes, `MERGED`/`CLOSED` never again, and a branch change
+     looks again. Every other `OPEN` PR link a session has (one it reported from `main`, say) is
+     re-checked by URL with `gh pr view` on the same schedule.
    - Ticket references matched against the branch name and first prompt, using
      `"ticket_patterns": [{"regex": "...", "url": "https://.../{ref}"}]` in `config.json`.
      **Empty by default** — nothing is matched until you configure a pattern.
 
-A link with every `pr`-kind entry `MERGED`/`CLOSED`, or any link at all with `state: DONE`,
-marks the session `done` automatically.
+A link with `state: DONE`, or every PR on the session's current feature branch `MERGED`/`CLOSED`
+with no prompt since, marks the session `done` automatically (see State above).
+
+**Owned PRs and "awaits you".** A PR is the session's own when the session reported it
+(`agentboard link`, an inbox drop, a provider) or `gh` found it on the session's branch created
+during the session; a PR inherited from the branch is shown but never keeps the session on the
+board. An owned, open PR **awaits you** until someone other than automation reviews or comments
+on it. `refresh-links` reads the PR's reviews and conversation comments and ignores GitHub bot
+accounts, the PR's author, and any login listed in `config.json`:
+
+```json
+{"automation_logins": ["my-reviewer-bot", "my-author-bot"]}
+```
+
+`automation_logins` is empty by default; it is how a setup that runs extra accounts (a separate
+reviewer bot, an author bot) declares them, and any integration may add to it. When the PR's
+author *is* the logged-in account (you and the session share one account), that account's
+reviews and comments count once they come while the session isn't mid-turn, and the reason reads
+"PR #N open, no response yet". When the logged-in account is not the PR's author (you are the
+default `gh` login and sessions open PRs with a separate token), your reviews and comments count
+like anyone else's.
+
+**PR buttons.** Popover and dashboard rows show one small button per PR (`#N`, green open, purple
+merged, red closed, outlined when it awaits you) that opens it in the browser without focusing
+the terminal; past three PRs a "+N" opens the detail view, whose Links section lists every link
+with its state.
+
+**Titles that follow the work.** Claude Code names a session once, so a long-lived session keeps
+its opening summary. `refresh-links` retitles a session once it has 5 new prompts since its last
+retitle (or changed branch) by running the local `claude` CLI with Haiku on a short summary of
+its recent prompts and replies, at most 5 sessions per run and once an hour per session. Tune or
+turn it off in `config.json`:
+
+```json
+{"retitle_command": ["claude", "-p", "--model", "haiku", "--tools", "", "--strict-mcp-config",
+                     "--no-session-persistence", "Name this session..."],
+ "retitle_min_prompts": 5, "retitle_max_per_run": 5}
+```
+
+`"retitle_command": null` disables it; any command that reads the context on stdin and prints
+a title works. The command runs with `AGENTBOARD_HOOK_SKIP=1`, so its own Claude session never
+shows up on the board. The context it reads is copied from other sessions, so keep it
+tool-free: the default passes `--tools ""` and `--strict-mcp-config` so the model cannot read
+files or call anything while naming a session.
 
 ### Updates (retained notes)
 
@@ -516,7 +596,9 @@ Terminal focus/resume support iTerm2 (`ITERM_SESSION_ID`) and Apple Terminal
 (`~/.claude/projects/*/*.jsonl`) and Codex rollouts (`~/.codex/sessions/*/*/*/rollout-*.jsonl`)
 modified within the window. It streams files rather than loading them whole, and is idempotent:
 re-running it never overwrites a field a live hook already set, only fills in ones that are
-still `NULL`.
+still `NULL` — except the title, which hooks never write: a newer Claude Code title replaces an
+older one, a `/rename` (custom title) beats any generated one, and a first-prompt fallback never
+replaces a real title.
 
 ## CLI reference
 
@@ -525,8 +607,9 @@ agentboard hook --tool claude|codex
 agentboard snapshot [--json] [--all]
 agentboard paths [--json]
 agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
-agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state ...] [--title T] [--session TOOL:ID]
+agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state ...] [--title T] [--branch B] [--session TOOL:ID]
 agentboard status --text TEXT [--ttl MIN] [--session TOOL:ID]
+agentboard title --text TEXT [--session TOOL:ID]
 agentboard note --kind needs_you|update|error --text T [--session TOOL:ID]
 agentboard notes [--session TOOL:ID] [--kind K ...] [--all] [--json]
 agentboard notes --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID] [--kind K ...]

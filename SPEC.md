@@ -46,8 +46,13 @@ Registered for every event in both tools. Requirements:
 - Read JSON from stdin. **Print nothing to stdout** (Claude adds stdout of SessionStart /
   UserPromptSubmit to model context). Always exit 0, swallow every exception (log to
   `$AGENTBOARD_HOME/hook-errors.log`, capped ~1 MB).
-- Fast: target < 50 ms. No network. Only shell out to git (`git -C cwd branch --show-current`,
-  1 s timeout) on SessionStart / UserPromptSubmit or when the session has no branch yet.
+- Fast: target < 50 ms. No network. The branch is re-read on SessionStart / UserPromptSubmit and
+  (added later) on parent Stop / SessionEnd, so a branch created mid-turn is seen once the
+  session goes idle or exits, and whenever the session has no branch yet. It is read from the
+  repository's HEAD file (following a worktree's `gitdir:` file); only when that is missing or
+  in a form AgentBoard doesn't parse does it shell out to git (`git -C cwd branch
+  --show-current`, 1 s timeout), since one git call costs most of the 50 ms budget. While
+  `AGENTBOARD_HOOK_SKIP` is set (AgentBoard's own retitle command) the hook records nothing.
 - Capture from env: `ITERM_SESSION_ID`, `TERM_PROGRAM`, `TERM_SESSION_ID`. Capture
   `os.getppid()` as the agent process pid (verify: for Claude the hook's parent may be a shell
   spawned by claude; walk up with `ps -o ppid= -p` at most 3 levels to find a process whose
@@ -78,11 +83,20 @@ sessions(tool TEXT, session_id TEXT, cwd TEXT, branch TEXT, title TEXT,
          started_at TEXT, updated_at TEXT, last_event TEXT, last_event_at TEXT,
          waiting_reason TEXT, pid INTEGER, iterm_session_id TEXT, term_program TEXT,
          transcript_path TEXT, origin TEXT /*hook|backfill*/, interactive INTEGER,
-         ended_at TEXT, PRIMARY KEY(tool, session_id))
+         ended_at TEXT, ..., title_source TEXT /*custom|generated|cli|ai|summary|fallback*/,
+         retitled_at TEXT, retitle_prompt_count INTEGER, retitle_branch TEXT,
+         PRIMARY KEY(tool, session_id))
 triage(tool, session_id, status TEXT /*done|snoozed|open*/, until TEXT, note TEXT,
        updated_at TEXT, PRIMARY KEY(tool, session_id))
 links(tool, session_id, kind TEXT /*pr|ticket*/, ref TEXT, url TEXT, state TEXT,
-      title TEXT, checked_at TEXT, PRIMARY KEY(tool, session_id, kind, ref))
+      title TEXT, checked_at TEXT,
+      branch TEXT /*PR head branch, else the session's branch when first recorded*/,
+      closed_at TEXT /*merge/close time, stamped once*/,
+      source TEXT /*gh|cli|inbox|provider|ticket: who reported it*/,
+      created_at TEXT /*PR creation time from gh*/,
+      responded_at TEXT /*first human review or comment*/,
+      self_authored INTEGER /*PR author is the active gh login*/,
+      PRIMARY KEY(tool, session_id, kind, ref))
 notes(id INTEGER PK, tool TEXT, session_id TEXT, ts TEXT /*first seen*/, last_ts TEXT,
       kind TEXT /*needs_you|update|error*/, text TEXT /*capped at 4000*/,
       fingerprint TEXT /*kind + normalized first 200 chars*/, count INTEGER,
@@ -90,32 +104,53 @@ notes(id INTEGER PK, tool TEXT, session_id TEXT, ts TEXT /*first seen*/, last_ts
       dismissed_at TEXT)            -- UNIQUE(tool, session_id, fingerprint) WHERE dismissed_at IS NULL
 notes_meta(key TEXT PK, value INTEGER)   -- hook_from, rebuilt_through (events.id marks)
 ```
-(`notes`/`notes_meta` added after the original spec, migration 5.)
+(`notes`/`notes_meta` added after the original spec, migration 5; the link lifecycle columns
+and the session title columns are migration 6. All of them are NULL on legacy rows.)
 Add a `schema_version` pragma (user_version) and simple migrations.
 
 ## State derivation (`reconcile.py`)
 
-Per session, compute `state` in priority order:
+Per session, compute exactly one `state`; the first rule that applies wins. (Rewritten after
+the original spec; every `review` carries a `waiting_reason` that says what to do.)
 
-1. `done` — triage.status = done, OR every linked PR is MERGED/CLOSED, OR any link with state DONE
-   PR state is merged/closed (see Links). A new UserPromptSubmit after the triage timestamp
+1. `done` (manual) — triage.status = done. A new UserPromptSubmit after the triage timestamp
    reopens it (triage reset to open).
 2. `snoozed` — triage.status = snoozed and until > now (falls through when expired).
 3. `needs_you` — last non-subagent event is PermissionRequest, or Notification with type in
    {permission_prompt, elicitation_dialog, agent_needs_input}, or StopFailure, and no later
-   activity event. `waiting_reason` = tool_name / notification message / error.
-   (Added after the original spec.) Also `needs_you` when the session has an open (undismissed)
-   note of kind `needs_you` and no parent UserPromptSubmit is newer than the note's `last_ts`
-   (compared as parsed times); `waiting_reason` = the note's marker line, else its first line.
-   Checked after manual done, snooze, the hook-derived needs_you above and the registry
-   fallback, and before the activity checks; a hook-derived reason wins over the note's.
+   activity event. `waiting_reason` = tool_name / notification message / error. Then the
+   registry fallback, then an open (undismissed) note of kind `needs_you` while no parent
+   UserPromptSubmit is newer than the note's `last_ts` (compared as parsed times);
+   `waiting_reason` = the note's marker line, else its first line.
 4. `running` — last event is an activity event (UserPromptSubmit, Pre/PostToolUse, Subagent*,
    PreCompact/PostCompact) AND process alive (or no pid known and last event < 10 min old).
-5. `interrupted` — would be running but process dead or activity stale > 30 min. Shown with
-   needs_you group styling but distinct label.
-6. `review` — last turn finished (Stop, Interrupt, Notification idle_prompt, SessionEnd after
-   Stop) and not done; `updated_at` within 24 h.
-7. `unconcluded` — as review but older than 24 h, or ended sessions never marked done.
+   `interrupted` — would be running but process dead or activity stale > 30 min (older than
+   24 h: `unconcluded`, reason "interrupted").
+5. `review`, "PR #N awaits your review" — the session owns a PR that awaits the user (see
+   Links: owned, OPEN, no human response yet), live or ended, ahead of every done rule. When
+   the PR's author is the active gh login the reason reads "PR #N open, no response yet".
+6. `unconcluded`, "Reopened" — the user ran `mark open` after the session ended: neither of
+   the next two rules retires it.
+7. `done` ("pr merged") — the session is on a feature branch (not main/master/develop), at
+   least one PR link records that same branch, every such link is MERGED/CLOSED, and no parent
+   prompt is newer than the newest of their `closed_at` (legacy NULL: `checked_at`). A link
+   with no recorded branch never counts. `done` ("link done") — any link reports DONE.
+8. Ended sessions (`ended_at` set). A **clean exit** — Claude `prompt_input_exit`/`logout` (the
+   user typed /exit at the prompt, so the turn was over, whatever the events table holds), or
+   any recorded Codex end reason after a finished turn — is `done` ("clean exit") unless
+   `todos_open` > 0 (`unconcluded`, "N todos left open"). A Codex end mid-turn is
+   `unconcluded`, "Ended mid-turn"; any other end (Claude `clear`/`resume`/`other`) is
+   `unconcluded`, "Ended (<reason>)". SessionEnd is never a review event, and update notes do
+   not hold ended sessions. Only owned PRs (rule 5) keep an exited session visible; PRs that
+   merely share its branch from before never do.
+9. Live sessions: an open `update` note newer than the last parent prompt and under 24 h old →
+   `review` with its headline. Last event Stop, Interrupt or Notification idle_prompt within
+   24 h of `updated_at`, in an attended turn → `review`, "Your turn: <first line of the last
+   assistant message>" ("Your turn" alone when there is none; Interrupt: "Interrupted: your
+   turn"). In an unattended turn (the last prompt starts with a `note_unattended_prefixes`
+   entry) → `running`, "Loop idle between ticks" while the process is alive, else
+   `unconcluded`.
+10. Otherwise `unconcluded`.
 
 Liveness: `kill -0 pid` (os.kill(pid, 0); PermissionError counts as alive). For Claude, also
 treat `~/.claude/sessions/<pid>.json` with matching `sessionId` as confirmation; files there
@@ -135,14 +170,16 @@ host is built in. Everything environment-specific arrives through these generic 
 
 1. **`agentboard link` CLI** — any skill/script/hook reports a link for the session it runs in:
    `agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state OPEN|MERGED|CLOSED|DONE]
-   [--title T] [--session TOOL:ID]`. Also `agentboard status --text "phase/label" [--ttl MIN]`
+   [--title T] [--branch B] [--session TOOL:ID]` (`--branch` is the PR's head branch; default
+   the session's current branch). Also `agentboard status --text "phase/label" [--ttl MIN]`
    to set a free-form current-activity label shown on the row (replaces any skill-specific
    status files). Session resolution when `--session` is omitted, in order: env vars that
    identify the session if the agent sets any (verify empirically which, e.g. CLAUDE_SESSION_ID /
    CODEX_THREAD_ID; skip if none), else walk the caller's ancestor pids and match a recorded
    session pid, else most recently active session whose cwd equals/contains $PWD. Exit 0 with
    a stderr warning if unresolved (callers must never break because AgentBoard is absent or
-   confused). A state of MERGED/CLOSED/DONE on links counts toward auto-done.
+   confused). A state of MERGED/CLOSED/DONE on links counts toward auto-done (see State
+   derivation rule 7 for the branch rule).
 2. **Drop directory** — `$AGENTBOARD_HOME/inbox/*.json`, each `{"session": "tool:id" | null,
    "cwd": "...", "links": [...], "status": "..."}`; ingested and deleted on next snapshot. For
    tools that can't exec the CLI.
@@ -155,8 +192,32 @@ host is built in. Everything environment-specific arrives through these generic 
    any team.
 4. **Built-in generic detectors** (each optional, silently skipped if unavailable):
    - GitHub PR by branch via `gh` if installed+authenticated: `gh pr list --head <branch>
-     --state all --limit 1 --json number,state,url,title` in cwd, only in `refresh-links`,
-     cached (re-check OPEN after 15 min, never re-check MERGED/CLOSED). Skip default branches.
+     --state all --limit 1 --json number,state,url,title,createdAt,mergedAt,closedAt,
+     headRefName,author` in cwd, only in `refresh-links`. The newest PR link recorded for the
+     session's *current* branch decides whether to look (none: look, so a branch change or a
+     legacy row with no branch re-checks; OPEN: after 15 min; MERGED/CLOSED: never). Skip
+     default branches.
+   - Per-link PR refresh (added later): every OPEN PR link with a URL, whatever its source or
+     branch, is re-checked with `gh pr view <url> --json ...` (no cwd; once per URL per run,
+     every row with that URL updated; same 15 min throttle), so PRs a session reported from
+     main, and every PR after its first, stay current. A URL-less OPEN PR link is looked up by
+     number in the session's cwd when that still exists. Manual-done sessions and sessions
+     idle over 7 days are skipped unless one of their PRs awaits the user. MERGED/CLOSED links
+     are never re-fetched.
+   - Ownership and responses: a PR is the session's **own** when the session reported it
+     (`source` cli/inbox/provider) or gh found it with `created_at` inside the session's
+     lifetime; anything else is inherited and never keeps a session on the board. For OPEN
+     PRs `refresh-links` reads `gh api repos/{o}/{r}/pulls/{n}/reviews` and
+     `issues/{n}/comments` (REST, which carries `user.type`) and stores the earliest response
+     by a human as `responded_at`: not a bot (`type` Bot or a `[bot]` login), not the PR's
+     author, not a login in `config.json` `"automation_logins"` (no defaults; an integration
+     that runs extra accounts lists them there). The active `gh api user` login is excluded
+     only as the PR's author: one-account setups (the PR author is the active login) count
+     that login's responses made while the owning session was not mid-turn (with no recorded
+     parent turn events, only those after it ended); when the active
+     login is not the author (the user is the default gh login and sessions author PRs with a
+     separate token) it counts like any other human. A PR **awaits you** while
+     it is owned, OPEN, has a URL and no `responded_at`.
    - Ticket refs via `config.json` `"ticket_patterns": [{"regex": "[A-Z][A-Z0-9]+-\\d+",
      "url": "https://example.atlassian.net/browse/{ref}"}]` — **empty by default**; matched
      against branch and first prompt.
@@ -175,8 +236,24 @@ Idempotent. Never overwrite fields that came from hooks (origin=hook) except fil
 - Claude: `~/.claude/projects/*/*.jsonl` (top-level only; skip `subagents/` dirs). Per file:
   session id = filename stem; cwd, gitBranch from entries; first & last real user prompt
   (skip tool_result / meta / command-caveat entries); last assistant text; first/last
-  timestamps; whether last turn finished. Title: `summary`/`custom-title` entries if present,
-  else first prompt first line.
+  timestamps; whether last turn finished. Title (with `title_source`): the newest
+  `custom-title` in the tail (scanned to the tail's byte cap for one) beats the newest
+  `ai-title`/`summary`, else first prompt first line (`fallback`). A re-parse may replace a
+  hook-origin row's title (the hook never writes one), but a fallback never replaces a real
+  title, a custom title yields only to a newer custom one, and a generated or `cli` title
+  only to a custom one.
+- Titles that follow the work (added later): Claude Code writes `ai-title` once and repeats
+  it, so `refresh-links` retitles sessions with `retitle_min_prompts` (default 5) new parent
+  prompts since their last retitle, or a branch change since then, by running
+  `retitle_command` (default: the local `claude` CLI, `claude -p --model haiku --tools ""
+  --strict-mcp-config --no-session-persistence <instruction>`, with no tools since stdin is
+  untrusted session text, when installed; `null` turns it off) with the
+  current title, project, branch and last few prompts/final messages (capped at 4000 chars)
+  on stdin; its first output line, trimmed to 60 chars, becomes the title
+  (`title_source='generated'`). At most `retitle_max_per_run` (default 5) per run, most
+  recently active first; never a done, ended, user-named or week-idle session; at most one
+  attempt per session per hour; failures are logged and leave the title. `snapshot` never
+  retitles. `agentboard title --text T` names a session (`cli`) and resets the baseline.
 - Codex: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`: session_meta (id, cwd, source,
   timestamp), user messages, last agent message, task_complete/turn_aborted, git branch if in
   session_meta.git.
@@ -195,7 +272,10 @@ agentboard note --kind needs_you|update|error --text T [--session TOOL:ID]
 agentboard notes [--session TOOL:ID] [--all] [--json]          list open (or all) notes
 agentboard notes --dismiss ID... | --dismiss-all [--session TOOL:ID]
 agentboard notes --rebuild [--days N] [--reset] [--json]       replay recorded Stop events
-agentboard refresh-links
+agentboard refresh-links                     links, PR states/responses, retitles (network)
+agentboard link --kind pr|ticket|url --ref R [--url U] [--state S] [--title T] [--branch B] [--session TOOL:ID]
+agentboard status --text T [--ttl MIN] [--session TOOL:ID]
+agentboard title --text T [--session TOOL:ID]   name a session (a user's custom title is kept)
 agentboard install-hooks [--claude] [--codex] [--dry-run]
 agentboard uninstall-hooks [--claude] [--codex]
 agentboard focus <tool> <session_id>         activate iTerm2 tab by ITERM_SESSION_ID (osascript)
@@ -239,7 +319,7 @@ then select the tab/window and activate iTerm. Exit non-zero with message if not
       "state": "needs_you|interrupted|running|review|unconcluded|snoozed|done",
       "waiting_reason": "string|null",
       "status_text": "string|null",
-      "title": "string",
+      "title": "string", "title_source": "custom|generated|cli|ai|summary|fallback|null",
       "cwd": "/abs", "project": "basename of cwd", "branch": "string|null",
       "first_prompt": "string|null", "last_prompt": "string|null",
       "last_assistant": "string|null",
@@ -247,7 +327,8 @@ then select the tab/window and activate iTerm. Exit non-zero with message if not
       "alive": true, "interactive": true,
       "can_focus": true,
       "resume_command": "cd ... && claude --resume ...",
-      "links": [{"kind": "pr|ticket", "ref": "ABC-123|#26", "url": "...", "state": "OPEN|MERGED|CLOSED|null", "title": "..."}],
+      "links": [{"kind": "pr|ticket", "ref": "ABC-123|#26", "url": "...", "state": "OPEN|MERGED|CLOSED|null", "title": "...",
+                 "branch": "string|null", "owned": false, "awaits_you": false}],
       "triage": {"status": "open|done|snoozed", "until": "ISO|null", "note": "string|null"},
       "notes": [{"id": 1, "kind": "needs_you|update|error", "text": "...", "ts": "ISO",
                  "last_ts": "ISO", "count": 1, "source": "stop|cli|inbox|provider|backfill"}],
@@ -262,6 +343,8 @@ then updated_at desc. Default excludes done older than 7 days and non-interactiv
 (Added after the original spec.) `notes` lists a session's open notes, newest `last_ts` first,
 capped at 20 plus any older open `needs_you` notes (never capped out); `notes_count` is the uncapped open count; `counts.notes` sums `notes_count` over
 the sessions this snapshot emits. Older CLIs omit all three; the app defaults them to empty/0.
+Links' `branch`/`owned`/`awaits_you` and `title_source` were added with migration 6; the app
+decodes them as optionals.
 
 Notes (`notes.py`, added after the original spec): the hook classifies each parent Stop message
 inside its transaction (`needs_you` for a line starting with a `config.json` `note_markers`
@@ -287,7 +370,11 @@ migration; inbox drops and provider rows accept an optional `"notes": [{"kind", 
   only matches with counts, Unconcluded opens if it has matches, Snoozed and Done sections are
   added, and a line reports how many sessions are hidden (emphasized if one needs you). The
   menu bar icon ignores the query. Each row: tool badge (C / X), title, project · branch,
-  relative time, waiting_reason, and a badge with the open-notes count.
+  relative time, waiting_reason, and a badge with the open-notes count. (Added later.) The
+  primary line is a live `agentboard status` text when set, with the session title under
+  it; otherwise the title. One button per PR link (glyph + `#N`, tinted open/merged/closed,
+  outlined when it awaits the user) opens the PR without focusing the terminal; more than
+  three show three plus "+N", which opens the detail view.
   (Added after the original spec.) An **Updates** section above Needs you lists every open note
   of the (filtered) sessions newest first: kind glyph, project, first line, `×N`, relative time;
   click focuses the owning session, a chevron expands the full text, (x) dismisses, and the

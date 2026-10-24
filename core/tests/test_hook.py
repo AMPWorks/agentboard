@@ -60,6 +60,124 @@ class HookProcessPayloadTests(AgentBoardTestCase):
             )
         self.assertEqual(self._session_row()["last_event"], "PreToolUse")
 
+    def test_branch_refreshed_on_stop_and_session_end(self):
+        # A branch created mid-turn is seen once the session goes idle.
+        with mock.patch("agentboard.hook.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="main\n")
+            hook.process_payload(
+                self.conn, "claude",
+                {"session_id": "s1", "cwd": "/tmp/proj", "hook_event_name": "UserPromptSubmit",
+                 "prompt": "open a PR"},
+            )
+        self.assertEqual(self._session_row()["branch"], "main")
+        with mock.patch("agentboard.hook.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="feature-new\n")
+            hook.process_payload(
+                self.conn, "claude",
+                {"session_id": "s1", "cwd": "/tmp/proj", "hook_event_name": "PreToolUse",
+                 "tool_name": "Bash"},
+            )
+            self.assertEqual(self._session_row()["branch"], "main", "no git call mid-turn")
+            hook.process_payload(
+                self.conn, "claude",
+                {"session_id": "s1", "cwd": "/tmp/proj", "hook_event_name": "Stop",
+                 "last_assistant_message": "PR opened"},
+            )
+        self.assertEqual(self._session_row()["branch"], "feature-new")
+        with mock.patch("agentboard.hook.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="feature-last\n")
+            hook.process_payload(
+                self.conn, "claude",
+                {"session_id": "s1", "cwd": "/tmp/proj", "hook_event_name": "SessionEnd",
+                 "reason": "prompt_input_exit"},
+            )
+        self.assertEqual(self._session_row()["branch"], "feature-last")
+
+    def test_branch_read_from_head_file_without_running_git(self):
+        repo = self.tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/feature/from-head\n")
+        (repo / "sub").mkdir()
+        with mock.patch("agentboard.hook.subprocess.run", side_effect=_no_shellouts) as run:
+            self.assertEqual(hook._git_branch(str(repo / "sub")), "feature/from-head")
+            (repo / ".git" / "HEAD").write_text("0123456789abcdef0123456789abcdef01234567\n")
+            self.assertIsNone(hook._git_branch(str(repo)), "detached HEAD is no branch")
+        run.assert_not_called()
+
+    def test_branch_read_through_a_worktree_gitdir_file(self):
+        common = self.tmp_path / "main-repo" / ".git" / "worktrees" / "wt"
+        common.mkdir(parents=True)
+        (common / "HEAD").write_text("ref: refs/heads/wt-branch\n")
+        worktree = self.tmp_path / "wt"
+        worktree.mkdir()
+        (worktree / ".git").write_text(f"gitdir: {common}\n")
+        with mock.patch("agentboard.hook.subprocess.run", side_effect=_no_shellouts):
+            self.assertEqual(hook._git_branch(str(worktree)), "wt-branch")
+
+    def test_branch_read_through_a_relative_gitdir_file(self):
+        # What git writes for a submodule: a path relative to the directory
+        # holding the `.git` file.
+        modules = self.tmp_path / "super" / ".git" / "modules" / "sub"
+        modules.mkdir(parents=True)
+        (modules / "HEAD").write_text("ref: refs/heads/sub-branch\n")
+        sub = self.tmp_path / "super" / "sub"
+        (sub / "src").mkdir(parents=True)
+        (sub / ".git").write_text("gitdir: ../.git/modules/sub\n")
+        with mock.patch("agentboard.hook.subprocess.run", side_effect=_no_shellouts):
+            self.assertEqual(hook._head_file_branch(str(sub / "src")), (True, "sub-branch"))
+            self.assertEqual(hook._git_branch(str(sub / "src")), "sub-branch")
+
+    def test_dot_git_file_without_gitdir_falls_back_to_git(self):
+        repo = self.tmp_path / "odd"
+        repo.mkdir()
+        (repo / ".git").write_text("not a gitdir pointer\n")
+        self.assertEqual(hook._head_file_branch(str(repo)), (False, None))
+        with mock.patch("agentboard.hook.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="from-git\n")
+            self.assertEqual(hook._git_branch(str(repo)), "from-git")
+        self.assertEqual(run.call_args.args[0][:2], ["git", "-C"])
+
+    def test_unknown_head_form_falls_back_to_git(self):
+        repo = self.tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/.invalid\n")
+        with mock.patch("agentboard.hook.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="reftable-branch\n")
+            self.assertEqual(hook._git_branch(str(repo)), "reftable-branch")
+        self.assertEqual(run.call_args.args[0][:2], ["git", "-C"])
+
+    def test_subagent_stop_does_not_reread_the_branch(self):
+        with mock.patch("agentboard.hook.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="feature-x\n")
+            hook.process_payload(
+                self.conn, "claude",
+                {"session_id": "s1", "cwd": "/tmp/proj", "hook_event_name": "SessionStart"},
+            )
+        with mock.patch("agentboard.hook.subprocess.run") as run:
+            hook.process_payload(
+                self.conn, "claude",
+                {"session_id": "s1", "cwd": "/tmp/proj", "hook_event_name": "Stop",
+                 "agent_id": "sub-1"},
+            )
+        git_calls = [c for c in run.call_args_list if c.args and c.args[0][0] == "git"]
+        self.assertEqual(git_calls, [])
+
+    def test_a_failed_git_read_keeps_the_known_branch(self):
+        with mock.patch("agentboard.hook.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="feature-x\n")
+            hook.process_payload(
+                self.conn, "claude",
+                {"session_id": "s1", "cwd": "/tmp/proj", "hook_event_name": "SessionStart"},
+            )
+        with mock.patch("agentboard.hook.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=128, stdout="")
+            hook.process_payload(
+                self.conn, "claude",
+                {"session_id": "s1", "cwd": "/gone", "hook_event_name": "SessionEnd",
+                 "reason": "prompt_input_exit"},
+            )
+        self.assertEqual(self._session_row()["branch"], "feature-x")
+
     def test_prompt_and_message_truncated(self):
         long_prompt = "x" * 5000
         with mock.patch("agentboard.hook.subprocess.run") as run:

@@ -30,7 +30,7 @@ final class NotificationManager {
     private func post(for session: Session) {
         let content = UNMutableNotificationContent()
         content.title = "AgentBoard: needs you"
-        content.body = session.waitingReason ?? session.title
+        content.body = session.waitingReason ?? session.displayTitle
         content.sound = .default
 
         let request = UNNotificationRequest(identifier: session.key, content: content, trigger: nil)
