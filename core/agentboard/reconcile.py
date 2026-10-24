@@ -532,8 +532,11 @@ def compute_state(
             if alive is True:
                 return "running", LOOP_IDLE_REASON, False, None
             return "unconcluded", None, False, None
-        updated_at = _aware(session.get("updated_at"))
-        review_age = (now - updated_at) if updated_at else None
+        # The window counts from the finished turn: last_event_at stays at
+        # the Stop through kept events (background SubagentStops,
+        # compactions), while updated_at advances on every one of them.
+        turn_at = _aware(session.get("last_event_at")) or _aware(session.get("updated_at"))
+        review_age = (now - turn_at) if turn_at else None
         if review_age is not None and review_age <= window:
             return "review", your_turn_reason(last_event, session.get("last_assistant")), False, None
 

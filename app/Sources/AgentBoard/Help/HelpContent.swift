@@ -72,7 +72,7 @@ enum HelpContent {
             .bullets([
                 "**PR #N awaits your review**: the session opened a PR that nobody but automation has reviewed or commented on yet. This holds even after the session exits, until you respond or the PR merges. When you and the session share one GitHub account it reads **PR #N open, no response yet**.",
                 "**The headline of an open update**: an `update` note newer than your last prompt and under a day old (a loop session reporting a milestone).",
-                "**Your turn: <first line of its last message>**: an attended session stopped and is waiting for your next prompt, within 24 hours. An interrupted turn reads **Interrupted: your turn**.",
+                "**Your turn: <first line of its last message>**: an attended session stopped and is waiting for your next prompt, within 24 hours of the end of that turn. An interrupted turn reads **Interrupted: your turn**.",
             ]),
             .paragraph("A background agent finishing after a turn, and a compaction (or resuming a live session), never change a session's state. For a live Claude session AgentBoard also reads Claude Code's own `~/.claude/sessions/<pid>.json` status when it is newer than the last hook event: **idle** turns a stale activity event into a finished turn, **busy** makes a finished one Running. Other statuses carry no signal."),
             .heading("Sessions that finish on their own"),

@@ -172,7 +172,8 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
    listed background tasks still in flight, with the process alive → `running`, "Waiting on N
    background task(s): <types>", ahead of the notes below. An open `update` note newer than the
    last parent prompt and under 24 h old → `review` with its headline. Last event Stop, Interrupt or Notification idle_prompt within
-   24 h of `updated_at`, in an attended turn → `review`, "Your turn: <first line of the last
+   24 h of `last_event_at` (which stays at the finished turn through background subagent
+   events and compactions; `updated_at` when unset), in an attended turn → `review`, "Your turn: <first line of the last
    assistant message>" ("Your turn" alone when there is none; Interrupt: "Interrupted: your
    turn"). In an unattended turn (the last prompt starts with a `note_unattended_prefixes`
    entry, or is one of the session's `session_crons` prompts) → `running`, "Loop idle between

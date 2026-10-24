@@ -145,7 +145,8 @@ class ComputeStateTests(AgentBoardTestCase):
         self.assertEqual(reason, "Your turn: Done. Tests pass.")
 
     def test_unconcluded_old_stop(self):
-        session = base_session(last_event="Stop", updated_at=iso(NOW - timedelta(hours=48)))
+        old = iso(NOW - timedelta(hours=48))
+        session = base_session(last_event="Stop", last_event_at=old, updated_at=old)
         state, _, _auto_done, _done_reason = reconcile.compute_state(session, None, [], now=NOW, alive=False)
         self.assertEqual(state, "unconcluded")
 
@@ -628,7 +629,8 @@ class ReviewReasonTests(AgentBoardTestCase):
         self.assertEqual(unattended[0], "unconcluded")
 
     def test_update_note_older_than_a_day_on_a_dead_session_is_unconcluded(self):
-        session = base_session(last_event="Stop", updated_at=iso(NOW - timedelta(hours=30)))
+        old = iso(NOW - timedelta(hours=30))
+        session = base_session(last_event="Stop", last_event_at=old, updated_at=old)
         note = self.update_note(minutes_ago=30 * 60)
         self.assertEqual(self.state(session=session, update_note=note, alive=False)[:2],
                          ("unconcluded", None))
@@ -666,8 +668,24 @@ class ReviewReasonTests(AgentBoardTestCase):
         self.assertEqual(self.state(unattended=True, alive=None)[:2], ("unconcluded", None))
 
     def test_your_turn_ages_out_after_the_review_window(self):
-        session = base_session(last_event="Stop", updated_at=iso(NOW - timedelta(hours=25)))
+        old = iso(NOW - timedelta(hours=25))
+        session = base_session(last_event="Stop", last_event_at=old, updated_at=old)
         self.assertEqual(self.state(session=session, alive=False)[:2], ("unconcluded", None))
+
+    def test_your_turn_window_counts_from_the_finished_turn(self):
+        # Kept events (background SubagentStops, compactions) advance
+        # updated_at but leave last_event_at at the Stop: a turn that ended
+        # 25 h ago is not "Your turn" however recent the last kept event.
+        session = base_session(last_event="Stop", last_event_at=iso(NOW - timedelta(hours=25)),
+                               updated_at=iso(NOW - timedelta(minutes=5)))
+        self.assertEqual(self.state(session=session, alive=False)[:2], ("unconcluded", None))
+        recent = base_session(last_event="Stop", last_event_at=iso(NOW - timedelta(hours=2)),
+                              updated_at=iso(NOW - timedelta(minutes=5)))
+        self.assertEqual(self.state(session=recent, alive=False)[0], "review")
+        # A row with no last_event_at falls back to updated_at.
+        legacy = base_session(last_event="Stop", last_event_at=None,
+                              updated_at=iso(NOW - timedelta(hours=2)))
+        self.assertEqual(self.state(session=legacy, alive=False)[0], "review")
 
     def test_every_review_has_a_reason(self):
         cases = [

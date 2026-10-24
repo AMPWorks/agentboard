@@ -248,7 +248,7 @@ A turn that failed on an API error (Claude Code's `StopFailure`) is `needs_you` 
   one GitHub account). This holds even after the session exits, until you respond or it merges.
 - the headline of an open `update` note newer than your last prompt, under a day old;
 - "Your turn: <first line of its last message>" — an attended session stopped (or "Interrupted:
-  your turn"), within 24 h.
+  your turn"), within 24 h of the end of that turn.
 
 A loop session (its last prompt starts with a `note_unattended_prefixes` entry, or is one of the
 crons its last Stop listed in `session_crons`) idling between ticks is not waiting on you: it is
