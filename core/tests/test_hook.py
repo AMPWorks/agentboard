@@ -879,6 +879,23 @@ class HookProcessPayloadTests(AgentBoardTestCase):
         self.assertEqual(row["last_event"], "Stop")
         self.assertEqual(row["last_event_at"], stop_ts)
 
+    def test_continued_session_start_on_a_backfill_row_writes_session_start(self):
+        # A pre-hooks session backfill recorded (no last_event yet) and then
+        # resumed or compacted: there is no state to keep, so SessionStart
+        # is recorded and the registry tie-breaker can resolve it.
+        for source in ("compact", "resume"):
+            with self.subTest(source=source):
+                self.conn.execute("DELETE FROM sessions")
+                self.conn.execute(
+                    "INSERT INTO sessions(tool, session_id, origin, first_prompt, started_at, "
+                    "updated_at) VALUES ('claude', 's1', 'backfill', 'old work', "
+                    "'2026-10-20T00:00:00.000000Z', '2026-10-20T00:00:00.000000Z')"
+                )
+                late = self._at("SessionStart", source=source)
+                row = self._session_row()
+                self.assertEqual(row["last_event"], "SessionStart")
+                self.assertEqual(row["last_event_at"], late)
+
     def test_resume_after_session_end_writes_session_start(self):
         self._at("UserPromptSubmit", prompt="go")
         self._at("Stop", last_assistant_message="done")

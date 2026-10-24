@@ -857,11 +857,13 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         # Compaction (and resuming a live session) continues the same
         # conversation; resuming after a SessionEnd records SessionStart,
         # since keeping SessionEnd once `resumed` clears ended_at would
-        # read as nothing at all.
+        # read as nothing at all. A row with no hook state yet (backfill
+        # origin) records SessionStart too, so the registry can resolve it.
         source = payload.get("source") if event == "SessionStart" else None
         continued_start = (
             row is not None and not is_subagent_tagged
             and source in SESSION_START_KEEP_SOURCES
+            and row_last_event is not None
             and (source == "compact" or row_last_event != "SessionEnd")
         )
         keep_state = (
