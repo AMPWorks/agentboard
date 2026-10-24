@@ -86,7 +86,8 @@ Truncate stored text (prompt / message / last_assistant) to 4000 chars.
 
 ```
 events(id INTEGER PK, ts TEXT, tool TEXT, session_id TEXT, event TEXT, agent_id TEXT,
-       notification_type TEXT, tool_name TEXT, text TEXT, extra TEXT /*json*/)
+       notification_type TEXT, tool_name TEXT, text TEXT, extra TEXT /*json*/,
+       prompt_kind TEXT /*human|loop|cron|injected, parent prompts; NULL reads as human*/)
 sessions(tool TEXT, session_id TEXT, cwd TEXT, branch TEXT, title TEXT,
          first_prompt TEXT, last_prompt TEXT, last_assistant TEXT,
          started_at TEXT, updated_at TEXT, last_event TEXT, last_event_at TEXT,
@@ -94,6 +95,9 @@ sessions(tool TEXT, session_id TEXT, cwd TEXT, branch TEXT, title TEXT,
          transcript_path TEXT, origin TEXT /*hook|backfill*/, interactive INTEGER,
          ended_at TEXT, ..., title_source TEXT /*custom|generated|cli|ai|summary|fallback*/,
          retitled_at TEXT, retitle_prompt_count INTEGER, retitle_branch TEXT,
+         background_tasks INTEGER, background_types TEXT /*json list*/,
+         session_crons INTEGER, cron_prompts TEXT /*json list*/ /*from the last parent Stop*/,
+         todos_scan_offset INTEGER, todos_scan_state TEXT /*json; incremental todo scan*/,
          PRIMARY KEY(tool, session_id))
 triage(tool, session_id, status TEXT /*done|snoozed|open*/, until TEXT, note TEXT,
        updated_at TEXT, PRIMARY KEY(tool, session_id))
@@ -114,7 +118,9 @@ notes(id INTEGER PK, tool TEXT, session_id TEXT, ts TEXT /*first seen*/, last_ts
 notes_meta(key TEXT PK, value INTEGER)   -- hook_from, rebuilt_through (events.id marks)
 ```
 (`notes`/`notes_meta` added after the original spec, migration 5; the link lifecycle columns
-and the session title columns are migration 6. All of them are NULL on legacy rows.)
+and the session title columns are migration 6; `prompt_kind` and the background, cron and todo
+scan columns are migration 7, which also marks recorded injected prompts by the default
+prefixes. All of them are NULL on legacy rows.)
 Add a `schema_version` pragma (user_version) and simple migrations.
 
 ## State derivation (`reconcile.py`)

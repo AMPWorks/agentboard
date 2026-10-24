@@ -653,6 +653,14 @@ still `NULL` — except the title, which hooks never write: a newer Claude Code 
 older one, a `/rename` (custom title) beats any generated one, and a first-prompt fallback never
 replaces a real title.
 
+The open-todo count (`todos_open`) needs the whole transcript (task updates are deltas), so it is
+scanned incrementally: each session stores the byte offset the scan reached and the task state at
+that point, and the next run (the hook starts a single-session `backfill --session` after every
+`Stop`) reads only what was appended since. A trailing line Claude Code is still writing is left
+for the next run, and a transcript that shrank or was rewritten restarts the scan from the
+beginning. Transcripts are parsed with no database transaction open; each session is then written
+in its own short transaction, so hooks never wait on a long backfill.
+
 ## Configuration (config.json)
 
 Everything the CLI can be told lives in one optional JSON object, `config.json` in the data

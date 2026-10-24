@@ -170,11 +170,94 @@ def _claude_assistant_text(message_content):
 TASK_OPEN_STATUSES = {"pending", "in_progress"}
 
 
-def _compute_claude_todos_open(path: Path):
-    """Reconstruct the final todo/task list state from a full transcript
-    scan and return the count still open, or None if no list was ever
-    created (NULL means "unknown/no list", which counts as no unfinished
-    todos for auto-done purposes).
+# Lines worth a json.loads in the todo scan: an assistant tool_use of one
+# of the todo/task tools. Every other line (most of a long transcript) is
+# skipped on a substring test.
+TODO_SCAN_TOOL_MARKERS = (b"TodoWrite", b"TaskCreate", b"TaskUpdate", b"TaskStop")
+
+
+def empty_todo_scan_state() -> dict:
+    return {"offset": 0, "task_status": {}, "todowrite_open": None, "last_mechanism": None}
+
+
+def _valid_todo_scan_state(state):
+    """A clean copy of a stored scan state, or a fresh one when it is
+    missing or malformed (the scan then restarts from the beginning)."""
+    if not isinstance(state, dict):
+        return empty_todo_scan_state()
+    offset = state.get("offset")
+    task_status = state.get("task_status")
+    todowrite_open = state.get("todowrite_open")
+    last_mechanism = state.get("last_mechanism")
+    if (
+        isinstance(offset, bool) or not isinstance(offset, int) or offset < 0
+        or not isinstance(task_status, dict)
+        or not (todowrite_open is None or isinstance(todowrite_open, int))
+        or last_mechanism not in (None, "todowrite", "task")
+    ):
+        return empty_todo_scan_state()
+    return {
+        "offset": offset,
+        "task_status": {str(k): v for k, v in task_status.items()},
+        "todowrite_open": todowrite_open,
+        "last_mechanism": last_mechanism,
+    }
+
+
+def _apply_todo_tool_use(state, name, tool_input) -> None:
+    if name == "TodoWrite":
+        todos = tool_input.get("todos")
+        if isinstance(todos, list):
+            state["todowrite_open"] = sum(
+                1 for t in todos
+                if isinstance(t, dict) and t.get("status") != "completed"
+            )
+            state["last_mechanism"] = "todowrite"
+    elif name == "TaskCreate":
+        tasks = tool_input.get("tasks")
+        if isinstance(tasks, str):
+            try:
+                tasks = json.loads(tasks)
+            except ValueError:
+                tasks = None
+        if isinstance(tasks, list):
+            state["task_status"] = {str(i + 1): "pending" for i in range(len(tasks))}
+            state["last_mechanism"] = "task"
+    elif name == "TaskUpdate":
+        task_id = tool_input.get("taskId") or tool_input.get("task_id")
+        status = tool_input.get("status")
+        if task_id is not None and status:
+            state["task_status"][str(task_id)] = status
+            state["last_mechanism"] = "task"
+    elif name == "TaskStop":
+        task_id = tool_input.get("task_id") or tool_input.get("taskId")
+        if task_id is not None:
+            state["task_status"][str(task_id)] = "stopped"
+            state["last_mechanism"] = "task"
+
+
+def _todos_open_from_state(state):
+    if state["last_mechanism"] == "todowrite":
+        return state["todowrite_open"]
+    if state["last_mechanism"] == "task":
+        return sum(1 for status in state["task_status"].values() if status in TASK_OPEN_STATUSES)
+    return None
+
+
+def _scan_claude_todos(path: Path, state=None):
+    """Reconstruct the todo/task list state from a transcript and return
+    (todos_open, new_state). todos_open is the count still open, or None
+    if no list was ever created (NULL means "unknown/no list", which counts
+    as no unfinished todos for auto-done purposes).
+
+    Incremental: `state` is what the previous scan returned ({"offset",
+    "task_status", "todowrite_open", "last_mechanism"}). The scan resumes at
+    its byte offset when that still lies within the file just after a
+    newline; otherwise (the file shrank or was rewritten) it restarts from
+    the beginning with an empty state. It reads to the end, consuming only
+    complete lines: a trailing partial line (Claude Code mid-write) is left
+    for the next run, so the returned offset is the end of the last
+    complete line. The file is read in binary, so offsets are bytes.
 
     TodoWrite is self-contained (every call carries the whole list).
     TaskCreate/TaskUpdate/TaskStop are deltas against task ids that are
@@ -183,70 +266,58 @@ def _compute_claude_todos_open(path: Path):
     Whichever mechanism was touched most recently wins (sessions use one
     or the other, not both, but let's not assume).
     """
-    task_status = {}
-    todowrite_open = None
-    last_mechanism = None
-
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        for raw in fh:
-            raw = raw.strip()
-            if not raw:
+    state = _valid_todo_scan_state(state)
+    with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        offset = state["offset"]
+        resume = False
+        if 0 < offset <= size:
+            fh.seek(offset - 1)
+            resume = fh.read(1) == b"\n"
+        if not resume:
+            state = empty_todo_scan_state()
+            offset = 0
+        fh.seek(offset)
+        for line in fh:
+            if not line.endswith(b"\n"):
+                break
+            offset += len(line)
+            if b'"tool_use"' not in line or not any(
+                marker in line for marker in TODO_SCAN_TOOL_MARKERS
+            ):
                 continue
             try:
-                entry = json.loads(raw)
+                entry = json.loads(line.decode("utf-8", "replace"))
             except ValueError:
                 continue
-            if entry.get("type") != "assistant":
+            if not isinstance(entry, dict) or entry.get("type") != "assistant":
                 continue
-            content = entry.get("message", {}).get("content")
+            message = entry.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
             if not isinstance(content, list):
                 continue
             for block in content:
                 if not isinstance(block, dict) or block.get("type") != "tool_use":
                     continue
-                name = block.get("name")
                 tool_input = block.get("input")
-                if not isinstance(tool_input, dict):
-                    continue
-                if name == "TodoWrite":
-                    todos = tool_input.get("todos")
-                    if isinstance(todos, list):
-                        todowrite_open = sum(
-                            1 for t in todos
-                            if isinstance(t, dict) and t.get("status") != "completed"
-                        )
-                        last_mechanism = "todowrite"
-                elif name == "TaskCreate":
-                    tasks = tool_input.get("tasks")
-                    if isinstance(tasks, str):
-                        try:
-                            tasks = json.loads(tasks)
-                        except ValueError:
-                            tasks = None
-                    if isinstance(tasks, list):
-                        task_status = {str(i + 1): "pending" for i in range(len(tasks))}
-                        last_mechanism = "task"
-                elif name == "TaskUpdate":
-                    task_id = tool_input.get("taskId") or tool_input.get("task_id")
-                    status = tool_input.get("status")
-                    if task_id is not None and status:
-                        task_status[str(task_id)] = status
-                        last_mechanism = "task"
-                elif name == "TaskStop":
-                    task_id = tool_input.get("task_id") or tool_input.get("taskId")
-                    if task_id is not None:
-                        task_status[str(task_id)] = "stopped"
-                        last_mechanism = "task"
-
-    if last_mechanism == "todowrite":
-        return todowrite_open
-    if last_mechanism == "task":
-        return sum(1 for status in task_status.values() if status in TASK_OPEN_STATUSES)
-    return None
+                if isinstance(tool_input, dict):
+                    _apply_todo_tool_use(state, block.get("name"), tool_input)
+    state["offset"] = offset
+    return _todos_open_from_state(state), state
 
 
-def parse_claude_transcript(path: Path) -> dict:
-    """Extract session fields from one ~/.claude/projects/*/*.jsonl file."""
+def _compute_claude_todos_open(path: Path):
+    """The open todo count from a full scan (see _scan_claude_todos)."""
+    return _scan_claude_todos(path)[0]
+
+
+def parse_claude_transcript(path: Path, todos_state=None) -> dict:
+    """Extract session fields from one ~/.claude/projects/*/*.jsonl file.
+
+    `todos_state` is the session's stored todo scan state (see
+    _scan_claude_todos), so the todo count resumes where the last parse
+    stopped; the result carries the new one as todos_scan_offset and
+    todos_scan_state."""
     result = {
         "cwd": None,
         "branch": None,
@@ -385,7 +456,10 @@ def parse_claude_transcript(path: Path) -> dict:
     result["first_prompt"] = _truncate(result["first_prompt"])
     result["last_prompt"] = _truncate(result["last_prompt"])
     result["last_assistant"] = _truncate(result["last_assistant"])
-    result["todos_open"] = _compute_claude_todos_open(path)
+    todos_open, scan_state = _scan_claude_todos(path, todos_state)
+    result["todos_open"] = todos_open
+    result["todos_scan_offset"] = scan_state.pop("offset")
+    result["todos_scan_state"] = json.dumps(scan_state, sort_keys=True)
     return result
 
 
@@ -615,9 +689,46 @@ BACKFILL_COLUMNS = [
 # todos_open is always backfill-authoritative, even on a hook-origin row:
 # reconstructing it correctly (TaskUpdate/TaskStop are deltas against
 # whatever TaskCreate/TodoWrite came before) needs the whole transcript,
-# which only backfill's full scan has -- the hook only ever sees one
-# PostToolUse payload at a time.
+# which only backfill's scan has (incrementally, from a stored byte offset)
+# -- the hook only ever sees one PostToolUse payload at a time.
 ALWAYS_OVERWRITE_COLUMNS = {"todos_open"}
+
+# Where the incremental Claude todo scan stopped (see _scan_claude_todos).
+TODO_SCAN_COLUMNS = ["todos_scan_offset", "todos_scan_state"]
+
+
+def stored_todo_scan(conn, tool, session_id):
+    """(stored offset, scan state to resume from) for a session, read with a
+    plain SELECT before parsing (outside any transaction). The offset is
+    what upsert_backfill_session compares against before writing a new
+    one; the state is None when there is nothing to resume."""
+    row = conn.execute(
+        "SELECT todos_scan_offset, todos_scan_state FROM sessions WHERE tool=? AND session_id=?",
+        (tool, session_id),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None, None
+    try:
+        state = json.loads(row[1]) if row[1] else None
+    except ValueError:
+        state = None
+    if not isinstance(state, dict):
+        return row[0], None
+    return row[0], dict(state, offset=row[0])
+
+
+def _todo_columns(row, fields):
+    """(write_todos, scan_columns) for an upsert: whether todos_open may be
+    written, and the todo scan columns to write with it. A parse that
+    resumed from a stored offset (fields["todos_scan_base"]) writes only if
+    the row still holds that offset: a concurrent run that advanced it
+    wins, and this one leaves the todo columns alone."""
+    if "todos_scan_offset" not in fields:
+        return True, []
+    if row is not None and "todos_scan_base" in fields:
+        if row["todos_scan_offset"] != fields["todos_scan_base"]:
+            return False, []
+    return True, list(TODO_SCAN_COLUMNS)
 
 
 def _is_known_bad_value(col, value):
@@ -698,12 +809,14 @@ def upsert_backfill_session(conn, tool, session_id, fields: dict):
 
     values = {col: fields.get(col) for col in BACKFILL_COLUMNS}
     title_source = fields.get("title_source") or ("ai" if values["title"] else None)
+    write_todos, scan_columns = _todo_columns(row, fields)
 
     if row is None:
-        columns = ["tool", "session_id", "origin"] + BACKFILL_COLUMNS + ["title_source"]
+        columns = (["tool", "session_id", "origin"] + BACKFILL_COLUMNS + ["title_source"]
+                   + scan_columns)
         placeholders = ",".join("?" for _ in columns)
         params = ([tool, session_id, "backfill"] + [values[c] for c in BACKFILL_COLUMNS]
-                  + [title_source])
+                  + [title_source] + [fields.get(c) for c in scan_columns])
         conn.execute(
             f"INSERT INTO sessions({','.join(columns)}) VALUES ({placeholders})",
             params,
@@ -719,7 +832,7 @@ def upsert_backfill_session(conn, tool, session_id, fields: dict):
             sets += ["title=?", "title_source=?"]
             params += list(title)
         for col in BACKFILL_COLUMNS:
-            if col == "title":
+            if col == "title" or (col == "todos_open" and not write_todos):
                 continue
             current = row[col]
             new_value = values[col]
@@ -736,6 +849,10 @@ def upsert_backfill_session(conn, tool, session_id, fields: dict):
             elif _restores_interactive(col, current, new_value, values):
                 sets.append(f"{col}=?")
                 params.append(new_value)
+        for col in scan_columns:
+            if row[col] != fields.get(col):
+                sets.append(f"{col}=?")
+                params.append(fields.get(col))
         if not sets:
             return "unchanged"
         params += [tool, session_id]
@@ -745,9 +862,10 @@ def upsert_backfill_session(conn, tool, session_id, fields: dict):
         )
         return "filled"
 
-    columns = [col for col in BACKFILL_COLUMNS if col != "title"]
-    sets = [f"{col}=?" for col in columns]
-    params = [values[col] for col in columns]
+    columns = [col for col in BACKFILL_COLUMNS
+               if col != "title" and (col != "todos_open" or write_todos)]
+    sets = [f"{col}=?" for col in columns + scan_columns]
+    params = [values[col] for col in columns] + [fields.get(col) for col in scan_columns]
     if title is not None:
         sets += ["title=?", "title_source=?"]
         params += list(title)
@@ -817,7 +935,9 @@ def backfill_single_session(conn, tool, session_id, transcript_path=None):
     load_injected_prefixes()
     try:
         if tool == "claude":
-            fields = parse_claude_transcript(path)
+            base_offset, todos_state = stored_todo_scan(conn, tool, session_id)
+            fields = parse_claude_transcript(path, todos_state=todos_state)
+            fields["todos_scan_base"] = base_offset
         elif tool == "codex":
             fields = parse_codex_rollout(path)
         else:
@@ -836,7 +956,30 @@ def backfill_single_session(conn, tool, session_id, transcript_path=None):
     return "updated"
 
 
+def _upsert_in_own_transaction(conn, tool, session_id, fields, stats, path) -> bool:
+    """One short write per session: a failure rolls back only this
+    session's upsert and counts in stats["errors"]."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            upsert_backfill_session(conn, tool, session_id, fields)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    except Exception as exc:
+        stats["errors"] += 1
+        diag.warn("backfill", "upsert_error", tool=tool, file=path,
+                  exc=type(exc).__name__, msg=str(exc))
+        return False
+    return True
+
+
 def run_backfill(conn, days=30):
+    """Import every transcript modified within `days`. Transcripts are
+    parsed with no transaction open; each session is then written in its
+    own short BEGIN IMMEDIATE, so a hook firing meanwhile waits for at
+    most one upsert, never for the whole run."""
     stats = {"claude": 0, "codex": 0, "errors": 0, "daemon_pid_corrected": 0}
     started = time.monotonic()
     load_injected_prefixes()
@@ -844,38 +987,40 @@ def run_backfill(conn, days=30):
     conn.execute("BEGIN IMMEDIATE")
     try:
         stats["daemon_pid_corrected"] = correct_daemon_pid_rows(conn)
-
-        for session_id, path in iter_claude_transcripts(days):
-            try:
-                fields = parse_claude_transcript(path)
-            except Exception as exc:
-                stats["errors"] += 1
-                diag.warn("backfill", "parse_error", tool="claude", file=path,
-                          exc=type(exc).__name__, msg=str(exc))
-                continue
-            upsert_backfill_session(conn, "claude", session_id, fields)
-            stats["claude"] += 1
-
-        for path in iter_codex_rollouts(days):
-            try:
-                fields = parse_codex_rollout(path)
-            except Exception as exc:
-                stats["errors"] += 1
-                diag.warn("backfill", "parse_error", tool="codex", file=path,
-                          exc=type(exc).__name__, msg=str(exc))
-                continue
-            session_id = fields.get("session_id")
-            if not session_id:
-                stats["errors"] += 1
-                diag.warn("backfill", "parse_error", tool="codex", file=path,
-                          msg="no session id in rollout")
-                continue
-            upsert_backfill_session(conn, "codex", session_id, fields)
-            stats["codex"] += 1
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
+
+    for session_id, path in iter_claude_transcripts(days):
+        base_offset, todos_state = stored_todo_scan(conn, "claude", session_id)
+        try:
+            fields = parse_claude_transcript(path, todos_state=todos_state)
+        except Exception as exc:
+            stats["errors"] += 1
+            diag.warn("backfill", "parse_error", tool="claude", file=path,
+                      exc=type(exc).__name__, msg=str(exc))
+            continue
+        fields["todos_scan_base"] = base_offset
+        if _upsert_in_own_transaction(conn, "claude", session_id, fields, stats, path):
+            stats["claude"] += 1
+
+    for path in iter_codex_rollouts(days):
+        try:
+            fields = parse_codex_rollout(path)
+        except Exception as exc:
+            stats["errors"] += 1
+            diag.warn("backfill", "parse_error", tool="codex", file=path,
+                      exc=type(exc).__name__, msg=str(exc))
+            continue
+        session_id = fields.get("session_id")
+        if not session_id:
+            stats["errors"] += 1
+            diag.warn("backfill", "parse_error", tool="codex", file=path,
+                      msg="no session id in rollout")
+            continue
+        if _upsert_in_own_transaction(conn, "codex", session_id, fields, stats, path):
+            stats["codex"] += 1
 
     diag.info("backfill", "done", days=days, ms=diag.ms_since(started), **stats)
     return stats
