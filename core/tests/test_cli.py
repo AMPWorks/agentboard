@@ -20,6 +20,20 @@ from tests.helpers import AgentBoardTestCase
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
+# `codex --version` is never run for real here: the Codex hooks-flag
+# messages would otherwise depend on whichever Codex the machine has.
+# Unknown by default; CodexFeatureFlagTests sets a version per test.
+_REAL_CODEX_VERSION = cli._codex_version
+_CODEX_VERSION_PATCH = mock.patch.object(cli, "_codex_version", return_value=None)
+
+
+def setUpModule():
+    _CODEX_VERSION_PATCH.start()
+
+
+def tearDownModule():
+    _CODEX_VERSION_PATCH.stop()
+
 
 def insert_session(conn, tool="claude", session_id="s1", **overrides):
     row = {
@@ -253,6 +267,52 @@ class SnapshotTests(AgentBoardTestCase):
         by_key = {s["key"]: s for s in snapshot["sessions"]}
         self.assertEqual(by_key["claude:s1"]["status_text"], "working")
         self.assertIsNone(by_key["claude:s2"]["status_text"])
+
+    def test_snapshot_skips_turn_scan_for_claude(self):
+        ended = "2026-06-15T09:55:00.000000Z"
+        insert_session(
+            self.conn, session_id="c1", last_event="SessionEnd", end_reason="prompt_input_exit",
+            ended_at=ended, updated_at=ended,
+        )
+        insert_session(
+            self.conn, tool="codex", session_id="x1", last_event="SessionEnd",
+            end_reason="exit", ended_at=ended, updated_at=ended,
+        )
+        # An ended Codex row with no end_reason can never be a clean exit.
+        insert_session(
+            self.conn, tool="codex", session_id="x2", last_event="SessionEnd",
+            end_reason=None, ended_at=ended, updated_at=ended,
+        )
+        with mock.patch.object(cli.reconcile, "last_turn_finished",
+                               return_value=True) as scan:
+            cli.build_snapshot(self.conn, include_all=True)
+        self.assertEqual(scan.call_args_list, [mock.call(self.conn, "codex", "x1")])
+
+    def test_codex_clean_exit_state_survives_compaction(self):
+        old = datetime.now(timezone.utc) - timedelta(days=30)
+
+        def ts(minutes):
+            return (old + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+        insert_session(
+            self.conn, tool="codex", session_id="x1", last_event="SessionEnd",
+            end_reason="exit", ended_at=ts(9), updated_at=ts(9), started_at=ts(0), todos_open=0,
+        )
+        for minutes, event in enumerate(
+            ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStart",
+             "SubagentStop", "PreCompact", "PostCompact", "Stop", "SessionEnd"]
+        ):
+            _insert_event(self.conn, event, tool="codex", session_id="x1", ts=ts(minutes))
+        before = cli.build_snapshot(self.conn, include_all=True)["sessions"][0]
+        self.assertEqual(before["state"], "done")
+        rc, out, _ = _run_cmd(["prune", "--days", "0", "--compact-days", "7"])
+        self.assertEqual(rc, 0)
+        self.assertIn("compacted 6 event(s)", out)
+        left = [r["event"] for r in self.conn.execute("SELECT event FROM events ORDER BY id")]
+        self.assertEqual(left, ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"])
+        after = cli.build_snapshot(self.conn, include_all=True)["sessions"][0]
+        self.assertEqual((after["state"], after["done_reason"]),
+                         (before["state"], before["done_reason"]))
 
 
 class SnapshotNotesTests(AgentBoardTestCase):
@@ -1805,6 +1865,157 @@ class CodexFeatureFlagTests(AgentBoardTestCase):
         self.codex_dir = self.fake_home / ".codex"
         self.config_path = self.codex_dir / "config.toml"
         self.hooks_path = self.codex_dir / "hooks.json"
+        # A Codex old enough to still need [features] hooks = true, unless a
+        # test sets another version on self.codex_version.
+        version_patch = mock.patch.object(cli, "_codex_version", return_value=(0, 123, 0))
+        self.codex_version = version_patch.start()
+        self.addCleanup(version_patch.stop)
+
+    def _install_codex_output(self):
+        self.hooks_path.write_text(json.dumps({}))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_install_hooks(cli.build_parser().parse_args(["install-hooks", "--codex"]))
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def _enable_output(self, *extra):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_enable_codex_hooks(
+                cli.build_parser().parse_args(["enable-codex-hooks", *extra]))
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    # -- codex --version and the 0.124 default ---------------------------------
+
+    def test_codex_version_parses_the_cli_output(self):
+        def run(stdout="", returncode=0, exc=None):
+            def fake(argv, **kwargs):
+                self.assertEqual(argv, ["codex", "--version"])
+                self.assertEqual(kwargs.get("timeout"), cli.CODEX_VERSION_TIMEOUT_SECS)
+                if exc:
+                    raise exc
+                return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="")
+            return fake
+
+        self.assertEqual(_REAL_CODEX_VERSION(run("codex-cli 0.124.0\n")), (0, 124, 0))
+        self.assertEqual(_REAL_CODEX_VERSION(run("codex-cli 1.2\n")), (1, 2, 0))
+        self.assertIsNone(_REAL_CODEX_VERSION(run("codex-cli\n")))
+        self.assertIsNone(_REAL_CODEX_VERSION(run("codex-cli 0.130.0\n", returncode=1)))
+        self.assertIsNone(_REAL_CODEX_VERSION(run(exc=FileNotFoundError("codex"))))
+        self.assertIsNone(_REAL_CODEX_VERSION(run(exc=subprocess.TimeoutExpired("codex", 2))))
+
+    def test_no_warning_on_codex_0_124(self):
+        self.codex_version.return_value = (0, 124, 0)
+        self.config_path.write_text('model = "gpt-5"\n')
+        out = self._install_codex_output()
+        self.assertIn("Run /hooks in Codex to trust the new hooks.", out)
+        self.assertNotIn("warning", out)
+        self.assertNotIn("[features]", out)
+
+    def test_warning_on_older_codex(self):
+        self.codex_version.return_value = (0, 123, 9)
+        self.config_path.write_text('model = "gpt-5"\n')
+        out = self._install_codex_output()
+        self.assertIn("warning: Codex 0.123.9 will ignore", out)
+        self.assertIn("hooks = true is set under [features]", out)
+        self.assertIn("install.sh --enable-codex-hooks", out)
+
+    def test_soft_note_when_version_unknown(self):
+        self.codex_version.return_value = None
+        self.config_path.write_text('model = "gpt-5"\n')
+        out = self._install_codex_output()
+        self.assertIn("Codex 0.124 and newer enable hooks by default; an older Codex needs "
+                      "hooks = true under [features]", out)
+        self.assertNotIn("warning", out)
+
+    def test_explicit_false_warns_on_any_version(self):
+        self.config_path.write_text("[features]\nhooks = false\n")
+        for version in ((0, 200, 0), (0, 100, 0), None):
+            self.codex_version.return_value = version
+            out = self._install_codex_output()
+            self.assertIn(f"warning: hooks = false under [features] in {self.config_path} "
+                          "disables hooks; remove it or run install.sh --enable-codex-hooks", out)
+
+    def test_flag_true_never_warns(self):
+        self.config_path.write_text("[features]\nhooks = true\n")
+        for version in ((0, 200, 0), (0, 100, 0), None):
+            self.codex_version.return_value = version
+            out = self._install_codex_output()
+            self.assertNotIn("warning", out)
+            self.assertNotIn("0.124", out)
+
+    def test_enable_is_noop_on_new_codex(self):
+        self.codex_version.return_value = (0, 130, 1)
+        self.config_path.write_text('model = "gpt-5"\n')
+        out = self._enable_output()
+        self.assertIn(f"Codex 0.130.1 enables hooks by default; {self.config_path} left unchanged",
+                      out)
+        self.assertEqual(self.config_path.read_text(), 'model = "gpt-5"\n')
+        self.assertEqual(list(self.codex_dir.glob("*.agentboard-bak-*")), [])
+        self.assertFalse((self.agentboard_home / "install-manifest.json").exists())
+        out = self._enable_output("--dry-run")
+        self.assertIn("left unchanged", out)
+
+    def test_enable_is_noop_on_new_codex_without_a_config_file(self):
+        self.codex_version.return_value = (0, 124, 0)
+        self._enable_output()
+        self.assertFalse(self.config_path.exists())
+
+    def test_enable_still_patches_explicit_false(self):
+        self.codex_version.return_value = (0, 130, 0)
+        self.config_path.write_text("[features]\nhooks = false\n")
+        self._enable_output()
+        self.assertEqual(tomllib.loads(self.config_path.read_text()), {"features": {"hooks": True}})
+        self.assertEqual(len(list(self.codex_dir.glob("*.agentboard-bak-*"))), 1)
+
+    def test_enable_patches_when_version_unknown(self):
+        self.codex_version.return_value = None
+        self.config_path.write_text('model = "gpt-5"\n')
+        self._enable_output()
+        self.assertIs(tomllib.loads(self.config_path.read_text())["features"]["hooks"], True)
+
+    def test_codex_hooks_alias_is_read(self):
+        self.config_path.write_text("[features]\ncodex_hooks = true\n")
+        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), True)
+        self.config_path.write_text("[features]\ncodex_hooks = false\n")
+        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
+        # `hooks` wins when both are set.
+        self.config_path.write_text("[features]\ncodex_hooks = false\nhooks = true\n")
+        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), True)
+        self.config_path.write_text("[features]\ncodex_hooks = true\nhooks = false\n")
+        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
+
+    def test_alias_false_warns_by_its_own_name_and_enable_refuses(self):
+        text = "[features]\ncodex_hooks = false\n"
+        self.config_path.write_text(text)
+        out = self._install_codex_output()
+        self.assertIn("warning: codex_hooks = false under [features]", out)
+        self.assertIn("remove that line", out)
+        for argv in (["enable-codex-hooks"], ["enable-codex-hooks", "--dry-run"]):
+            rc, out, err = _run_cmd(argv)
+            self.assertEqual(rc, 1)
+            self.assertIn("codex_hooks = false under [features]", err)
+            self.assertIn("remove that line by hand", err)
+        self.assertEqual(self.config_path.read_text(), text)
+        self.assertEqual(list(self.config_path.parent.glob("config.toml.*")), [])
+
+    def test_alias_false_beside_hooks_true_still_warns_and_refuses(self):
+        text = "[features]\nhooks = true\ncodex_hooks = false\n"
+        self.config_path.write_text(text)
+        out = self._install_codex_output()
+        self.assertIn("warning: codex_hooks = false under [features]", out)
+        rc, _, err = _run_cmd(["enable-codex-hooks"])
+        self.assertEqual(rc, 1)
+        self.assertIn("remove that line by hand", err)
+        self.assertEqual(self.config_path.read_text(), text)
+
+    def test_enable_leaves_an_alias_true_alone(self):
+        self.config_path.write_text("[features]\ncodex_hooks = true\n")
+        out = self._enable_output()
+        self.assertIn("codex_hooks = true already set under [features]; left unchanged", out)
+        self.assertEqual(self.config_path.read_text(), "[features]\ncodex_hooks = true\n")
 
     # -- _codex_hooks_feature_enabled ----------------------------------------
 
@@ -1819,17 +2030,17 @@ class CodexFeatureFlagTests(AgentBoardTestCase):
         self.config_path.write_text("[features]\nhooks = false\n")
         self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
 
-    def test_feature_flag_section_present_without_the_key(self):
+    def test_feature_flag_section_present_without_the_key_is_unset(self):
         self.config_path.write_text("[features]\njs_repl = true\n")
-        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
+        self.assertIsNone(cli._codex_hooks_feature_enabled(self.config_path))
 
-    def test_feature_flag_no_features_section_at_all(self):
+    def test_feature_flag_no_features_section_at_all_is_unset(self):
         self.config_path.write_text('model = "gpt-5"\n')
-        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
+        self.assertIsNone(cli._codex_hooks_feature_enabled(self.config_path))
 
     def test_feature_flag_features_defined_as_a_non_table_does_not_crash(self):
         self.config_path.write_text('features = "on"\n')
-        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
+        self.assertIsNone(cli._codex_hooks_feature_enabled(self.config_path))
 
     # -- _patch_codex_hooks_feature: the exact matrix the review asked for --
 
@@ -3265,6 +3476,255 @@ class PruneTests(AgentBoardTestCase):
         self.assertIn("1 dismissed note(s)", out)
         texts = sorted(r["text"] for r in self.conn.execute("SELECT text FROM notes"))
         self.assertEqual(texts, ["open on a live session", "recently dismissed"])
+
+    # -- retention rules ---------------------------------------------------------
+
+    def _iso(self, **delta):
+        return (datetime.now(timezone.utc) - timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def _session_ids(self):
+        return sorted(r["session_id"] for r in self.conn.execute("SELECT session_id FROM sessions"))
+
+    def _add_note(self, session_id, kind="update", text="t", dismissed_at=None):
+        now = self._iso(days=0)
+        self.conn.execute(
+            "INSERT INTO notes(tool, session_id, ts, last_ts, kind, text, fingerprint, "
+            "source, dismissed_at) VALUES ('claude', ?, ?, ?, ?, ?, ?, 'cli', ?)",
+            (session_id, now, now, kind, text, f"{kind}:{text}", dismissed_at),
+        )
+
+    def test_prune_skips_open_needs_you_note(self):
+        old = self._iso(days=120)
+        insert_session(self.conn, session_id="asks", updated_at=old)
+        insert_session(self.conn, session_id="answered", updated_at=old)
+        insert_session(self.conn, session_id="quiet", updated_at=old)
+        self._add_note("asks", kind="needs_you", text="approve the deploy")
+        self._add_note("answered", kind="needs_you", text="done", dismissed_at=self._iso(days=1))
+        self._add_note("quiet", kind="update", text="shipped")
+        rc, out, _ = _run_cmd(["prune"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._session_ids(), ["asks"])
+        self.assertIn("pruned 2 session(s) (1 skipped)", out)
+
+    def test_prune_skips_awaiting_pr(self):
+        old = self._iso(days=120)
+        insert_session(self.conn, session_id="awaits", updated_at=old)
+        insert_session(self.conn, session_id="merged", updated_at=old)
+        insert_session(self.conn, session_id="answered", updated_at=old)
+        for session_id, state, responded in (
+            ("awaits", "OPEN", None), ("merged", "MERGED", None), ("answered", "OPEN", old),
+        ):
+            self.conn.execute(
+                "INSERT INTO links(tool, session_id, kind, ref, url, state, source, responded_at) "
+                "VALUES ('claude', ?, 'pr', '#1', 'https://example.com/pr/1', ?, 'cli', ?)",
+                (session_id, state, responded),
+            )
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), ["awaits"])
+
+    def test_prune_keeps_only_an_owned_gh_pr(self):
+        # gh-found PRs are the session's own only when created inside its
+        # lifetime; one that predates the session is inherited from the
+        # branch and does not hold the session back.
+        old, started, ended = self._iso(days=120), self._iso(days=130), self._iso(days=121)
+        inside, before = self._iso(days=125), self._iso(days=140)
+        for session_id, created in (("owns", inside), ("inherits", before)):
+            insert_session(self.conn, session_id=session_id, updated_at=old,
+                           started_at=started, ended_at=ended)
+            self.conn.execute(
+                "INSERT INTO links(tool, session_id, kind, ref, url, state, source, created_at) "
+                "VALUES ('claude', ?, 'pr', '#7', 'https://example.com/pr/7', 'OPEN', 'gh', ?)",
+                (session_id, created),
+            )
+        rc, out, _ = _run_cmd(["prune"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._session_ids(), ["owns"])
+        self.assertIn("pruned 1 session(s) (1 skipped)", out)
+
+    def test_prune_skips_active_snooze(self):
+        old = self._iso(days=120)
+        insert_session(self.conn, session_id="snoozed", updated_at=old)
+        insert_session(self.conn, session_id="woke", updated_at=old)
+        future = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        for session_id, until in (("snoozed", future), ("woke", old)):
+            self.conn.execute(
+                "INSERT INTO triage(tool, session_id, status, until, note, updated_at) "
+                "VALUES ('claude', ?, 'snoozed', ?, NULL, ?)", (session_id, until, old),
+            )
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), ["snoozed"])
+
+    def _write_registry(self, pid, session_id):
+        # HOME is a temp dir (AgentBoardTestCase), never the real ~/.claude.
+        sessions_dir = Path(os.environ["HOME"]) / ".claude" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / f"{pid}.json").write_text(
+            json.dumps({"sessionId": session_id, "status": "idle"}))
+
+    def test_prune_skips_a_live_process(self):
+        old = self._iso(days=120)
+        insert_session(self.conn, session_id="alive", updated_at=old, pid=os.getpid())
+        insert_session(self.conn, session_id="ended", updated_at=old, pid=os.getpid(),
+                       ended_at=old)
+        insert_session(self.conn, tool="codex", session_id="codex-alive", updated_at=old,
+                       pid=os.getpid())
+        self._write_registry(os.getpid(), "alive")
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), ["alive", "codex-alive"])
+
+    def test_prune_treats_an_unregistered_claude_pid_as_reused(self):
+        old = self._iso(days=120)
+        # A crashed session (no SessionEnd) whose pid now belongs to some
+        # other process: no registry file, or one naming another session.
+        insert_session(self.conn, session_id="crashed", updated_at=old, pid=os.getpid())
+        insert_session(self.conn, session_id="other-owner", updated_at=old, pid=os.getpid())
+        self._write_registry(os.getpid(), "someone-else")
+        rc, out, _ = _run_cmd(["prune"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._session_ids(), [])
+        self.assertIn("pruned 2 session(s) (0 skipped)", out)
+
+    def test_compact_deletes_only_tool_events_older_than_window(self):
+        insert_session(self.conn, session_id="s1", updated_at=self._iso(days=0))
+        old, recent = self._iso(days=10), self._iso(days=1)
+        compacted = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart",
+                     "SubagentStop", "PreCompact", "PostCompact"]
+        kept = ["SessionStart", "UserPromptSubmit", "Notification", "PermissionRequest",
+                "Stop", "StopFailure", "SessionEnd"]
+        for event in compacted + kept:
+            _insert_event(self.conn, event, ts=old)
+            _insert_event(self.conn, event, ts=recent)
+        _insert_event(self.conn, "PostToolUse", ts=old, agent_id="sub-1")
+        rc, out, _ = _run_cmd(["prune", "--compact-days", "7"])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"compacted {len(compacted) + 1} event(s)", out)
+        rows = self.conn.execute("SELECT event, ts FROM events").fetchall()
+        old_left = sorted(r["event"] for r in rows if r["ts"] == old)
+        recent_left = sorted(r["event"] for r in rows if r["ts"] == recent)
+        self.assertEqual(old_left, sorted(kept))
+        self.assertEqual(recent_left, sorted(compacted + kept))
+        self.assertEqual(self._session_ids(), ["s1"])
+
+    def test_compact_days_from_config_and_zero_never_compacts(self):
+        insert_session(self.conn, session_id="s1", updated_at=self._iso(days=0))
+        _insert_event(self.conn, "PreToolUse", ts=self._iso(days=3))
+        (self.agentboard_home / "config.json").write_text(json.dumps({"compact_days": 2}))
+        _, out, _ = _run_cmd(["prune", "--compact-days", "0"])
+        self.assertIn("compacted 0 event(s)", out)
+        _, out, _ = _run_cmd(["prune"])
+        self.assertIn("compacted 1 event(s)", out)
+
+    def test_prune_days_from_config(self):
+        insert_session(self.conn, session_id="s1", updated_at=self._iso(days=20))
+        (self.agentboard_home / "config.json").write_text(json.dumps({"prune_days": 30}))
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), ["s1"])
+        (self.agentboard_home / "config.json").write_text(json.dumps({"prune_days": 10}))
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), [])
+
+    def test_prune_auto_is_gated_by_meta(self):
+        insert_session(self.conn, session_id="old", updated_at=self._iso(days=120))
+        rc, out, _ = _run_cmd(["prune", "--auto"])
+        self.assertEqual(rc, 0)
+        self.assertIn("pruned 1 session(s)", out)
+        stamp = self.conn.execute(
+            "SELECT value FROM notes_meta WHERE key='last_prune_at'").fetchone()["value"]
+        self.assertAlmostEqual(stamp, int(datetime.now(timezone.utc).timestamp()), delta=60)
+
+        insert_session(self.conn, session_id="old2", updated_at=self._iso(days=120))
+        rc, out, _ = _run_cmd(["prune", "--auto"])
+        self.assertEqual(rc, 0)
+        self.assertIn("skipped", out)
+        self.assertEqual(self._session_ids(), ["old2"])
+
+        # A manual run is never gated and leaves the auto stamp alone.
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), [])
+        self.assertEqual(self.conn.execute(
+            "SELECT value FROM notes_meta WHERE key='last_prune_at'").fetchone()["value"], stamp)
+
+        insert_session(self.conn, session_id="old3", updated_at=self._iso(days=120))
+        self.conn.execute("UPDATE notes_meta SET value=value - 25 * 3600 WHERE key='last_prune_at'")
+        _, out, _ = _run_cmd(["prune", "--auto"])
+        self.assertIn("pruned 1 session(s)", out)
+        self.assertEqual(self._session_ids(), [])
+
+    def test_prune_auto_keeps_rebuild_meta(self):
+        before = {r["key"]: r["value"] for r in self.conn.execute("SELECT * FROM notes_meta")}
+        _run_cmd(["prune", "--auto"])
+        after = {r["key"]: r["value"] for r in self.conn.execute("SELECT * FROM notes_meta")}
+        self.assertEqual({k: after[k] for k in before}, before)
+        self.assertIn("last_prune_at", after)
+
+    def test_prune_dry_run_writes_nothing(self):
+        insert_session(self.conn, session_id="old", updated_at=self._iso(days=120))
+        insert_session(self.conn, session_id="new", updated_at=self._iso(days=0))
+        _insert_event(self.conn, "PreToolUse", session_id="new", ts=self._iso(days=10))
+        self._add_note("new", text="gone", dismissed_at=self._iso(days=120))
+        before = self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        rc, out, _ = _run_cmd(["prune", "--dry-run", "--auto", "--vacuum"])
+        self.assertEqual(rc, 0)
+        self.assertIn("would prune 1 session(s) (0 skipped), compact 1 event(s), "
+                      "1 dismissed note(s)", out)
+        self.assertEqual(self._session_ids(), ["new", "old"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], before)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0], 1)
+        self.assertIsNone(self.conn.execute(
+            "SELECT 1 FROM notes_meta WHERE key IN ('last_prune_at', 'last_vacuum_at')").fetchone())
+
+    def test_prune_dry_run_previews_past_the_auto_gate(self):
+        insert_session(self.conn, session_id="old", updated_at=self._iso(days=120))
+        stamp = int(datetime.now(timezone.utc).timestamp()) - 3600
+        self.conn.execute(
+            "INSERT INTO notes_meta(key, value) VALUES ('last_prune_at', ?)", (stamp,))
+        rc, out, _ = _run_cmd(["prune", "--auto", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertIn("would prune 1 session(s)", out)
+        self.assertNotIn("prune skipped", out)
+        self.assertEqual(self._session_ids(), ["old"])
+        self.assertEqual(self.conn.execute(
+            "SELECT value FROM notes_meta WHERE key='last_prune_at'").fetchone()["value"], stamp)
+
+    def test_prune_days_zero_never_deletes_sessions(self):
+        insert_session(self.conn, session_id="ancient", updated_at=self._iso(days=4000))
+        rc, out, _ = _run_cmd(["prune", "--days", "0"])
+        self.assertEqual(rc, 0)
+        self.assertIn("pruned 0 session(s)", out)
+        self.assertEqual(self._session_ids(), ["ancient"])
+
+    def test_prune_days_zero_keeps_dismissed_notes(self):
+        insert_session(self.conn, session_id="s1", updated_at=self._iso(days=0))
+        self._add_note("s1", text="long dismissed", dismissed_at=self._iso(days=4000))
+        (self.agentboard_home / "config.json").write_text(json.dumps({"prune_days": 0}))
+        _, out, _ = _run_cmd(["prune"])
+        self.assertIn("0 dismissed note(s)", out)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0], 1)
+
+    def test_negative_days_are_rejected(self):
+        rc, _, err = _run_cmd(["prune", "--days", "-1"])
+        self.assertEqual(rc, 2)
+        self.assertIn("0 or more", err)
+
+    def test_vacuum_runs_and_stamps(self):
+        rc, out, _ = _run_cmd(["prune", "--vacuum"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.rstrip().endswith(", vacuumed"))
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT value FROM notes_meta WHERE key='last_vacuum_at'").fetchone())
+
+    def test_auto_vacuums_only_past_the_free_page_threshold(self):
+        _, out, _ = _run_cmd(["prune", "--auto"])
+        self.assertNotIn("vacuumed", out)
+        with mock.patch.object(cli, "VACUUM_MIN_FREE_BYTES", -1), \
+                mock.patch.object(cli, "VACUUM_MIN_FREE_FRACTION", -1):
+            self.conn.execute("UPDATE notes_meta SET value=0 WHERE key='last_prune_at'")
+            _, out, _ = _run_cmd(["prune", "--auto"])
+            self.assertIn("vacuumed", out)
+            # At most weekly, whatever the free space.
+            self.conn.execute("UPDATE notes_meta SET value=0 WHERE key='last_prune_at'")
+            _, out, _ = _run_cmd(["prune", "--auto"])
+            self.assertNotIn("vacuumed", out)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,17 @@ struct SettingsView: View {
                 Button("Open log") { store.revealLog() }
                     .disabled(!store.logFileExists)
                     .help("Reveal agentboard.log, the diagnostic log, in Finder")
+                // Only when the hook has logged a failure.
+                if let info = store.hookErrorsLogInfo {
+                    HStack {
+                        Text("hook-errors.log: \(Self.byteCount(info.size)), last written \(Self.relative(info.modified))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Reveal") { store.revealHookErrorsLog() }
+                            .help("Reveal hook-errors.log, where the hooks record their own failures, in Finder")
+                    }
+                }
             } header: {
                 header("Diagnostics", topic: .diagnostics)
             }
@@ -104,6 +115,16 @@ struct SettingsView: View {
         .frame(width: 420)
         .padding()
         .onAppear { launchAtLogin = LaunchAtLogin.isEnabled }
+    }
+
+    private static func byteCount(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private static func relative(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     /// A section title with a ? button that opens Help at `topic`.
