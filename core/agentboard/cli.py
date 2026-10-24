@@ -2320,7 +2320,9 @@ def cmd_prune(args):
 
     conn = db.connect()
     try:
-        if args.auto:
+        # A dry run writes nothing, so it previews the next real run even
+        # while the daily --auto gate is closed.
+        if args.auto and not args.dry_run:
             last = _meta_value(conn, PRUNE_META_LAST_PRUNE)
             if last is not None and 0 <= now_epoch - last < PRUNE_AUTO_INTERVAL_SECS:
                 diag.debug("cli", "prune_skipped", reason="recent", last_prune_at=last)

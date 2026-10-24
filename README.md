@@ -716,7 +716,8 @@ yourself. `prune` is the retention sweep described under Data: `--days` and `--c
 override `prune_days` and `compact_days`, and `0` means never (until this release `--days 0`
 deleted every session; it now deletes none). `--auto` runs only when the last auto run was 24 hours
 ago or more and may vacuum on its own; `--vacuum` always vacuums afterwards; `--dry-run` prints the
-counts and changes nothing. `install-hooks --bin-path` only previews a different hook path for `install.sh
+counts and changes nothing (with `--auto` it ignores the daily gate, so it previews the next real
+run). `install-hooks --bin-path` only previews a different hook path for `install.sh
 --dry-run`.
 
 ## Diagnostics

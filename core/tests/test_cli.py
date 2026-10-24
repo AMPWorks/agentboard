@@ -3519,6 +3519,19 @@ class PruneTests(AgentBoardTestCase):
         self.assertIsNone(self.conn.execute(
             "SELECT 1 FROM notes_meta WHERE key IN ('last_prune_at', 'last_vacuum_at')").fetchone())
 
+    def test_prune_dry_run_previews_past_the_auto_gate(self):
+        insert_session(self.conn, session_id="old", updated_at=self._iso(days=120))
+        stamp = int(datetime.now(timezone.utc).timestamp()) - 3600
+        self.conn.execute(
+            "INSERT INTO notes_meta(key, value) VALUES ('last_prune_at', ?)", (stamp,))
+        rc, out, _ = _run_cmd(["prune", "--auto", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertIn("would prune 1 session(s)", out)
+        self.assertNotIn("prune skipped", out)
+        self.assertEqual(self._session_ids(), ["old"])
+        self.assertEqual(self.conn.execute(
+            "SELECT value FROM notes_meta WHERE key='last_prune_at'").fetchone()["value"], stamp)
+
     def test_prune_days_zero_never_deletes_sessions(self):
         insert_session(self.conn, session_id="ancient", updated_at=self._iso(days=4000))
         rc, out, _ = _run_cmd(["prune", "--days", "0"])
