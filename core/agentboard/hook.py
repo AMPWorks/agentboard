@@ -522,21 +522,50 @@ def spawn_codex_map(session_id, cwd, at) -> None:
     _diag("debug", "spawn", what="map-codex", session=f"codex:{session_id}", outcome="spawned")
 
 
-def _last_parent_prompt_text(conn, tool, session_id):
-    """Text of the session's newest parent (not subagent-tagged) prompt.
+def _last_parent_prompt(conn, tool, session_id):
+    """(text, prompt_kind) of the session's newest parent (not
+    subagent-tagged), non-injected prompt, or (None, None).
 
-    Read from events rather than sessions.last_prompt, which a subagent
-    UserPromptSubmit also overwrites, so the hook decides "unattended" from
-    the same prompt `notes --rebuild` tracks for the same Stop. Walks the
-    partial parent-events index backwards and stops at the first match.
+    Read from events rather than sessions.last_prompt, so the hook decides
+    "unattended" from the same prompt `notes --rebuild` tracks for the same
+    Stop. An injected prompt (a task notification, another agent's message)
+    is skipped: the turn it starts belongs to whoever drove the session
+    before it. Walks the partial parent-events index backwards and stops at
+    the first match.
     """
     found = conn.execute(
-        "SELECT text FROM events WHERE tool=? AND session_id=? AND agent_id IS NULL "
-        "AND event='UserPromptSubmit' AND text IS NOT NULL AND text <> '' "
+        "SELECT text, prompt_kind FROM events WHERE tool=? AND session_id=? "
+        "AND agent_id IS NULL AND event='UserPromptSubmit' AND text IS NOT NULL "
+        "AND text <> '' AND (prompt_kind IS NULL OR prompt_kind <> 'injected') "
         "ORDER BY ts DESC, id DESC LIMIT 1",
         (tool, session_id),
     ).fetchone()
-    return found[0] if found else None
+    return (found[0], found[1]) if found else (None, None)
+
+
+def _classify_prompt(text, row):
+    """events.prompt_kind for a parent prompt (notes.prompt_kind with the
+    configured prefixes and the session's stored cron prompts), or None
+    when classifying fails: the event is still recorded, as legacy (human).
+    `notes` is imported only for prompts and Stops."""
+    try:
+        from . import notes
+
+        config = notes.load_config(db.home_dir())
+        cron_prompts = ()
+        if row is not None and row["cron_prompts"]:
+            value = json.loads(row["cron_prompts"])
+            if isinstance(value, list):
+                cron_prompts = tuple(item for item in value if isinstance(item, str))
+        return notes.prompt_kind(
+            text,
+            injected=notes.injected_prefixes(config),
+            unattended=notes.unattended_prefixes(config),
+            cron_prompts=cron_prompts,
+        )
+    except Exception as exc:
+        _diag("warn", "prompt_kind", outcome="error", exc=type(exc).__name__, msg=str(exc))
+        return None
 
 
 def _record_stop_note(conn, tool, session_id, text, now, event_id) -> None:
@@ -545,7 +574,8 @@ def _record_stop_note(conn, tool, session_id, text, now, event_id) -> None:
     Runs inside process_payload's transaction, under a savepoint, so a
     classifier or note-write failure is logged and rolled back on its own
     without losing the event. `notes` is imported here, only for parent
-    Stop events, so every other event adds no import or config read.
+    Stop events (and, in _classify_prompt, parent prompts), so every other
+    event adds no import or config read.
     """
     try:
         conn.execute("SAVEPOINT stop_note")
@@ -557,9 +587,9 @@ def _record_stop_note(conn, tool, session_id, text, now, event_id) -> None:
         from . import notes
 
         config = notes.load_config(db.home_dir())
-        unattended = notes.is_unattended(
-            _last_parent_prompt_text(conn, tool, session_id),
-            notes.unattended_prefixes(config),
+        prompt_text, kind_of_prompt = _last_parent_prompt(conn, tool, session_id)
+        unattended = notes.kind_is_unattended(
+            kind_of_prompt, prompt_text, notes.unattended_prefixes(config)
         )
         # The session's earlier notes are read only when this message names
         # a PR/issue reference, so most Stops add no query.
@@ -641,10 +671,27 @@ def process_payload(conn, tool: str, payload: dict) -> None:
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE tool=? AND session_id=?",
+            (tool, session_id),
+        ).fetchone()
+
+        is_subagent_tagged = bool(agent_id) and event not in SUBAGENT_MARKER_EVENTS
+
+        # What kind of prompt a parent prompt is (human, loop, cron or
+        # injected by Claude Code itself). An injected one still starts a
+        # turn (last_event becomes UserPromptSubmit) but is not the user
+        # replying: it neither reopens a done session nor replaces the
+        # session's prompts.
+        prompt_kind = None
+        if event == "UserPromptSubmit" and not is_subagent_tagged:
+            prompt_kind = _classify_prompt(text, row)
+        injected = prompt_kind == "injected"
+
         cursor = conn.execute(
             "INSERT INTO events(ts, tool, session_id, event, agent_id, "
-            "notification_type, tool_name, text, extra) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "notification_type, tool_name, text, extra, prompt_kind) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 now,
                 tool,
@@ -655,20 +702,14 @@ def process_payload(conn, tool: str, payload: dict) -> None:
                 tool_name,
                 text,
                 json.dumps(extra) if extra else None,
+                prompt_kind,
             ),
         )
-
-        row = conn.execute(
-            "SELECT * FROM sessions WHERE tool=? AND session_id=?",
-            (tool, session_id),
-        ).fetchone()
-
-        is_subagent_tagged = bool(agent_id) and event not in SUBAGENT_MARKER_EVENTS
 
         if event == "Stop" and not is_subagent_tagged and text:
             _record_stop_note(conn, tool, session_id, text, now, cursor.lastrowid)
 
-        if event == "UserPromptSubmit" and not is_subagent_tagged:
+        if event == "UserPromptSubmit" and not is_subagent_tagged and not injected:
             conn.execute(
                 "UPDATE triage SET status='open', updated_at=? "
                 "WHERE tool=? AND session_id=? AND status='done'",
@@ -738,8 +779,8 @@ def process_payload(conn, tool: str, payload: dict) -> None:
             new_last_event = event
             new_waiting_reason = _extract_waiting_reason(event, payload)
 
-        # A subagent's own prompt is not the session's.
-        sets_prompt = event == "UserPromptSubmit" and not is_subagent_tagged
+        # A subagent's own prompt, or an injected one, is not the session's.
+        sets_prompt = event == "UserPromptSubmit" and not is_subagent_tagged and not injected
         first_prompt = prompt_text if sets_prompt else None
         last_prompt = _truncate(prompt_text) if sets_prompt else None
         last_assistant = text if event == "Stop" else None

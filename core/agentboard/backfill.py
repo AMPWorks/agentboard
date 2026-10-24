@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 import time
 from pathlib import Path
 
+from . import db
 from . import diag
+from . import notes
 from .hook import EXIT_COMMANDS, clean_prompt_text, is_untrusted_daemon_pid, normalize_branch
 from .reconcile import is_pid_alive
 
@@ -107,14 +109,35 @@ SYNTHETIC_USER_TAGS = (
     "<local-command-stdout>",
     "<local-command-stderr>",
     "<bash-stdout>",
-    "<task-notification>",
 )
+
+# Prompts Claude Code injected itself are not the user's prompts either:
+# `prompt_injected_prefixes` from config.json, set once per backfill run
+# (set_injected_prefixes), defaulting to notes.DEFAULT_INJECTED_PREFIXES.
+_injected_prefixes = notes.DEFAULT_INJECTED_PREFIXES
+
+
+def set_injected_prefixes(prefixes) -> None:
+    global _injected_prefixes
+    _injected_prefixes = tuple(prefixes)
+
+
+def load_injected_prefixes() -> None:
+    """Read `prompt_injected_prefixes` from config.json for this run."""
+    set_injected_prefixes(notes.injected_prefixes(notes.load_config(db.home_dir())))
+
+
+def _is_synthetic(text) -> bool:
+    if text.startswith(SYNTHETIC_USER_TAGS):
+        return True
+    stripped = text.lstrip()
+    return any(stripped.startswith(prefix) for prefix in _injected_prefixes)
 
 
 def _claude_user_text(message_content):
     """Return plain prompt text for a 'user' entry, or None if not real."""
     if isinstance(message_content, str):
-        if message_content.startswith(SYNTHETIC_USER_TAGS):
+        if _is_synthetic(message_content):
             return None
         return clean_prompt_text(message_content)
     if isinstance(message_content, list):
@@ -127,6 +150,8 @@ def _claude_user_text(message_content):
             if isinstance(block, dict) and block.get("type") == "text"
         ]
         text = "\n".join(t for t in texts if t) or None
+        if text and _is_synthetic(text):
+            return None
         return clean_prompt_text(text)
     return None
 
@@ -789,6 +814,7 @@ def backfill_single_session(conn, tool, session_id, transcript_path=None):
     if not path.is_file():
         return "missing-file"
 
+    load_injected_prefixes()
     try:
         if tool == "claude":
             fields = parse_claude_transcript(path)
@@ -813,6 +839,7 @@ def backfill_single_session(conn, tool, session_id, transcript_path=None):
 def run_backfill(conn, days=30):
     stats = {"claude": 0, "codex": 0, "errors": 0, "daemon_pid_corrected": 0}
     started = time.monotonic()
+    load_injected_prefixes()
 
     conn.execute("BEGIN IMMEDIATE")
     try:

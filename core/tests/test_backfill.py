@@ -39,6 +39,29 @@ class ClaudeTranscriptTests(AgentBoardTestCase):
         self.assertEqual(result["last_event"], "Stop")
         self.assertEqual(result["interactive"], 1)
 
+    def test_skips_injected_prompts_by_configured_prefixes(self):
+        path = self.tmp_path / "inj.jsonl"
+        write_jsonl(path, [
+            {"type": "user", "message": {"role": "user", "content": "real prompt"},
+             "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/tmp"},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": '<agent-message from="x">ping</agent-message>'}]},
+             "timestamp": "2026-01-01T00:01:00.000Z"},
+            {"type": "user", "message": {"role": "user", "content": "<task-notification>x"},
+             "timestamp": "2026-01-01T00:02:00.000Z"},
+        ])
+        try:
+            backfill.set_injected_prefixes(backfill.notes.DEFAULT_INJECTED_PREFIXES)
+            self.assertEqual(backfill.parse_claude_transcript(path)["last_prompt"], "real prompt")
+            # A config override replaces the list (local-command tags stay skipped).
+            (self.agentboard_home / "config.json").write_text(
+                json.dumps({"prompt_injected_prefixes": ["<agent-message"]}))
+            backfill.load_injected_prefixes()
+            self.assertEqual(backfill.parse_claude_transcript(path)["last_prompt"],
+                             "<task-notification>x")
+        finally:
+            backfill.set_injected_prefixes(backfill.notes.DEFAULT_INJECTED_PREFIXES)
+
     def test_skips_tool_result_and_meta_and_synthetic_tags(self):
         path = self.tmp_path / "sess2.jsonl"
         write_jsonl(path, [

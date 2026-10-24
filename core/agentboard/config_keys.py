@@ -49,6 +49,13 @@ CONFIG_KEYS = (
         "A turn whose prompt starts with one of these is unattended (loop) work.",
     ),
     ConfigKey(
+        "prompt_injected_prefixes", "list of strings",
+        '["<task-notification>", "<agent-message", "<cross-session-message"]',
+        "A prompt starting with one of these was injected by Claude Code (a finished "
+        "background task, another agent's or session's message): it counts as activity but "
+        "never as the user replying.",
+    ),
+    ConfigKey(
         "retitle_command", "argv list, string or null",
         "the local claude CLI with Haiku, when installed",
         "Reads a session's recent context on stdin and prints a new title; null turns "

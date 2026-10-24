@@ -911,6 +911,40 @@ class HookProcessPayloadTests(AgentBoardTestCase):
         self.assertEqual((row["first_prompt"], row["last_prompt"]),
                          ("the real prompt", "the real prompt"))
 
+    def test_injected_prompt_does_not_reopen_done(self):
+        self._at("UserPromptSubmit", prompt="ship it")
+        self._at("Stop", last_assistant_message="shipped")
+        self.conn.execute(
+            "INSERT INTO triage(tool, session_id, status, updated_at) "
+            "VALUES ('claude', 's1', 'done', '2026-01-01T00:00:00.000000Z')"
+        )
+        self._at("UserPromptSubmit", prompt="<task-notification>bg done</task-notification>")
+        status = lambda: self.conn.execute(  # noqa: E731
+            "SELECT status FROM triage WHERE session_id='s1'").fetchone()[0]
+        self.assertEqual(status(), "done")
+        row = self._session_row()
+        self.assertEqual((row["first_prompt"], row["last_prompt"]), ("ship it", "ship it"))
+        # A real prompt still reopens it.
+        self._at("UserPromptSubmit", prompt="one more thing")
+        self.assertEqual(status(), "open")
+
+    def test_injected_prompt_is_still_activity(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("Stop", last_assistant_message="done")
+        ts = self._at("UserPromptSubmit", prompt='<agent-message from="x">hi</agent-message>')
+        row = self._session_row()
+        self.assertEqual((row["last_event"], row["last_event_at"]), ("UserPromptSubmit", ts))
+        kind = self.conn.execute(
+            "SELECT prompt_kind FROM events ORDER BY id DESC LIMIT 1").fetchone()[0]
+        self.assertEqual(kind, "injected")
+
+    def test_prompt_kind_failure_still_records_the_prompt(self):
+        with mock.patch("agentboard.notes.prompt_kind", side_effect=RuntimeError("boom")):
+            self._at("UserPromptSubmit", prompt="hello")
+        event = self.conn.execute("SELECT text, prompt_kind FROM events").fetchone()
+        self.assertEqual((event["text"], event["prompt_kind"]), ("hello", None))
+        self.assertEqual(self._session_row()["last_prompt"], "hello")
+
     def test_prompt_less_session_end_marks_non_interactive(self):
         self._at("SessionStart")
         self._at("SessionEnd", reason="other")
@@ -1062,6 +1096,45 @@ class HookNotesTests(AgentBoardTestCase):
              ("s2", "The builder is still on PR #4; I will re-review when it reports back.")],
         )
 
+    def test_agent_message_after_loop_tick_keeps_turn_unattended(self):
+        self._prompt("# Autonomous loop tick")
+        self._prompt('<agent-message from="reviewer">PR #31 looks good</agent-message>')
+        self._stop(self.MILESTONE)
+        (note,) = self._notes()
+        self.assertEqual(note["kind"], "update")
+        kinds = [r[0] for r in self.conn.execute(
+            "SELECT prompt_kind FROM events WHERE event='UserPromptSubmit' ORDER BY id")]
+        self.assertEqual(kinds, ["loop", "injected"])
+        row = self.conn.execute("SELECT last_prompt FROM sessions").fetchone()
+        self.assertEqual(row["last_prompt"], "# Autonomous loop tick")
+
+    def test_cron_tick_stop_records_update_note(self):
+        cron_prompt = "Sweep the review queue and report anything new.\n" + "Check item. " * 40
+        self.assertGreater(len(cron_prompt), 200)
+        self._prompt("set up the sweep")
+        self._stop("Scheduled.", session_crons=[
+            {"id": "c1", "schedule": "*/10 * * * *", "recurring": True, "prompt": cron_prompt},
+        ])
+        # The tick arrives with its whitespace reflowed; no loop prefix.
+        self._prompt(cron_prompt.replace(" ", "  "))
+        self._stop(self.MILESTONE)
+        (note,) = self._notes()
+        self.assertEqual(note["kind"], "update")
+        kind = self.conn.execute(
+            "SELECT prompt_kind FROM events WHERE event='UserPromptSubmit' ORDER BY id DESC"
+        ).fetchone()[0]
+        self.assertEqual(kind, "cron")
+
+    def test_injected_prefix_override_from_config(self):
+        (self.agentboard_home / "config.json").write_text(
+            json.dumps({"prompt_injected_prefixes": ["[relay]"]})
+        )
+        self._prompt("[relay] from the other session")
+        self._prompt("<task-notification>now a human prompt</task-notification>")
+        kinds = [r[0] for r in self.conn.execute(
+            "SELECT prompt_kind FROM events WHERE event='UserPromptSubmit' ORDER BY id")]
+        self.assertEqual(kinds, ["injected", "human"])
+
     def test_waiting_restatement_records_no_note(self):
         self._prompt("# Autonomous loop tick")
         self._stop("Nothing changed this tick:\n- **PR #5.** It still needs your approval.")
@@ -1092,13 +1165,25 @@ class HookNotesTests(AgentBoardTestCase):
         self.assertEqual(self._notes(), [])
 
     def test_other_events_never_import_notes(self):
-        sys.modules.pop("agentboard.notes", None)
+        # Parent prompts (classified) and Stops (noted) import notes; tool
+        # use, notifications and subagent events never do.
+        import agentboard
+
+        self._prompt("# Autonomous loop tick")
+        original = sys.modules.pop("agentboard.notes")
+        delattr(agentboard, "notes")
         try:
-            self._prompt("# Autonomous loop tick")
             self._send({"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash"})
+            self._send({"session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "Bash"})
+            self._send({"session_id": "s1", "hook_event_name": "Notification",
+                        "notification_type": "idle_prompt", "message": "idle"})
+            self._send({"session_id": "s1", "hook_event_name": "SubagentStop", "agent_id": "a1"})
+            self._send({"session_id": "s1", "hook_event_name": "UserPromptSubmit",
+                        "agent_id": "a1", "prompt": "subagent prompt"})
             self.assertNotIn("agentboard.notes", sys.modules)
         finally:
-            import agentboard.notes  # noqa: F401  (restore for later tests)
+            sys.modules["agentboard.notes"] = original
+            agentboard.notes = original
 
 
 class FindAgentPidTests(AgentBoardTestCase):

@@ -28,6 +28,14 @@ FINGERPRINT_CHARS = 200
 
 DEFAULT_MARKERS = ("USER_ACTION:",)
 DEFAULT_UNATTENDED_PREFIXES = ("# Autonomous loop",)
+# Prompts Claude Code injects on its own (a background task finishing, a
+# message from another agent or session): they start a turn, but nobody
+# typed them.
+DEFAULT_INJECTED_PREFIXES = ("<task-notification>", "<agent-message", "<cross-session-message")
+
+# events.prompt_kind values. NULL (a row recorded before migration 7 that
+# `classify_prompts` has not reached) reads as human.
+PROMPT_KINDS = ("human", "loop", "cron", "injected")
 
 # Characters a marker line may be decorated with before the marker itself
 # (list bullets, emphasis, block quotes, inline code), e.g.
@@ -182,6 +190,13 @@ def unattended_prefixes(config: dict) -> tuple:
     return _string_list(config.get("note_unattended_prefixes"), DEFAULT_UNATTENDED_PREFIXES)
 
 
+def injected_prefixes(config: dict) -> tuple:
+    """`prompt_injected_prefixes` from config.json, default
+    DEFAULT_INJECTED_PREFIXES: a prompt starting with one of these was
+    injected by Claude Code, not typed by a person or a loop."""
+    return _string_list(config.get("prompt_injected_prefixes"), DEFAULT_INJECTED_PREFIXES)
+
+
 def load_markers(home: Path) -> tuple:
     return markers(load_config(home))
 
@@ -213,6 +228,78 @@ def is_unattended(prompt, prefixes, cron_prompts=()) -> bool:
     if any(text.startswith(prefix) for prefix in prefixes):
         return True
     return is_cron_prompt(prompt, cron_prompts)
+
+
+def prompt_kind(text, *, injected=DEFAULT_INJECTED_PREFIXES,
+                unattended=DEFAULT_UNATTENDED_PREFIXES, cron_prompts=()) -> str:
+    """"injected" (it starts with an `injected` prefix, after leading
+    whitespace), "loop" (a `note_unattended_prefixes` prefix), "cron" (its
+    whitespace-collapsed first CRON_PROMPT_CHARS characters equal one of the
+    session's stored `cron_prompts`), else "human"."""
+    if not text or not isinstance(text, str):
+        return "human"
+    stripped = text.lstrip()
+    if any(stripped.startswith(prefix) for prefix in injected):
+        return "injected"
+    if any(stripped.startswith(prefix) for prefix in unattended):
+        return "loop"
+    if is_cron_prompt(text, cron_prompts):
+        return "cron"
+    return "human"
+
+
+def kind_is_unattended(kind, text, prefixes) -> bool:
+    """The unattended flag for a turn whose (non-injected) prompt has this
+    kind: a loop or cron prompt is; an unclassified (legacy NULL) prompt is
+    when it starts with one of `prefixes`."""
+    if kind in ("loop", "cron"):
+        return True
+    return kind is None and is_unattended(text, prefixes)
+
+
+def _session_cron_prompts(conn) -> dict:
+    found = {}
+    for tool, session_id, value in conn.execute(
+        "SELECT tool, session_id, cron_prompts FROM sessions WHERE cron_prompts IS NOT NULL"
+    ):
+        try:
+            prompts = json.loads(value)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(prompts, list):
+            found[(tool, session_id)] = tuple(p for p in prompts if isinstance(p, str))
+    return found
+
+
+def classify_prompts(conn, config: dict, *, reset=False) -> int:
+    """Fill events.prompt_kind for parent UserPromptSubmit rows where it is
+    NULL (recorded before the hook classified prompts). With reset, every
+    parent prompt is re-classified so a changed prefix list applies to the
+    recorded history, except that a row the hook recorded as "cron" keeps
+    it unless it now matches an injected prefix: sessions.cron_prompts only
+    reflects the latest Stop, so a deleted cron's ticks could not be
+    re-derived. Returns the number of rows changed. Must run inside the
+    caller's transaction."""
+    injected = injected_prefixes(config)
+    unattended = unattended_prefixes(config)
+    crons = _session_cron_prompts(conn)
+    query = (
+        "SELECT id, tool, session_id, text, prompt_kind FROM events "
+        "WHERE event='UserPromptSubmit' AND agent_id IS NULL"
+    )
+    if not reset:
+        query += " AND prompt_kind IS NULL"
+    updates = []
+    for event_id, tool, session_id, text, current in conn.execute(query).fetchall():
+        kind = prompt_kind(text, injected=injected, unattended=unattended,
+                           cron_prompts=crons.get((tool, session_id), ()))
+        if current == "cron" and kind != "injected":
+            kind = "cron"
+        if kind != current:
+            updates.append((kind, event_id))
+    for start in range(0, len(updates), 500):
+        conn.executemany("UPDATE events SET prompt_kind=? WHERE id=?", updates[start:start + 500])
+    return len(updates)
 
 
 # -- classification --------------------------------------------------------------
@@ -481,9 +568,11 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
     is skipped when a dismissed note with the same fingerprint already
     covers it (last_event_id >= the event's id), so a dismissed note is not
     resurrected. `days` narrows the replay to Stop events newer than that.
-    Each event's unattended flag comes from the nearest preceding parent
-    UserPromptSubmit of the same session, the same prompt the hook reads
-    from events (hook._last_parent_prompt_text). Each event's seen_refs are
+    First, `classify_prompts` fills every unclassified prompt's kind (and,
+    with reset, re-applies the prefix lists). Each event's unattended flag
+    comes from the nearest preceding non-injected parent UserPromptSubmit of
+    the same session, the same prompt the hook reads from events
+    (hook._last_parent_prompt), and its kind. Each event's seen_refs are
     the references of the session's notes that predate it: kept notes first
     seen at an earlier event (or, without an event, an earlier ts) plus the
     notes this replay recorded so far, so a replay agrees with what the hook
@@ -497,6 +586,7 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        stats["classified"] = classify_prompts(conn, config, reset=reset)
         meta = _meta(conn)
         hook_from = int(meta.get("hook_from", 0))
         if reset:
@@ -523,18 +613,18 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
                     )
             replay_refs = {}
             rows = conn.execute(
-                "SELECT id, ts, tool, session_id, event, text FROM events "
+                "SELECT id, ts, tool, session_id, event, text, prompt_kind FROM events "
                 "WHERE agent_id IS NULL AND id <= ? "
                 "AND (event = 'UserPromptSubmit' OR (event = 'Stop' AND id > ?)) "
                 "ORDER BY id",
                 (upper, lower),
             )
             for row in rows.fetchall():
-                event_id, ts, tool, session_id, event, text = tuple(row)
+                event_id, ts, tool, session_id, event, text, kind_of_prompt = tuple(row)
                 key = (tool, session_id)
                 if event == "UserPromptSubmit":
-                    if text:
-                        last_prompt[key] = text
+                    if text and kind_of_prompt != "injected":
+                        last_prompt[key] = (text, kind_of_prompt)
                     continue
                 if not text or not text.strip():
                     continue
@@ -551,9 +641,10 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
                     )
                     if earlier:
                         seen |= note_refs
+                prompt_text, prompt_kind_ = last_prompt.get(key, (None, None))
                 kind = classify(
                     text, markers=marker_list,
-                    unattended=is_unattended(last_prompt.get(key), prefixes),
+                    unattended=kind_is_unattended(prompt_kind_, prompt_text, prefixes),
                     seen_refs=seen,
                 )
                 if not kind:

@@ -271,7 +271,8 @@ Mark a session's own triage state directly:
 agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
 ```
 
-A new prompt in a session that was marked `done` reopens it automatically.
+A new prompt in a session that was marked `done` reopens it automatically; a prompt Claude Code
+injected itself (a finished background task, another agent's message; see Updates) does not.
 
 A session can also reach `done` on its own, surfaced as `auto_done: true` with a `done_reason` in
 the snapshot; `done_reason: "manual"` and `auto_done: false` means a human marked it done:
@@ -507,7 +508,8 @@ dismiss them.
 The hook classifies each parent (non-subagent) `Stop` message with generic prose rules in
 `core/agentboard/notes.py`: a line starting with a marker (`USER_ACTION:` by default) is a
 `needs_you` note in any turn; in an *unattended* turn (its latest parent, non-subagent prompt
-starts with one of the configured prefixes, `# Autonomous loop` by default) a transient failure
+starts with one of the configured prefixes, `# Autonomous loop` by default, or is one of the
+session's scheduled crons) a transient failure
 (`API Error`, `Request timed out`, ...) is an `error` note, idle and progress one-liners are
 dropped, and a milestone (an `owner/repo#N` or `PR #N`, merged, approved, CI red/green, pushed,
 opened, deployed, blocked, a URL, ...) or any message of 300+ characters is an `update` note.
@@ -542,12 +544,25 @@ references already seen ("Tick: PR #4 is in hand; the plan is ready for your rev
 ordinals such as "step #2" are not references. A
 repeat of an open note (same session, same kind, same first 200 characters once timestamps, clock
 times, durations and tick counts are ignored; errors compare their first line only) bumps its count
-(shown as `×N`) instead of adding a row; a repeat of a dismissed note starts a new one. Both knobs
-live in `config.json`, and those are the only ones:
+(shown as `×N`) instead of adding a row; a repeat of a dismissed note starts a new one.
+
+**Injected prompts are not replies.** Claude Code starts some turns itself: a background task
+finishing (`<task-notification>`), a message from another agent (`<agent-message ...>`) or
+another session (`<cross-session-message ...>`). The hook records each parent prompt's kind
+(`human`, `loop`, `cron` or `injected`, by `prompt_injected_prefixes`). An injected prompt still
+makes the session `running` (Claude works on it), but it is not you answering: it does not reopen
+a session you marked done, release an open `needs_you` note, turn a loop session into an attended
+one (the turn keeps the kind of the prompt before it), count toward retitling, or replace the
+session's first/last prompt. The knobs live in `config.json`, and those are the only ones:
 
 ```json
-{"note_markers": ["USER_ACTION:"], "note_unattended_prefixes": ["# Autonomous loop"]}
+{"note_markers": ["USER_ACTION:"], "note_unattended_prefixes": ["# Autonomous loop"],
+ "prompt_injected_prefixes": ["<task-notification>", "<agent-message", "<cross-session-message"]}
 ```
+
+After changing `note_unattended_prefixes` or `prompt_injected_prefixes`, run `agentboard notes
+--rebuild --reset` so the recorded prompts are re-classified and the notes replayed under the new
+lists.
 
 Anything can also add a note directly:
 
@@ -569,6 +584,8 @@ it cannot. Inbox drop files and provider rows take the same shape in an optional
 
 `notes --rebuild` replays the `Stop` messages already in the `events` table from before the notes
 table existed (`install.sh` runs it after its backfill step), and a second run imports nothing.
+Each rebuild first classifies any recorded prompt that has no kind yet; `--reset` re-classifies
+all of them with the current prefix lists (keeping a prompt the hook recorded as a cron tick).
 `--rebuild --days N` imports only the last N days, but still marks the older events as replayed, so
 a later plain `--rebuild` skips them; only `--reset` revisits them. `--rebuild --reset` re-applies
 changed rules: it drops the open notes it made itself (never dismissed ones, never ones added by
@@ -647,6 +664,7 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
 | `automation_logins` | list of strings | none | GitHub logins (a reviewer bot, an author bot) whose reviews and comments are not a response from you when deciding whether a PR awaits your review. |
 | `note_markers` | list of strings | `["USER_ACTION:"]` | A final-message line starting with one of these becomes a `needs_you` note; `[]` turns marker detection off. |
 | `note_unattended_prefixes` | list of strings | `["# Autonomous loop"]` | A turn whose prompt starts with one of these is unattended (loop) work. |
+| `prompt_injected_prefixes` | list of strings | `["<task-notification>", "<agent-message", "<cross-session-message"]` | A prompt starting with one of these was injected by Claude Code (a finished background task, another agent's or session's message): it counts as activity but never as you replying. |
 | `retitle_command` | argv list, string, or `null` | the local `claude` CLI with Haiku | Reads a session's recent context on stdin and prints a new title; `null` turns retitling off. |
 | `retitle_min_prompts` | integer >= 1 | `5` | New prompts since the last retitle before a session is retitled again. |
 | `retitle_max_per_run` | integer >= 0 | `5` | At most this many sessions retitled per `refresh-links`; `0` turns it off. |
@@ -659,6 +677,7 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
   "automation_logins": ["my-reviewer-bot"],
   "note_markers": ["USER_ACTION:"],
   "note_unattended_prefixes": ["# Autonomous loop"],
+  "prompt_injected_prefixes": ["<task-notification>", "<agent-message", "<cross-session-message"],
   "retitle_min_prompts": 5,
   "retitle_max_per_run": 5,
   "log_level": "info"

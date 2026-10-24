@@ -59,7 +59,7 @@ enum HelpContent {
         blocks: [
             .paragraph("Each session is in exactly one state. The rules are checked in this order and the first that applies wins: **Done**, **Snoozed**, **Needs you**, **Interrupted**, **Review**, **Running**, **Unconcluded**. The row's dot, the title color and the dashboard sidebar all follow the state."),
             .keyValue([
-                HelpRow(key: "Done (gray)", value: "You marked it done, or it finished on its own (see below). Out of sight in the popover unless you search; listed under Done in the dashboard. A new prompt in a session you marked done reopens it."),
+                HelpRow(key: "Done (gray)", value: "You marked it done, or it finished on its own (see below). Out of sight in the popover unless you search; listed under Done in the dashboard. A new prompt in a session you marked done reopens it (a prompt Claude Code injects itself, such as a finished background task's notification, does not)."),
                 HelpRow(key: "Snoozed (gray)", value: "Hidden for a while with **Snooze 1 Day** (or `agentboard mark … snooze --hours N`). It comes back on its own when the snooze runs out."),
                 HelpRow(key: "Needs you (red)", value: "The session is blocked on you: a permission prompt, a question or input request, a turn that failed, or an open **needs_you** update that no newer prompt has answered. The reason (the tool asking, the message) is the row's last line."),
                 HelpRow(key: "Interrupted (orange)", value: "It was working, but its process died or nothing happened for 30 minutes. After 24 hours it becomes Unconcluded."),
@@ -137,7 +137,8 @@ enum HelpContent {
                 HelpRow(key: "Error (red triangle)", value: "A transient failure in an unattended turn: an API error, a timeout."),
                 HelpRow(key: "Update (info)", value: "A milestone in an unattended turn: a PR or issue opened, merged, approved or deployed, CI red or green, something pushed or blocked, a link, or any message of 300 or more characters."),
             ]),
-            .paragraph("A turn is **unattended** when its prompt starts with one of the configured prefixes (`# Autonomous loop` by default). Both the marker and the prefixes are set in config.json (`note_markers`, `note_unattended_prefixes`)."),
+            .paragraph("A turn is **unattended** when its prompt starts with one of the configured prefixes (`# Autonomous loop` by default) or is one of the session's scheduled crons. Both the marker and the prefixes are set in config.json (`note_markers`, `note_unattended_prefixes`)."),
+            .paragraph("Some turns are started by Claude Code itself: a background task finishing (`<task-notification>`), a message from another agent or session (`<agent-message …>`, `<cross-session-message …>`). Such an **injected** prompt keeps the session Running while Claude works on it, but it is not you replying: it does not reopen a session you marked done, release a needs_you update, make a loop session attended or count toward retitling. The prefixes are `prompt_injected_prefixes` in config.json; after changing them (or `note_unattended_prefixes`), run `agentboard notes --rebuild --reset`."),
             .heading("What counts as quiet"),
             .bullets([
                 "A message that starts with idle wording (“Quiet”, “Idle”, “Nothing changed”, “No changes”, “Still waiting”, “Standing by”, “Awaiting”) is dropped, however long it is.",
@@ -326,6 +327,7 @@ enum HelpContent {
                 HelpRow(key: "`automation_logins`", value: "List of GitHub logins, default none. Extra accounts (a reviewer bot, an author bot) whose reviews and comments are not a response from you when deciding whether a PR awaits your review."),
                 HelpRow(key: "`note_markers`", value: "List of strings, default `[\"USER_ACTION:\"]`. A final-message line starting with one of these becomes a needs_you update. An empty list turns marker detection off."),
                 HelpRow(key: "`note_unattended_prefixes`", value: "List of strings, default `[\"# Autonomous loop\"]`. A turn whose prompt starts with one of these is unattended: its errors and milestones become updates, and an idle loop session stays Running."),
+                HelpRow(key: "`prompt_injected_prefixes`", value: "List of strings, default `[\"<task-notification>\", \"<agent-message\", \"<cross-session-message\"]`. A prompt starting with one of these was injected by Claude Code (a finished background task, another agent's or session's message): it keeps the session Running but never counts as you replying."),
                 HelpRow(key: "`retitle_command`", value: "Argv list or shell-style string, or `null`. Default: the local `claude` CLI with Haiku, when installed. Reads a session's recent context on stdin and prints a new title. `null` turns retitling off."),
                 HelpRow(key: "`retitle_min_prompts`", value: "Integer ≥ 1, default `5`. New prompts since the last retitle before a session is retitled again."),
                 HelpRow(key: "`retitle_max_per_run`", value: "Integer ≥ 0, default `5`. At most this many sessions retitled per `refresh-links`; `0` turns it off."),
@@ -339,6 +341,7 @@ enum HelpContent {
               "automation_logins": ["my-reviewer-bot"],
               "note_markers": ["USER_ACTION:"],
               "note_unattended_prefixes": ["# Autonomous loop"],
+              "prompt_injected_prefixes": ["<task-notification>", "<agent-message", "<cross-session-message"],
               "retitle_min_prompts": 5,
               "retitle_max_per_run": 5,
               "log_level": "info"
@@ -425,7 +428,7 @@ enum HelpContent {
                 HelpRow(key: "A PR still “awaits your review”", value: "Only a review or comment by someone other than automation counts. If a bot account of yours is answering, it is ignored only when it is a GitHub bot or listed in `automation_logins`; if you share one account with the session, respond while the session is idle."),
                 HelpRow(key: "Stale titles", value: "Titles are refreshed by `refresh-links` after 5 new prompts or a branch change, if the `claude` CLI is installed. Name a session yourself with `/rename` or `agentboard title --text`."),
                 HelpRow(key: "Clicking a row focuses the wrong tab", value: "Run `agentboard logs --grep cli.focus --lines 5` and read the `outcome`. Focus works with iTerm2 and Apple Terminal and may need the Automation permission for them (System Settings → Privacy & Security → Automation)."),
-                HelpRow(key: "Too many or too few updates", value: "Adjust `note_markers` and `note_unattended_prefixes` in config.json, then run `agentboard notes --rebuild --reset`."),
+                HelpRow(key: "Too many or too few updates", value: "Adjust `note_markers`, `note_unattended_prefixes` and `prompt_injected_prefixes` in config.json, then run `agentboard notes --rebuild --reset`."),
                 HelpRow(key: "Menu bar icon stays red", value: "A session still needs you, or an open needs_you update has not been answered by a newer prompt. Open the popover, then answer the session or dismiss the update."),
             ]),
         ])
