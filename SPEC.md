@@ -70,7 +70,9 @@ SubagentStart/SubagentStop after the parent's turn ended (last_event Stop, Inter
 relevant Notification, PermissionRequest, StopFailure or a needs_you tool) keeps that
 last_event, and a kept finished turn keeps its `last_event_at`. A `SessionStart` with
 `source` `compact`, or `resume` while the session has not ended, keeps the session's
-`last_event`/`waiting_reason` (the event row is still recorded). A parent Stop stores the
+`last_event`/`waiting_reason` (the event row is still recorded), and so does a parent
+`PreCompact`/`PostCompact` after the turn ended (a `/compact` at an idle prompt); mid-turn
+they are activity as before. A parent Stop stores the
 count and `type` labels of its `background_tasks` still in flight (status not terminal) and
 the count and prompts of its `session_crons`; a tagged SubagentStop after the turn removes one
 `subagent` entry.
@@ -149,8 +151,9 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
    ties (see Liveness), only while the process is alive: `idle` turns an activity event, or an
    unknown last event (SessionStart, a SessionEnd a resume un-ended), into a finished turn
    (read as Stop); `busy` turns a finished or unknown one into `running`.
-   SessionStart never changes state on compaction, nor on resume of a live session (the hook
-   keeps the previous last_event).
+   SessionStart never changes state on compaction, nor on resume of a live session, and a
+   PreCompact/PostCompact after a finished turn does not either (the hook keeps the previous
+   last_event).
 5. `review`, "PR #N awaits your review" — the session owns a PR that awaits the user (see
    Links: owned, OPEN, no human response yet), live or ended, ahead of every done rule. When
    the PR's author is the active gh login the reason reads "PR #N open, no response yet".

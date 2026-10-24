@@ -74,7 +74,7 @@ enum HelpContent {
                 "**The headline of an open update**: an `update` note newer than your last prompt and under a day old (a loop session reporting a milestone).",
                 "**Your turn: <first line of its last message>**: an attended session stopped and is waiting for your next prompt, within 24 hours of the end of that turn. An interrupted turn reads **Interrupted: your turn**.",
             ]),
-            .paragraph("A background agent finishing after a turn, and a compaction (or resuming a live session), never change a session's state. For a live Claude session AgentBoard also reads Claude Code's own `~/.claude/sessions/<pid>.json` status when it is newer than the last hook event: **idle** turns a stale activity event into a finished turn, **busy** makes a finished one Running. Other statuses carry no signal."),
+            .paragraph("A background agent finishing after a turn, and a compaction (including a `/compact` typed at an idle prompt) or resuming a live session, never change a session's state. For a live Claude session AgentBoard also reads Claude Code's own `~/.claude/sessions/<pid>.json` status when it is newer than the last hook event: **idle** turns a stale activity event into a finished turn, **busy** makes a finished one Running. Other statuses carry no signal."),
             .heading("Sessions that finish on their own"),
             .paragraph("A session can reach Done by itself. Its row then shows a small **auto** badge whose tooltip gives the reason:"),
             .keyValue([

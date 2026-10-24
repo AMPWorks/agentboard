@@ -7,12 +7,13 @@ import subprocess
 import sys
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentboard import hook
+from agentboard import hook, reconcile
 from tests.helpers import AgentBoardTestCase
 
 
@@ -869,6 +870,50 @@ class HookProcessPayloadTests(AgentBoardTestCase):
         late = self._at("SessionStart", source="compact")
         row = self._session_row()
         self.assertEqual(row["last_event"], "PreToolUse")
+        self.assertEqual(row["last_event_at"], late)
+
+    def test_idle_compaction_keeps_the_finished_turn(self):
+        # A /compact typed at an idle prompt: Stop -> PreCompact ->
+        # PostCompact -> SessionStart(compact) must still read as Your turn.
+        self._at("UserPromptSubmit", prompt="go")
+        stop_ts = self._at("Stop", last_assistant_message="All done.")
+        self._at("PreCompact", trigger="manual")
+        self._at("PostCompact", trigger="manual")
+        late = self._at("SessionStart", source="compact")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertIsNone(row["waiting_reason"])
+        self.assertEqual(row["last_event_at"], stop_ts)
+        self.assertEqual(row["updated_at"], late)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE event IN ('PreCompact', 'PostCompact')"
+            ).fetchone()[0], 2,
+            "the compaction event rows are still recorded",
+        )
+        now = datetime.fromisoformat(late.replace("Z", "+00:00")) + timedelta(minutes=1)
+        state, reason, _auto_done, _done_reason = reconcile.compute_state(
+            dict(row), None, [], now=now, alive=True
+        )
+        self.assertEqual(state, "review")
+        self.assertTrue(reason.startswith("Your turn"), reason)
+
+    def test_idle_compaction_keeps_needs_you(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("PermissionRequest", tool_name="Bash")
+        before = self._session_row()
+        self._at("PreCompact", trigger="auto")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "PermissionRequest")
+        self.assertEqual(row["waiting_reason"], before["waiting_reason"])
+        self.assertEqual(row["last_event_at"], before["last_event_at"])
+
+    def test_mid_turn_compaction_refreshes_last_event_at(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("PreToolUse", tool_name="Bash")
+        late = self._at("PreCompact", trigger="auto")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "PreCompact")
         self.assertEqual(row["last_event_at"], late)
 
     def test_resume_session_start_keeps_a_finished_turn(self):

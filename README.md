@@ -255,8 +255,8 @@ crons its last Stop listed in `session_crons`) idling between ticks is not waiti
 `running` with "Loop idle between ticks" while its process is alive. A session whose last Stop
 listed background tasks still in flight (Claude Code's `background_tasks`: subagents, shells,
 monitors, ...) is `running` with "Waiting on N background task(s): <types>" until they finish,
-then "Your turn". A background agent finishing after the turn, and a compaction (or a resume of
-a live session), never change a session's state.
+then "Your turn". A background agent finishing after the turn, and a compaction (including a
+`/compact` typed at an idle prompt) or a resume of a live session, never change a session's state.
 
 Claude Code also writes `~/.claude/sessions/<pid>.json` with a `busy`/`idle` status; AgentBoard
 reads it for every live Claude session as a tie-breaker when it is newer than the last hook

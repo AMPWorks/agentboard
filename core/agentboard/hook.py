@@ -112,6 +112,13 @@ FINISHED_TURN_EVENTS = {
     "PermissionRequest", "StopFailure", NEEDS_YOU_TOOL_SENTINEL,
 }
 
+# Compaction events. A parent one is activity mid-turn, but a /compact
+# typed at an idle prompt (Stop -> PreCompact -> PostCompact ->
+# SessionStart compact) must not erase the finished turn, so when the row's
+# last_event is in FINISHED_TURN_EVENTS the hook keeps it (see
+# process_payload).
+COMPACTION_EVENTS = {"PreCompact", "PostCompact"}
+
 # SessionStart sources that continue the same conversation rather than
 # start a new one: they never change a session's state (resume only while
 # the session has not ended; see process_payload).
@@ -866,8 +873,14 @@ def process_payload(conn, tool: str, payload: dict) -> None:
             and row_last_event is not None
             and (source == "compact" or row_last_event != "SessionEnd")
         )
+        # A compaction at an idle prompt keeps the finished turn; mid-turn
+        # it is activity as before.
+        compaction_after_turn = (
+            not is_subagent_tagged and event in COMPACTION_EVENTS and row_finished
+        )
         keep_state = (
-            is_subagent_tagged or irrelevant_notification or marker_after_turn or continued_start
+            is_subagent_tagged or irrelevant_notification or marker_after_turn
+            or continued_start or compaction_after_turn
         )
 
         new_last_event_at = now
