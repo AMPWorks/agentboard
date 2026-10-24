@@ -496,6 +496,33 @@ class UpsertBackfillSessionTests(AgentBoardTestCase):
         self.assertEqual(row["title"], "backfill title")
         self.assertEqual(row["interactive"], 0)
 
+    def test_backfill_restores_interactive_when_transcript_has_a_prompt(self):
+        # The hook marked a prompt-less SessionEnd as a helper; the transcript
+        # shows a real first prompt (hooks installed mid-way).
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, origin, interactive) "
+            "VALUES ('claude','s1','hook',0), ('claude','s2','hook',0)"
+        )
+        fields = {
+            "cwd": "/tmp", "branch": None, "title": None, "first_prompt": "fix the bug",
+            "last_prompt": None, "last_assistant": None, "started_at": None,
+            "updated_at": None, "last_event": None, "last_event_at": None,
+            "transcript_path": None, "interactive": 1,
+        }
+        backfill.upsert_backfill_session(self.conn, "claude", "s1", fields)
+        # No prompt in the transcript either: it stays a helper.
+        backfill.upsert_backfill_session(self.conn, "claude", "s2",
+                                         dict(fields, first_prompt=None))
+        rows = dict(self.conn.execute(
+            "SELECT session_id, interactive FROM sessions ORDER BY session_id").fetchall())
+        self.assertEqual(rows, {"s1": 1, "s2": 0})
+        # An sdk-cli transcript parses as interactive 0 and never flips it.
+        self.conn.execute("UPDATE sessions SET interactive=0 WHERE session_id='s1'")
+        backfill.upsert_backfill_session(self.conn, "claude", "s1",
+                                         dict(fields, interactive=0))
+        self.assertEqual(self.conn.execute(
+            "SELECT interactive FROM sessions WHERE session_id='s1'").fetchone()[0], 0)
+
     def test_corrects_legacy_head_branch_on_hook_origin_row(self):
         self.conn.execute(
             "INSERT INTO sessions(tool, session_id, cwd, branch, title, origin, interactive) "

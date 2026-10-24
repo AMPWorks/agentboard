@@ -55,7 +55,7 @@ Registered for every event in both tools. Requirements:
   `AGENTBOARD_HOOK_SKIP` is set (AgentBoard's own retitle command) the hook records nothing.
 - Capture from env: `ITERM_SESSION_ID`, `TERM_PROGRAM`, `TERM_SESSION_ID`. Capture
   `os.getppid()` as the agent process pid (verify: for Claude the hook's parent may be a shell
-  spawned by claude; walk up with `ps -o ppid= -p` at most 3 levels to find a process whose
+  spawned by claude; walk up with `ps -o ppid= -p` at most 5 levels to find a process whose
   command contains `claude` or `codex`; record that pid).
 - Insert into `events`; upsert `sessions`.
 

@@ -613,6 +613,20 @@ def _is_known_bad_value(col, value):
     return False
 
 
+def _restores_interactive(col, current, new_value, values) -> bool:
+    """True when a re-parse may flip a hook-origin row's interactive 0 back
+    to 1 (a documented exception, like _is_known_bad_value): the hook marks
+    a session that ended with no prompt as a helper (interactive=0), but if
+    its hooks were installed mid-way the transcript can still show a real
+    first prompt. The parse already sets 0 for an sdk-cli entrypoint (and
+    a Codex exec rollout), so a parsed 1 with a first prompt is a real
+    interactive session."""
+    return (
+        col == "interactive" and current == 0 and new_value == 1
+        and bool(values.get("first_prompt"))
+    )
+
+
 # Title sources that only the user or an explicit retitle set, which a
 # transcript re-parse must not undo: "custom" yields only to a newer custom
 # title, "generated"/"cli" only to a custom one.
@@ -692,6 +706,9 @@ def upsert_backfill_session(conn, tool, session_id, fields: dict):
                     sets.append(f"{col}=?")
                     params.append(new_value)
             elif _is_known_bad_value(col, current):
+                sets.append(f"{col}=?")
+                params.append(new_value)
+            elif _restores_interactive(col, current, new_value, values):
                 sets.append(f"{col}=?")
                 params.append(new_value)
         if not sets:

@@ -53,8 +53,9 @@ ACTIVITY_EVENTS = {
     "PostCompact",
 }
 
-# Event names whose own occurrence always signals "running", even when
-# tagged with an agent_id (i.e. fired by a subagent).
+# Event names whose own occurrence signals "running", even when tagged
+# with an agent_id (i.e. fired by a subagent) -- unless the session's turn
+# is already over (see FINISHED_TURN_EVENTS).
 SUBAGENT_MARKER_EVENTS = {"SubagentStart", "SubagentStop"}
 
 NEEDS_YOU_NOTIFICATION_TYPES = {
@@ -79,6 +80,36 @@ NEEDS_YOU_TOOL_REASONS = {
 # NEEDS_YOU_TOOL_REASONS means the agent is waiting on the user. Never a
 # real hook_event_name, so it can't collide with one.
 NEEDS_YOU_TOOL_SENTINEL = "NeedsYouToolUse"
+
+# A session's last_event values that mean its turn is over: it stopped, was
+# interrupted, went idle or is waiting on the user. A Notification only
+# ever becomes last_event when it is relevant (idle_prompt or a needs_you
+# type, see _notification_is_relevant), so no type check is needed. The
+# needs_you members match reconcile.NEEDS_YOU_EVENTS (reconcile imports
+# from here, not the reverse). A subagent-tagged SubagentStart/SubagentStop
+# (a background agent finishing after the turn) never overwrites these, and
+# whenever the hook keeps one of them it also keeps last_event_at, the time
+# the turn ended.
+FINISHED_TURN_EVENTS = {
+    "Stop", "Interrupt", "Notification",
+    "PermissionRequest", "StopFailure", NEEDS_YOU_TOOL_SENTINEL,
+}
+
+# SessionStart sources that continue the same conversation rather than
+# start a new one: they never change a session's state (resume only while
+# the session has not ended; see process_payload).
+SESSION_START_KEEP_SOURCES = {"compact", "resume"}
+
+# Background task statuses (Stop's background_tasks[].status) that mean the
+# task is no longer in flight. The docs describe status only as "Current
+# task status" and list no values, so this set is defensive and an unknown
+# status counts as in flight.
+TERMINAL_TASK_STATUSES = {"completed", "failed", "killed", "stopped", "cancelled"}
+
+# Stored per cron: its prompt with whitespace collapsed, cut to this many
+# characters, and at most CRON_PROMPTS_MAX of them.
+CRON_PROMPT_CHARS = 200
+CRON_PROMPTS_MAX = 20
 
 # Slash commands handled entirely client-side (change CLI state, no model
 # turn, no response). Submitting one of these is not a real prompt.
@@ -335,6 +366,38 @@ def _extract_extra(payload: dict) -> dict:
     return extra
 
 
+def _background_info(payload: dict):
+    """(count, types, cron_count, cron_prompts) from a Stop payload's
+    background_tasks / session_crons arrays. A missing (or malformed) array
+    gives None for its pair: older Claude Code sends neither. The count and
+    types cover only tasks whose status is not terminal; types keep one
+    label per task, duplicates included, so a finished subagent can remove
+    exactly one."""
+    count = types = cron_count = cron_prompts = None
+    tasks = payload.get("background_tasks")
+    if isinstance(tasks, list):
+        types = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status") or "").strip().lower()
+            if status in TERMINAL_TASK_STATUSES:
+                continue
+            types.append(str(task.get("type") or "task"))
+        count = len(types)
+    crons = payload.get("session_crons")
+    if isinstance(crons, list):
+        cron_count = len(crons)
+        cron_prompts = []
+        for cron in crons:
+            prompt = cron.get("prompt") if isinstance(cron, dict) else None
+            if isinstance(prompt, str) and prompt.strip():
+                cron_prompts.append(" ".join(prompt.split())[:CRON_PROMPT_CHARS])
+            if len(cron_prompts) >= CRON_PROMPTS_MAX:
+                break
+    return count, types, cron_count, cron_prompts
+
+
 def _notification_is_relevant(payload: dict) -> bool:
     return payload.get("notification_type") in RELEVANT_NOTIFICATION_TYPES
 
@@ -518,6 +581,24 @@ def _record_stop_note(conn, tool, session_id, text, now, event_id) -> None:
               exc=type(exc).__name__, msg=str(exc))
 
 
+def _drop_background_subagent(conn, tool, session_id, row) -> None:
+    """Remove one "subagent" entry from the session's background_types and
+    decrement background_tasks (floor 0), only if an entry was removed."""
+    try:
+        types = json.loads(row["background_types"] or "[]")
+    except (TypeError, ValueError):
+        return
+    if not isinstance(types, list) or "subagent" not in types:
+        return
+    types.remove("subagent")
+    count = max(0, (row["background_tasks"] or 0) - 1)
+    conn.execute(
+        "UPDATE sessions SET background_tasks=?, background_types=? "
+        "WHERE tool=? AND session_id=?",
+        (count, json.dumps(types), tool, session_id),
+    )
+
+
 def process_payload(conn, tool: str, payload: dict) -> None:
     """Record one hook event. Raises on error; caller must swallow it."""
     event = payload.get("hook_event_name") or payload.get("event") or ""
@@ -548,6 +629,15 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         text = _truncate(payload.get("error_message") or payload.get("reason"))
 
     extra = _extract_extra(payload)
+
+    # A parent Stop lists what is still in flight (background tasks) and
+    # scheduled (crons); both are stored on the session below.
+    background = _background_info(payload) if event == "Stop" and not agent_id else None
+    if background is not None:
+        if background[0] is not None:
+            extra["background_tasks"] = background[0]
+        if background[2] is not None:
+            extra["session_crons"] = background[2]
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -610,9 +700,37 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         irrelevant_notification = event == "Notification" and not _notification_is_relevant(payload)
         needs_you_tool_reason = _needs_you_tool_reason(event, tool_name)
 
-        if is_subagent_tagged or irrelevant_notification:
-            new_last_event = row["last_event"] if row else None
+        row_last_event = row["last_event"] if row else None
+        # A background subagent starting or finishing after the turn ended
+        # does not make the session busy again.
+        marker_after_turn = (
+            bool(agent_id) and event in SUBAGENT_MARKER_EVENTS
+            and row_last_event in FINISHED_TURN_EVENTS
+        )
+        # Compaction (and resuming a live session) continues the same
+        # conversation; resuming after a SessionEnd records SessionStart,
+        # since keeping SessionEnd once `resumed` clears ended_at would
+        # read as nothing at all.
+        source = payload.get("source") if event == "SessionStart" else None
+        continued_start = (
+            row is not None and not is_subagent_tagged
+            and source in SESSION_START_KEEP_SOURCES
+            and (source == "compact" or row_last_event != "SessionEnd")
+        )
+        keep_state = (
+            is_subagent_tagged or irrelevant_notification or marker_after_turn or continued_start
+        )
+
+        new_last_event_at = now
+        if keep_state:
+            new_last_event = row_last_event
             new_waiting_reason = row["waiting_reason"] if row else None
+            # A kept finished turn keeps the time it finished; a kept
+            # activity event (a subagent working mid-turn, a mid-turn
+            # compaction) keeps advancing it, since it is compute_state's
+            # freshness signal when liveness is unknown.
+            if row is not None and row_last_event in FINISHED_TURN_EVENTS:
+                new_last_event_at = row["last_event_at"] or now
         elif needs_you_tool_reason is not None:
             new_last_event = NEEDS_YOU_TOOL_SENTINEL
             new_waiting_reason = needs_you_tool_reason
@@ -620,8 +738,10 @@ def process_payload(conn, tool: str, payload: dict) -> None:
             new_last_event = event
             new_waiting_reason = _extract_waiting_reason(event, payload)
 
-        first_prompt = prompt_text if event == "UserPromptSubmit" else None
-        last_prompt = _truncate(prompt_text) if event == "UserPromptSubmit" else None
+        # A subagent's own prompt is not the session's.
+        sets_prompt = event == "UserPromptSubmit" and not is_subagent_tagged
+        first_prompt = prompt_text if sets_prompt else None
+        last_prompt = _truncate(prompt_text) if sets_prompt else None
         last_assistant = text if event == "Stop" else None
         ended_at = now if event == "SessionEnd" else None
         end_reason = payload.get("reason") if event == "SessionEnd" else None
@@ -700,7 +820,7 @@ def process_payload(conn, tool: str, payload: dict) -> None:
                     last_assistant,
                     now,
                     new_last_event,
-                    now,
+                    new_last_event_at,
                     new_waiting_reason,
                     pid,
                     iterm_session_id,
@@ -713,6 +833,42 @@ def process_payload(conn, tool: str, payload: dict) -> None:
                     tool,
                     session_id,
                 ),
+            )
+
+        if background is not None:
+            # Every parent Stop rewrites all four, so a missing array (older
+            # Claude Code) reads as unknown rather than a stale count.
+            count, types, cron_count, cron_prompts = background
+            conn.execute(
+                "UPDATE sessions SET background_tasks=?, background_types=?, "
+                "session_crons=?, cron_prompts=? WHERE tool=? AND session_id=?",
+                (
+                    count,
+                    json.dumps(types) if types is not None else None,
+                    cron_count,
+                    json.dumps(cron_prompts) if cron_prompts is not None else None,
+                    tool,
+                    session_id,
+                ),
+            )
+        elif marker_after_turn and event == "SubagentStop":
+            # A background subagent finished: one fewer in flight. A
+            # SubagentStop of a workflow/teammate task changes neither
+            # until the next parent Stop rewrites both.
+            _drop_background_subagent(conn, tool, session_id, row)
+
+        if (
+            event == "SessionEnd" and not is_subagent_tagged
+            and (row is None or row["first_prompt"] is None)
+        ):
+            # A session that ends without ever being prompted is a helper
+            # (an SDK or tool-spawned run), not something to show.
+            conn.execute(
+                "UPDATE sessions SET interactive=0 WHERE tool=? AND session_id=? "
+                "AND first_prompt IS NULL AND NOT EXISTS ("
+                "  SELECT 1 FROM events WHERE tool=? AND session_id=? "
+                "  AND agent_id IS NULL AND event='UserPromptSubmit')",
+                (tool, session_id, tool, session_id),
             )
 
         if is_daemon:
@@ -749,7 +905,9 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         tty=tty, daemon=is_daemon, subagent=is_subagent_tagged,
         ignored=(
             "subagent" if is_subagent_tagged
-            else "irrelevant_notification" if irrelevant_notification else None
+            else "irrelevant_notification" if irrelevant_notification
+            else "after_turn" if marker_after_turn
+            else f"session_start_{source}" if continued_start else None
         ),
         term=term_program,
     )

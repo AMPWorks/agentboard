@@ -199,7 +199,7 @@ It targets well under 50 ms per call. The only things that ever shell out are:
   50 ms budget). The branch is re-read on `SessionStart` / `UserPromptSubmit` and on the parent
   `Stop` / `SessionEnd` (so a branch created mid-turn is seen once the session goes idle or
   exits), or whenever a session's branch is still unknown.
-- A short, targeted `ps` walk (at most 3 hops) to find the actual `claude`/`codex` process above
+- A short, targeted `ps` walk (at most 5 hops) to find the actual `claude`/`codex` process above
   the hook's immediate parent, recorded once per session the same way the branch is.
 
 Install/remove the hooks with:
