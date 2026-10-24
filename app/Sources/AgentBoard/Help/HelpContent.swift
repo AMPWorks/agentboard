@@ -101,6 +101,8 @@ enum HelpContent {
                 HelpRow(key: "Snoozed, Done", value: "Only while you search, at the bottom."),
             ]),
             .paragraph("Within a section the most recently updated session comes first."),
+            .heading("Status banner"),
+            .paragraph("A colored line under the search field (and at the top of the dashboard's session list) appears only when something is wrong. **Snapshot failed** (red) means the `agentboard` CLI or its database could not be read; the board keeps showing the last good snapshot until the next one succeeds. **Waiting on the CLI for N s** means a snapshot has been running for over 30 seconds; **No snapshot yet; the CLI is not answering** means nothing has come back since launch. **<action> failed** reports a click that did not work (mark, focus, dismiss) and goes away after 15 seconds or with its x. **Open log** reveals `agentboard.log`, which has the details. The banner never changes the menu bar icon."),
             .heading("A session row"),
             .bullets([
                 "The **dot** is the state color (hover for the color key), and the round **C** or **X** badge is the tool (Claude Code or Codex).",
@@ -308,6 +310,7 @@ enum HelpContent {
             .keyValue([
                 HelpRow(key: "Verbose logging", value: "Off by default. Also logs every background snapshot and the CLI's debug detail (it passes `AGENTBOARD_LOG_LEVEL=debug` to every CLI call). Key `verboseLogging`."),
                 HelpRow(key: "Open log", value: "Reveals `agentboard.log` in Finder (also in the gear menu as **Open Log**)."),
+                HelpRow(key: "hook-errors.log", value: "Shown only when the hooks have recorded a failure: its size, when it was last written, and **Reveal** to show it in Finder."),
             ]),
             .paragraph("Settings that change what the CLI records or detects (update markers, PR automation accounts, retitling, the log level) live in config.json instead: see **config.json reference**."),
         ])
@@ -418,7 +421,10 @@ enum HelpContent {
                 "The app logs every CLI call to the macOS unified log (subsystem `io.github.agentboard`).",
                 "**Open Log** (gear menu, or Settings → Diagnostics) reveals the log in Finder; `agentboard logs` prints it, and `agentboard logs --app` merges the app's lines in.",
                 "**Verbose logging** in Settings → Diagnostics turns on debug detail for both the app and the CLI. Without the app, set `AGENTBOARD_LOG_LEVEL=debug` or `\"log_level\": \"debug\"` in config.json.",
+                "Settings → Diagnostics shows a **hook-errors.log** row, with **Reveal**, only when that file is not empty.",
             ]),
+            .heading("The status banner"),
+            .paragraph("When the popover or dashboard shows **Snapshot failed: …**, the `agentboard` CLI or the database is unreadable (a missing CLI, a moved data directory, a full or failing disk); the sessions shown are the last good snapshot. **Waiting on the CLI for N s** or **No snapshot yet** means the CLI is hanging. Click **Open log** and look at the latest `cli.error` or `cli.end … exit=` lines, or run `agentboard snapshot` in a terminal to see the error directly. The banner clears by itself on the next successful snapshot."),
             .heading("Common problems"),
             .keyValue([
                 HelpRow(key: "No sessions shown", value: "Run `agentboard snapshot` in a terminal. If it lists nothing, the hooks are probably not installed: re-run `scripts/install.sh` (after installing Claude Code or Codex for the first time too). Sessions started before the hooks were installed appear after a backfill. Check **Show hidden** for non-interactive runs."),

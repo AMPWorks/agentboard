@@ -736,6 +736,15 @@ alone. Hooks log one `hook.event` line per event at debug (tool, event, session,
 subagent) and an info `hook.drop` line only when an event is really dropped (no `session_id`,
 empty or unparseable payload). `hook-errors.log` is unchanged and still records hook failures.
 
+**In the app.** A one-line banner under the popover's search field and at the top of the
+dashboard's session list appears only when something is wrong: **Snapshot failed: …** (the CLI or
+the database is unreadable; the last good snapshot stays on screen), **Waiting on the CLI for N s**
+(a snapshot has been running for over 30 seconds), **No snapshot yet; the CLI is not answering**
+(nothing has come back within 45 seconds of launch) or **<action> failed: …** (a mark, focus,
+dismiss or prune that did not work; it clears after 15 seconds or with its x). Its **Open log**
+button reveals `agentboard.log`. It never changes the menu bar icon. Settings → Diagnostics adds a
+`hook-errors.log` row (size, last write, **Reveal**) when that file is not empty.
+
 **Levels.** `debug`, `info` (the default), `warn`, `error`. Set the level with the
 `AGENTBOARD_LOG_LEVEL` environment variable, or `"log_level": "debug"` in
 `$AGENTBOARD_HOME/config.json` (the variable wins). Because the app runs `snapshot` every 3 to

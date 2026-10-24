@@ -135,6 +135,9 @@ struct MenuBarView: View {
             .padding(.vertical, 5)
             .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
 
+            // CLI or database failures, right under the search bar.
+            StatusBannerView(store: store)
+
             if let notice = sections.hiddenNotice {
                 Text(notice)
                     .font(sections.noticeIsEmphasized ? .caption.bold() : .caption)
