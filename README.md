@@ -754,7 +754,9 @@ dashboard's session list appears only when something is wrong: **Snapshot failed
 the database is unreadable; the last good snapshot stays on screen), **Waiting on the CLI for N s**
 (a snapshot has been running for over 30 seconds), **No snapshot yet; the CLI is not answering**
 (nothing has come back within 45 seconds of launch) or **<action> failed: …** (a mark, focus,
-dismiss or prune that did not work; it clears after 15 seconds or with its x). Its **Open log**
+dismiss or prune that did not work; it clears after 15 seconds or with its x; a prune that fails
+at launch, usually because `install.sh`'s own backfill still holds the database, is only logged
+and retried once a minute later, and the banner shows only if the retry fails too). Its **Open log**
 button reveals `agentboard.log`. It never changes the menu bar icon. Settings → Diagnostics adds a
 `hook-errors.log` row (size, last write, **Reveal**) when that file is not empty.
 

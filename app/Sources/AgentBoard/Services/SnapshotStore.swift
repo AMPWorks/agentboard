@@ -155,9 +155,18 @@ final class SnapshotStore: ObservableObject {
         linksTask = Task { [weak self] in
             await self?.runInitialBackfill()
             guard !Task.isCancelled else { return }
-            await self?.prune()
+            // The launch prune most often fails because install.sh's own
+            // backfill still holds the write lock; log it, retry once after
+            // refresh-links, and only show the banner if that fails too.
+            let launchPruneOK = await self?.prune(showError: false) ?? true
             var lastPrune = Date()
             await self?.refreshLinks()
+            if !launchPruneOK {
+                try? await Task.sleep(for: .seconds(Self.pruneLaunchRetryDelay))
+                guard !Task.isCancelled else { return }
+                await self?.prune()
+                lastPrune = Date()
+            }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.linksInterval))
                 guard !Task.isCancelled else { return }
@@ -228,13 +237,20 @@ final class SnapshotStore: ObservableObject {
     /// How often the app asks for `prune --auto`; the CLI's own 24 h gate
     /// decides whether anything runs.
     static let pruneInterval: TimeInterval = 6 * 3600
+    /// How long the launch prune waits before its one retry.
+    static let pruneLaunchRetryDelay: TimeInterval = 60
 
-    private func prune() async {
+    /// Runs `prune --auto`; returns whether it succeeded. A failure is always
+    /// logged, and shown in the banner unless `showError` is false.
+    @discardableResult
+    private func prune(showError: Bool = true) async -> Bool {
         do {
             try await cli.prune()
+            return true
         } catch {
-            recordActionError("Prune", error)
             log.error("prune failed: \(error.localizedDescription, privacy: .public)")
+            if showError { recordActionError("Prune", error) }
+            return false
         }
     }
 
