@@ -328,6 +328,8 @@ enum HelpContent {
                 HelpRow(key: "`retitle_command`", value: "Argv list or shell-style string, or `null`. Default: the local `claude` CLI with Haiku, when installed. Reads a session's recent context on stdin and prints a new title. `null` turns retitling off."),
                 HelpRow(key: "`retitle_min_prompts`", value: "Integer ≥ 1, default `5`. New prompts since the last retitle before a session is retitled again."),
                 HelpRow(key: "`retitle_max_per_run`", value: "Integer ≥ 0, default `5`. At most this many sessions retitled per `refresh-links`; `0` turns it off."),
+                HelpRow(key: "`prune_days`", value: "Integer ≥ 0, default `90`. The daily `prune` deletes sessions idle this many days, with their events, links and updates, and dismissed updates older than this. A session with an open needs_you update, a PR awaiting you, an active snooze or a live process is never deleted. `0` never deletes."),
+                HelpRow(key: "`compact_days`", value: "Integer ≥ 0, default `7`. The daily `prune` deletes tool-use and subagent events older than this many days (prompts, replies and session start and end are kept). `0` never compacts."),
                 HelpRow(key: "`log_level`", value: "`debug`, `info`, `warn` or `error`, default `info`. The diagnostic log's level; the `AGENTBOARD_LOG_LEVEL` environment variable wins over it."),
             ]),
             .heading("Example"),
@@ -340,6 +342,8 @@ enum HelpContent {
               "note_unattended_prefixes": ["# Autonomous loop"],
               "retitle_min_prompts": 5,
               "retitle_max_per_run": 5,
+              "prune_days": 90,
+              "compact_days": 7,
               "log_level": "info"
             }
             """#),
@@ -381,7 +385,7 @@ enum HelpContent {
             .keyValue([
                 HelpRow(key: "`agentboard backfill`", value: "Import Claude Code transcripts and Codex rollouts from the last `--days N` (default 30). Never overwrites what the hooks recorded. The hooks also run it with `--session TOOL:ID` and `--transcript PATH` to re-read one session."),
                 HelpRow(key: "`agentboard refresh-links`", value: "Read the inbox, run providers, look up GitHub PRs and their reviews, and retitle sessions. The only command that touches the network."),
-                HelpRow(key: "`agentboard prune`", value: "Delete sessions (and their events, links and updates) not updated in `--days N` (default 90)."),
+                HelpRow(key: "`agentboard prune`", value: "Delete sessions (and their events, links and updates) idle for `--days N` (config `prune_days`, default 90), except ones with an open needs_you update, a PR awaiting you, an active snooze or a live process; delete tool-use events older than `--compact-days N` (config `compact_days`, default 7) and dismissed updates older than `--days`. `0` means never for either (`--days 0` used to delete everything). `--dry-run` prints the counts only; `--auto` runs at most once a day (the app calls it) and vacuums when the file has grown sparse; `--vacuum` always vacuums afterwards."),
                 HelpRow(key: "`agentboard map-codex`", value: "Internal: match a Codex session to its rollout file (`--session`, `--cwd`, `--at`). The Codex hook runs it."),
             ]),
             .heading("Hooks"),
@@ -442,10 +446,12 @@ enum HelpContent {
                 HelpRow(key: "Hooks", value: "Entries in `~/.claude/settings.json` and `~/.codex/hooks.json`, backed up before every change."),
                 HelpRow(key: "App settings", value: "The macOS defaults domain `io.github.agentboard`."),
             ]),
+            .heading("How long it is kept"),
+            .paragraph("Once a day the app runs `agentboard prune --auto`. It deletes sessions idle for 90 days (`prune_days`) together with their events, links and updates, but never one that still has an open needs_you update, a PR awaiting you, an active snooze or a live process. Tool-use and subagent events, most of the database, are deleted after 7 days (`compact_days`) from every session; prompts, replies and session start and end stay. Dismissed updates go after `prune_days`. When enough space is free the database is vacuumed, at most once a week. Set either value to `0` in config.json to keep everything."),
             .paragraph("Besides its own data directory, AgentBoard reads only Claude Code's and Codex's files under `~/.claude` and `~/.codex` (transcripts, the session registry) and each session's git branch."),
             .heading("Network"),
             .paragraph("Only `agentboard refresh-links` uses the network, and only through tools you set up: the GitHub CLI `gh` (PRs and their reviews), the provider commands in config.json, and the retitle command (by default the local `claude` CLI, which sends a short summary of a session's recent prompts and replies to the model). The snapshot the app polls never touches the network. Set `\"retitle_command\": null` to turn retitling off."),
             .heading("Removing AgentBoard"),
-            .paragraph("`scripts/uninstall.sh` removes the app, the installed CLI and only AgentBoard's own hook entries; any other hooks in `~/.claude/settings.json` and `~/.codex/hooks.json` are left as they are. When removing those entries leaves a file exactly as it was before the install, the original bytes are written back from the backup `install-hooks` made, so its formatting returns too; if the install created the file and nothing else is left in it, the file is deleted. A `hooks = true` that `enable-codex-hooks` added to an existing `~/.codex/config.toml` stays (its backup sits beside it); a `config.toml` that `enable-codex-hooks` created and that still holds nothing else is deleted. The data directory is kept unless you pass `--purge-data`. `--dry-run` previews; `--no-hooks` and `--no-app` skip parts. `agentboard prune --days N` deletes old sessions without uninstalling."),
+            .paragraph("`scripts/uninstall.sh` removes the app, the installed CLI and only AgentBoard's own hook entries; any other hooks in `~/.claude/settings.json` and `~/.codex/hooks.json` are left as they are. When removing those entries leaves a file exactly as it was before the install, the original bytes are written back from the backup `install-hooks` made, so its formatting returns too; if the install created the file and nothing else is left in it, the file is deleted. A `hooks = true` that `enable-codex-hooks` added to an existing `~/.codex/config.toml` stays (its backup sits beside it); a `config.toml` that `enable-codex-hooks` created and that still holds nothing else is deleted. The data directory is kept unless you pass `--purge-data`. `--dry-run` previews; `--no-hooks` and `--no-app` skip parts. `agentboard prune --days N` deletes old sessions without uninstalling (`--days 0` deletes none)."),
         ])
 }

@@ -178,8 +178,11 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
         transcript_path=session.get("transcript_path"), now=now,
     )
 
+    # Only a Codex clean exit asks whether the last turn finished (a clean
+    # Claude exit is /exit at the prompt), so skip the full event scan for
+    # everything else; this runs for every ended session on every poll.
     turn_finished = None
-    if session.get("ended_at"):
+    if session.get("ended_at") and tool != "claude" and session.get("end_reason"):
         turn_finished = reconcile.last_turn_finished(conn, tool, session_id)
 
     marker_list = notes_mod.markers(config)
@@ -2136,35 +2139,195 @@ def cmd_resume(args, run_osascript=subprocess.run):
 
 # -- prune ----------------------------------------------------------------------
 
+DEFAULT_PRUNE_DAYS = 90
+DEFAULT_COMPACT_DAYS = 7
+# `prune --auto` runs at most this often; the app calls it every 6 h.
+PRUNE_AUTO_INTERVAL_SECS = 24 * 3600
+# `prune --auto` vacuums at most this often, and only when the free pages
+# exceed max(VACUUM_MIN_FREE_BYTES, VACUUM_MIN_FREE_FRACTION of the file):
+# VACUUM holds the write lock for the whole copy.
+VACUUM_AUTO_INTERVAL_SECS = 7 * 24 * 3600
+VACUUM_MIN_FREE_BYTES = 8 * 1024 * 1024
+VACUUM_MIN_FREE_FRACTION = 0.25
+# Tool-use and subagent rows: nothing reads them once the turn is over (the
+# session row carries `last_event`), and they are most of the table.
+COMPACTED_EVENTS = (
+    "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart",
+    "SubagentStop", "PreCompact", "PostCompact",
+)
+PRUNE_META_LAST_PRUNE = "last_prune_at"
+PRUNE_META_LAST_VACUUM = "last_vacuum_at"
+
+
+def _retention_days(config, key, default):
+    """A non-negative integer config value, else `default`. 0 means never."""
+    value = config.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return default
+    return value
+
+
+def _meta_value(conn, key):
+    row = conn.execute("SELECT value FROM notes_meta WHERE key=?", (key,)).fetchone()
+    if row is None or row["value"] is None:
+        return None
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_meta_value(conn, key, value):
+    conn.execute(
+        "INSERT INTO notes_meta(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, int(value)),
+    )
+
+
+def _prune_keep_reason(conn, session, config, now):
+    """Why an old session must survive the prune, or None."""
+    tool, session_id = session["tool"], session["session_id"]
+    if conn.execute(
+        "SELECT 1 FROM notes WHERE tool=? AND session_id=? AND kind='needs_you' "
+        "AND dismissed_at IS NULL LIMIT 1",
+        (tool, session_id),
+    ).fetchone():
+        return "needs_you_note"
+    for row in conn.execute(
+        "SELECT * FROM links WHERE tool=? AND session_id=? AND kind='pr'", (tool, session_id)
+    ):
+        if links.pr_awaits_you(dict(row), session, now):
+            return "awaiting_pr"
+    triage = conn.execute(
+        "SELECT status, until FROM triage WHERE tool=? AND session_id=?", (tool, session_id)
+    ).fetchone()
+    if triage and triage["status"] == "snoozed":
+        until = reconcile.parse_ts(triage["until"])
+        if until is not None and until > now:
+            return "snoozed"
+    if not session.get("ended_at") and reconcile.is_pid_alive(session.get("pid")) is True:
+        return "alive"
+    return None
+
+
+def _vacuum_wanted(conn, db_file, now_epoch):
+    """`--auto`'s own vacuum rule: enough free pages, and not done this week."""
+    last = _meta_value(conn, PRUNE_META_LAST_VACUUM)
+    if last is not None and now_epoch - last < VACUUM_AUTO_INTERVAL_SECS:
+        return False
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    free_bytes = conn.execute("PRAGMA freelist_count").fetchone()[0] * page_size
+    try:
+        file_bytes = db_file.stat().st_size
+    except OSError:
+        file_bytes = 0
+    return free_bytes > max(VACUUM_MIN_FREE_BYTES, VACUUM_MIN_FREE_FRACTION * file_bytes)
+
+
 def cmd_prune(args):
-    cutoff = _now_iso(datetime.now(timezone.utc) - timedelta(days=args.days))
+    now = datetime.now(timezone.utc)
+    now_epoch = int(now.timestamp())
+    config = links.load_config(db.home_dir())
+    days = args.days if args.days is not None else _retention_days(
+        config, "prune_days", DEFAULT_PRUNE_DAYS)
+    compact_days = args.compact_days if args.compact_days is not None else _retention_days(
+        config, "compact_days", DEFAULT_COMPACT_DAYS)
+    if days < 0 or compact_days < 0:
+        _report("error", "prune_bad_args", "prune: --days and --compact-days must be 0 or more")
+        return 2
+
     conn = db.connect()
     try:
-        rows = conn.execute(
-            "SELECT tool, session_id FROM sessions "
-            "WHERE updated_at IS NOT NULL AND updated_at < ?",
-            (cutoff,),
-        ).fetchall()
+        if args.auto:
+            last = _meta_value(conn, PRUNE_META_LAST_PRUNE)
+            if last is not None and 0 <= now_epoch - last < PRUNE_AUTO_INTERVAL_SECS:
+                diag.debug("cli", "prune_skipped", reason="recent", last_prune_at=last)
+                print("prune skipped: it ran less than 24 h ago")
+                return 0
+
+        # 0 means never, for sessions and dismissed notes alike.
+        cutoff = _now_iso(now - timedelta(days=days)) if days else None
+        compact_cutoff = _now_iso(now - timedelta(days=compact_days)) if compact_days else None
+
+        doomed, skipped = [], {}
+        if cutoff:
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE updated_at IS NOT NULL AND updated_at < ?",
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                session = dict(row)
+                reason = _prune_keep_reason(conn, session, config, now)
+                if reason:
+                    skipped[reason] = skipped.get(reason, 0) + 1
+                else:
+                    doomed.append((session["tool"], session["session_id"]))
+        skipped_total = sum(skipped.values())
+
+        placeholders = ",".join("?" for _ in COMPACTED_EVENTS)
+        compact_sql = f"FROM events WHERE event IN ({placeholders}) AND ts < ?"
+
+        if args.dry_run:
+            compacted = 0
+            if compact_cutoff:
+                compacted = conn.execute(
+                    f"SELECT COUNT(*) {compact_sql}", (*COMPACTED_EVENTS, compact_cutoff)
+                ).fetchone()[0]
+            dismissed = 0
+            if cutoff:
+                dismissed = conn.execute(
+                    "SELECT COUNT(*) FROM notes WHERE dismissed_at IS NOT NULL AND dismissed_at < ?",
+                    (cutoff,),
+                ).fetchone()[0]
+            print(f"would prune {len(doomed)} session(s) ({skipped_total} skipped), "
+                  f"compact {compacted} event(s), {dismissed} dismissed note(s)")
+            return 0
+
         conn.execute("BEGIN IMMEDIATE")
-        for row in rows:
-            for table in ("events", "sessions", "triage", "links", "notes"):
-                conn.execute(
-                    f"DELETE FROM {table} WHERE tool=? AND session_id=?",
-                    (row["tool"], row["session_id"]),
-                )
-        # The only retention for dismissed notes: they are kept (so a
-        # `notes --rebuild --reset` does not resurrect them) until they are
-        # older than the prune window.
-        dismissed = conn.execute(
-            "DELETE FROM notes WHERE dismissed_at IS NOT NULL AND dismissed_at < ?",
-            (cutoff,),
-        ).rowcount
-        conn.execute("COMMIT")
+        try:
+            for tool, session_id in doomed:
+                for table in ("events", "sessions", "triage", "links", "notes"):
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE tool=? AND session_id=?", (tool, session_id),
+                    )
+            compacted = 0
+            if compact_cutoff:
+                compacted = conn.execute(
+                    f"DELETE {compact_sql}", (*COMPACTED_EVENTS, compact_cutoff)
+                ).rowcount
+            # The only retention for dismissed notes: they are kept (so a
+            # `notes --rebuild --reset` does not resurrect them) until they
+            # are older than the prune window.
+            dismissed = 0
+            if cutoff:
+                dismissed = conn.execute(
+                    "DELETE FROM notes WHERE dismissed_at IS NOT NULL AND dismissed_at < ?",
+                    (cutoff,),
+                ).rowcount
+            if args.auto:
+                _set_meta_value(conn, PRUNE_META_LAST_PRUNE, now_epoch)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+
+        vacuumed = False
+        if args.vacuum or (args.auto and _vacuum_wanted(conn, db.db_path(), now_epoch)):
+            conn.execute("VACUUM")
+            _set_meta_value(conn, PRUNE_META_LAST_VACUUM, now_epoch)
+            vacuumed = True
     finally:
         conn.close()
-    diag.info("cli", "prune", days=args.days, cutoff=cutoff, sessions=len(rows),
-              dismissed_notes=dismissed)
-    print(f"pruned {len(rows)} session(s), {dismissed} dismissed note(s)")
+
+    diag.info("cli", "prune", days=days, compact_days=compact_days, cutoff=cutoff,
+              sessions=len(doomed), skipped=skipped_total,
+              skipped_reasons=",".join(f"{k}:{v}" for k, v in sorted(skipped.items())) or None,
+              compacted=compacted, dismissed_notes=dismissed, vacuumed=vacuumed,
+              auto=bool(args.auto))
+    print(f"pruned {len(doomed)} session(s) ({skipped_total} skipped), "
+          f"compacted {compacted} event(s), {dismissed} dismissed note(s)"
+          + (", vacuumed" if vacuumed else ""))
     return 0
 
 
@@ -2475,7 +2638,15 @@ def build_parser():
     p.set_defaults(func=cmd_map_codex)
 
     p = sub.add_parser("prune")
-    p.add_argument("--days", type=int, default=90)
+    p.add_argument("--days", type=int, default=None,
+                   help="delete sessions idle this long (config prune_days, default 90; 0 never)")
+    p.add_argument("--compact-days", type=int, default=None,
+                   help="delete tool-use events older than this (config compact_days, default 7; "
+                        "0 never)")
+    p.add_argument("--dry-run", action="store_true", help="print the counts, change nothing")
+    p.add_argument("--auto", action="store_true",
+                   help="run only if the last auto run was 24 h ago or more")
+    p.add_argument("--vacuum", action="store_true", help="VACUUM the database afterwards")
     p.set_defaults(func=cmd_prune)
 
     p = sub.add_parser("paths")

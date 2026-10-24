@@ -280,9 +280,16 @@ agentboard install-hooks [--claude] [--codex] [--dry-run]
 agentboard uninstall-hooks [--claude] [--codex]
 agentboard focus <tool> <session_id>         activate iTerm2 tab by ITERM_SESSION_ID (osascript)
 agentboard resume <tool> <session_id> [--print]  open new iTerm2 tab running resume cmd
-agentboard prune [--days 90]
+agentboard prune [--days N] [--compact-days N] [--dry-run] [--auto] [--vacuum]   retention
 agentboard logs [--since 1h] [--grep T] [--lines N] [--app]   print the diagnostic log
 ```
+
+Retention (added after the original spec): `prune` deletes sessions idle longer than
+`prune_days` (config, default 90) except one with an open needs_you note, an awaiting PR, an
+active snooze or a live pid; deletes tool-use/subagent events older than `compact_days` (default
+7) from every session; deletes dismissed notes older than `prune_days`. `0` means never.
+`--auto` runs at most once per 24 h (`notes_meta.last_prune_at`, epoch seconds) and vacuums only
+past a free-page threshold, at most weekly (`last_vacuum_at`); the app calls it every 6 h.
 
 Diagnostic log (added after the original spec): every subcommand, hook and app action writes
 `key=value` lines to `$AGENTBOARD_HOME/agentboard.log` through `core/agentboard/diag.py`

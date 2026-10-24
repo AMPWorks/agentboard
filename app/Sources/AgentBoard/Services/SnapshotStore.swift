@@ -108,11 +108,17 @@ final class SnapshotStore: ObservableObject {
         linksTask = Task { [weak self] in
             await self?.runInitialBackfill()
             guard !Task.isCancelled else { return }
+            await self?.prune()
+            var lastPrune = Date()
             await self?.refreshLinks()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(600))
+                try? await Task.sleep(for: .seconds(Self.linksInterval))
                 guard !Task.isCancelled else { return }
                 await self?.refreshLinks()
+                if Date().timeIntervalSince(lastPrune) >= Self.pruneInterval {
+                    await self?.prune()
+                    lastPrune = Date()
+                }
             }
         }
     }
@@ -146,6 +152,20 @@ final class SnapshotStore: ObservableObject {
             try await cli.refreshLinks()
         } catch {
             log.error("refresh-links failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// `refresh-links` cadence.
+    static let linksInterval: TimeInterval = 600
+    /// How often the app asks for `prune --auto`; the CLI's own 24 h gate
+    /// decides whether anything runs.
+    static let pruneInterval: TimeInterval = 6 * 3600
+
+    private func prune() async {
+        do {
+            try await cli.prune()
+        } catch {
+            log.error("prune failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

@@ -187,6 +187,52 @@ class SnapshotTests(AgentBoardTestCase):
         self.assertEqual(by_key["claude:s1"]["status_text"], "working")
         self.assertIsNone(by_key["claude:s2"]["status_text"])
 
+    def test_snapshot_skips_turn_scan_for_claude(self):
+        ended = "2026-06-15T09:55:00.000000Z"
+        insert_session(
+            self.conn, session_id="c1", last_event="SessionEnd", end_reason="prompt_input_exit",
+            ended_at=ended, updated_at=ended,
+        )
+        insert_session(
+            self.conn, tool="codex", session_id="x1", last_event="SessionEnd",
+            end_reason="exit", ended_at=ended, updated_at=ended,
+        )
+        # An ended Codex row with no end_reason can never be a clean exit.
+        insert_session(
+            self.conn, tool="codex", session_id="x2", last_event="SessionEnd",
+            end_reason=None, ended_at=ended, updated_at=ended,
+        )
+        with mock.patch.object(cli.reconcile, "last_turn_finished",
+                               return_value=True) as scan:
+            cli.build_snapshot(self.conn, include_all=True)
+        self.assertEqual(scan.call_args_list, [mock.call(self.conn, "codex", "x1")])
+
+    def test_codex_clean_exit_state_survives_compaction(self):
+        old = datetime.now(timezone.utc) - timedelta(days=30)
+
+        def ts(minutes):
+            return (old + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+        insert_session(
+            self.conn, tool="codex", session_id="x1", last_event="SessionEnd",
+            end_reason="exit", ended_at=ts(9), updated_at=ts(9), started_at=ts(0), todos_open=0,
+        )
+        for minutes, event in enumerate(
+            ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStart",
+             "SubagentStop", "PreCompact", "PostCompact", "Stop", "SessionEnd"]
+        ):
+            _insert_event(self.conn, event, tool="codex", session_id="x1", ts=ts(minutes))
+        before = cli.build_snapshot(self.conn, include_all=True)["sessions"][0]
+        self.assertEqual(before["state"], "done")
+        rc, out, _ = _run_cmd(["prune", "--days", "0", "--compact-days", "7"])
+        self.assertEqual(rc, 0)
+        self.assertIn("compacted 6 event(s)", out)
+        left = [r["event"] for r in self.conn.execute("SELECT event FROM events ORDER BY id")]
+        self.assertEqual(left, ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"])
+        after = cli.build_snapshot(self.conn, include_all=True)["sessions"][0]
+        self.assertEqual((after["state"], after["done_reason"]),
+                         (before["state"], before["done_reason"]))
+
 
 class SnapshotNotesTests(AgentBoardTestCase):
     def setUp(self):
@@ -3167,6 +3213,201 @@ class PruneTests(AgentBoardTestCase):
         self.assertIn("1 dismissed note(s)", out)
         texts = sorted(r["text"] for r in self.conn.execute("SELECT text FROM notes"))
         self.assertEqual(texts, ["open on a live session", "recently dismissed"])
+
+    # -- retention rules ---------------------------------------------------------
+
+    def _iso(self, **delta):
+        return (datetime.now(timezone.utc) - timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def _session_ids(self):
+        return sorted(r["session_id"] for r in self.conn.execute("SELECT session_id FROM sessions"))
+
+    def _add_note(self, session_id, kind="update", text="t", dismissed_at=None):
+        now = self._iso(days=0)
+        self.conn.execute(
+            "INSERT INTO notes(tool, session_id, ts, last_ts, kind, text, fingerprint, "
+            "source, dismissed_at) VALUES ('claude', ?, ?, ?, ?, ?, ?, 'cli', ?)",
+            (session_id, now, now, kind, text, f"{kind}:{text}", dismissed_at),
+        )
+
+    def test_prune_skips_open_needs_you_note(self):
+        old = self._iso(days=120)
+        insert_session(self.conn, session_id="asks", updated_at=old)
+        insert_session(self.conn, session_id="answered", updated_at=old)
+        insert_session(self.conn, session_id="quiet", updated_at=old)
+        self._add_note("asks", kind="needs_you", text="approve the deploy")
+        self._add_note("answered", kind="needs_you", text="done", dismissed_at=self._iso(days=1))
+        self._add_note("quiet", kind="update", text="shipped")
+        rc, out, _ = _run_cmd(["prune"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._session_ids(), ["asks"])
+        self.assertIn("pruned 2 session(s) (1 skipped)", out)
+
+    def test_prune_skips_awaiting_pr(self):
+        old = self._iso(days=120)
+        insert_session(self.conn, session_id="awaits", updated_at=old)
+        insert_session(self.conn, session_id="merged", updated_at=old)
+        insert_session(self.conn, session_id="answered", updated_at=old)
+        for session_id, state, responded in (
+            ("awaits", "OPEN", None), ("merged", "MERGED", None), ("answered", "OPEN", old),
+        ):
+            self.conn.execute(
+                "INSERT INTO links(tool, session_id, kind, ref, url, state, source, responded_at) "
+                "VALUES ('claude', ?, 'pr', '#1', 'https://example.com/pr/1', ?, 'cli', ?)",
+                (session_id, state, responded),
+            )
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), ["awaits"])
+
+    def test_prune_skips_active_snooze(self):
+        old = self._iso(days=120)
+        insert_session(self.conn, session_id="snoozed", updated_at=old)
+        insert_session(self.conn, session_id="woke", updated_at=old)
+        future = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        for session_id, until in (("snoozed", future), ("woke", old)):
+            self.conn.execute(
+                "INSERT INTO triage(tool, session_id, status, until, note, updated_at) "
+                "VALUES ('claude', ?, 'snoozed', ?, NULL, ?)", (session_id, until, old),
+            )
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), ["snoozed"])
+
+    def test_prune_skips_a_live_process(self):
+        old = self._iso(days=120)
+        insert_session(self.conn, session_id="alive", updated_at=old, pid=os.getpid())
+        insert_session(self.conn, session_id="ended", updated_at=old, pid=os.getpid(),
+                       ended_at=old)
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), ["alive"])
+
+    def test_compact_deletes_only_tool_events_older_than_window(self):
+        insert_session(self.conn, session_id="s1", updated_at=self._iso(days=0))
+        old, recent = self._iso(days=10), self._iso(days=1)
+        compacted = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart",
+                     "SubagentStop", "PreCompact", "PostCompact"]
+        kept = ["SessionStart", "UserPromptSubmit", "Notification", "PermissionRequest",
+                "Stop", "StopFailure", "SessionEnd"]
+        for event in compacted + kept:
+            _insert_event(self.conn, event, ts=old)
+            _insert_event(self.conn, event, ts=recent)
+        _insert_event(self.conn, "PostToolUse", ts=old, agent_id="sub-1")
+        rc, out, _ = _run_cmd(["prune", "--compact-days", "7"])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"compacted {len(compacted) + 1} event(s)", out)
+        rows = self.conn.execute("SELECT event, ts FROM events").fetchall()
+        old_left = sorted(r["event"] for r in rows if r["ts"] == old)
+        recent_left = sorted(r["event"] for r in rows if r["ts"] == recent)
+        self.assertEqual(old_left, sorted(kept))
+        self.assertEqual(recent_left, sorted(compacted + kept))
+        self.assertEqual(self._session_ids(), ["s1"])
+
+    def test_compact_days_from_config_and_zero_never_compacts(self):
+        insert_session(self.conn, session_id="s1", updated_at=self._iso(days=0))
+        _insert_event(self.conn, "PreToolUse", ts=self._iso(days=3))
+        (self.agentboard_home / "config.json").write_text(json.dumps({"compact_days": 2}))
+        _, out, _ = _run_cmd(["prune", "--compact-days", "0"])
+        self.assertIn("compacted 0 event(s)", out)
+        _, out, _ = _run_cmd(["prune"])
+        self.assertIn("compacted 1 event(s)", out)
+
+    def test_prune_days_from_config(self):
+        insert_session(self.conn, session_id="s1", updated_at=self._iso(days=20))
+        (self.agentboard_home / "config.json").write_text(json.dumps({"prune_days": 30}))
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), ["s1"])
+        (self.agentboard_home / "config.json").write_text(json.dumps({"prune_days": 10}))
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), [])
+
+    def test_prune_auto_is_gated_by_meta(self):
+        insert_session(self.conn, session_id="old", updated_at=self._iso(days=120))
+        rc, out, _ = _run_cmd(["prune", "--auto"])
+        self.assertEqual(rc, 0)
+        self.assertIn("pruned 1 session(s)", out)
+        stamp = self.conn.execute(
+            "SELECT value FROM notes_meta WHERE key='last_prune_at'").fetchone()["value"]
+        self.assertAlmostEqual(stamp, int(datetime.now(timezone.utc).timestamp()), delta=60)
+
+        insert_session(self.conn, session_id="old2", updated_at=self._iso(days=120))
+        rc, out, _ = _run_cmd(["prune", "--auto"])
+        self.assertEqual(rc, 0)
+        self.assertIn("skipped", out)
+        self.assertEqual(self._session_ids(), ["old2"])
+
+        # A manual run is never gated and leaves the auto stamp alone.
+        _run_cmd(["prune"])
+        self.assertEqual(self._session_ids(), [])
+        self.assertEqual(self.conn.execute(
+            "SELECT value FROM notes_meta WHERE key='last_prune_at'").fetchone()["value"], stamp)
+
+        insert_session(self.conn, session_id="old3", updated_at=self._iso(days=120))
+        self.conn.execute("UPDATE notes_meta SET value=value - 25 * 3600 WHERE key='last_prune_at'")
+        _, out, _ = _run_cmd(["prune", "--auto"])
+        self.assertIn("pruned 1 session(s)", out)
+        self.assertEqual(self._session_ids(), [])
+
+    def test_prune_auto_keeps_rebuild_meta(self):
+        before = {r["key"]: r["value"] for r in self.conn.execute("SELECT * FROM notes_meta")}
+        _run_cmd(["prune", "--auto"])
+        after = {r["key"]: r["value"] for r in self.conn.execute("SELECT * FROM notes_meta")}
+        self.assertEqual({k: after[k] for k in before}, before)
+        self.assertIn("last_prune_at", after)
+
+    def test_prune_dry_run_writes_nothing(self):
+        insert_session(self.conn, session_id="old", updated_at=self._iso(days=120))
+        insert_session(self.conn, session_id="new", updated_at=self._iso(days=0))
+        _insert_event(self.conn, "PreToolUse", session_id="new", ts=self._iso(days=10))
+        self._add_note("new", text="gone", dismissed_at=self._iso(days=120))
+        before = self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        rc, out, _ = _run_cmd(["prune", "--dry-run", "--auto", "--vacuum"])
+        self.assertEqual(rc, 0)
+        self.assertIn("would prune 1 session(s) (0 skipped), compact 1 event(s), "
+                      "1 dismissed note(s)", out)
+        self.assertEqual(self._session_ids(), ["new", "old"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], before)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0], 1)
+        self.assertIsNone(self.conn.execute(
+            "SELECT 1 FROM notes_meta WHERE key IN ('last_prune_at', 'last_vacuum_at')").fetchone())
+
+    def test_prune_days_zero_never_deletes_sessions(self):
+        insert_session(self.conn, session_id="ancient", updated_at=self._iso(days=4000))
+        rc, out, _ = _run_cmd(["prune", "--days", "0"])
+        self.assertEqual(rc, 0)
+        self.assertIn("pruned 0 session(s)", out)
+        self.assertEqual(self._session_ids(), ["ancient"])
+
+    def test_prune_days_zero_keeps_dismissed_notes(self):
+        insert_session(self.conn, session_id="s1", updated_at=self._iso(days=0))
+        self._add_note("s1", text="long dismissed", dismissed_at=self._iso(days=4000))
+        (self.agentboard_home / "config.json").write_text(json.dumps({"prune_days": 0}))
+        _, out, _ = _run_cmd(["prune"])
+        self.assertIn("0 dismissed note(s)", out)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0], 1)
+
+    def test_negative_days_are_rejected(self):
+        rc, _, err = _run_cmd(["prune", "--days", "-1"])
+        self.assertEqual(rc, 2)
+        self.assertIn("0 or more", err)
+
+    def test_vacuum_runs_and_stamps(self):
+        rc, out, _ = _run_cmd(["prune", "--vacuum"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.rstrip().endswith(", vacuumed"))
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT value FROM notes_meta WHERE key='last_vacuum_at'").fetchone())
+
+    def test_auto_vacuums_only_past_the_free_page_threshold(self):
+        _, out, _ = _run_cmd(["prune", "--auto"])
+        self.assertNotIn("vacuumed", out)
+        with mock.patch.object(cli, "VACUUM_MIN_FREE_BYTES", -1), \
+                mock.patch.object(cli, "VACUUM_MIN_FREE_FRACTION", -1):
+            self.conn.execute("UPDATE notes_meta SET value=0 WHERE key='last_prune_at'")
+            _, out, _ = _run_cmd(["prune", "--auto"])
+            self.assertIn("vacuumed", out)
+            # At most weekly, whatever the free space.
+            self.conn.execute("UPDATE notes_meta SET value=0 WHERE key='last_prune_at'")
+            _, out, _ = _run_cmd(["prune", "--auto"])
+            self.assertNotIn("vacuumed", out)
 
 
 if __name__ == "__main__":

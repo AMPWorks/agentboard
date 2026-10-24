@@ -181,6 +181,24 @@ The schema (see `core/agentboard/db.py`) has these tables:
 
 Migrations are tracked with `PRAGMA user_version`; `db.connect()` applies any pending ones.
 
+**Retention.** The app runs `agentboard prune --auto` after its launch backfill and every 6 hours;
+the CLI itself gates it to one real run a day (`notes_meta.last_prune_at`, epoch seconds), so a
+second app instance or a manual run cannot double it up. Each run:
+
+- deletes sessions idle longer than `prune_days` (default 90), with all their events, triage,
+  links and notes, except a session that still has an open `needs_you` note, a PR awaiting you, an
+  active snooze or a live process; those are skipped and counted in the `cli.prune` log line;
+- compacts: deletes tool-use and subagent events (`PreToolUse`, `PostToolUse`,
+  `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`) older than
+  `compact_days` (default 7), from every session, live or ended. They are most of the table and
+  nothing reads them once the turn is over; prompts, `Stop`s, notifications and session start/end
+  rows are kept;
+- deletes dismissed notes older than `prune_days`;
+- runs `VACUUM` when the free pages exceed 8 MB and a quarter of the file, at most once a week
+  (`notes_meta.last_vacuum_at`).
+
+`0` for either window means never. `agentboard prune --dry-run` prints what a run would delete.
+
 Next to the database live `agentboard.log` and `agentboard.log.1`, the diagnostic log (see
 Diagnostics below), and `hook-errors.log`, the hook's own failure log.
 
@@ -564,8 +582,8 @@ a later plain `--rebuild` skips them; only `--reset` revisits them. `--rebuild -
 changed rules: it drops the open notes it made itself (never dismissed ones, never ones added by
 `note`, the inbox or a provider) and replays every recorded `Stop`, without reopening anything you
 dismissed. Transcript backfill does not record per-turn `Stop` events, so notes start with what the
-hook has recorded. `agentboard prune` drops dismissed notes older than its window, along with every
-note of a pruned session.
+hook has recorded. `agentboard prune` drops dismissed notes older than its `prune_days` window (never,
+when it is `0`), along with every note of a pruned session.
 
 **An open `needs_you` note puts its session in `needs_you`** (red icon, notification, Needs you
 section, the note's marker line as the waiting reason) until a newer prompt arrives in that
@@ -640,6 +658,8 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
 | `retitle_command` | argv list, string, or `null` | the local `claude` CLI with Haiku | Reads a session's recent context on stdin and prints a new title; `null` turns retitling off. |
 | `retitle_min_prompts` | integer >= 1 | `5` | New prompts since the last retitle before a session is retitled again. |
 | `retitle_max_per_run` | integer >= 0 | `5` | At most this many sessions retitled per `refresh-links`; `0` turns it off. |
+| `prune_days` | integer >= 0 | `90` | `prune` deletes sessions idle this many days (never one with an open `needs_you` note, a PR awaiting you, an active snooze or a live process) and dismissed notes older than this; `0` never deletes. |
+| `compact_days` | integer >= 0 | `7` | `prune` deletes tool-use and subagent events older than this many days; `0` never compacts. |
 | `log_level` | `debug`/`info`/`warn`/`error` | `info` | The diagnostic log's level; `AGENTBOARD_LOG_LEVEL` wins over it. |
 
 ```json
@@ -651,6 +671,8 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
   "note_unattended_prefixes": ["# Autonomous loop"],
   "retitle_min_prompts": 5,
   "retitle_max_per_run": 5,
+  "prune_days": 90,
+  "compact_days": 7,
   "log_level": "info"
 }
 ```
@@ -677,12 +699,16 @@ agentboard enable-codex-hooks [--dry-run]
 agentboard focus <tool> <session_id>
 agentboard resume <tool> <session_id> [--print]
 agentboard map-codex --session ID --cwd DIR [--at TIME]
-agentboard prune [--days 90]
+agentboard prune [--days N] [--compact-days N] [--dry-run] [--auto] [--vacuum]
 agentboard logs [--since 1h|ISO-8601] [--grep TEXT] [--lines N] [--app]
 ```
 
 `hook`, `map-codex` and `backfill --session` are what the hooks run; you never need to call them
-yourself. `install-hooks --bin-path` only previews a different hook path for `install.sh
+yourself. `prune` is the retention sweep described under Data: `--days` and `--compact-days`
+override `prune_days` and `compact_days`, and `0` means never (until this release `--days 0`
+deleted every session; it now deletes none). `--auto` runs only when the last auto run was 24 hours
+ago or more and may vacuum on its own; `--vacuum` always vacuums afterwards; `--dry-run` prints the
+counts and changes nothing. `install-hooks --bin-path` only previews a different hook path for `install.sh
 --dry-run`.
 
 ## Diagnostics

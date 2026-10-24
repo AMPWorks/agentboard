@@ -63,6 +63,17 @@ CONFIG_KEYS = (
         "At most this many sessions retitled per `refresh-links`; 0 turns it off.",
     ),
     ConfigKey(
+        "prune_days", "integer >= 0", "90",
+        "`prune` deletes sessions idle this many days (never one with an open needs_you "
+        "note, a PR awaiting you, an active snooze or a live process) and dismissed notes "
+        "older than this; 0 never deletes.",
+    ),
+    ConfigKey(
+        "compact_days", "integer >= 0", "7",
+        "`prune` deletes tool-use and subagent events older than this many days; 0 never "
+        "compacts.",
+    ),
+    ConfigKey(
         "log_level", "debug | info | warn | error", "info",
         "The diagnostic log's level; `AGENTBOARD_LOG_LEVEL` wins over it.",
     ),

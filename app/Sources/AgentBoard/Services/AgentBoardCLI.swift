@@ -203,6 +203,14 @@ struct AgentBoardCLI: Sendable {
         _ = try await runner.run(executable: executablePath, arguments: ["refresh-links"])
     }
 
+    /// `agentboard prune --auto`: the retention sweep. The CLI gates it to
+    /// one real run a day, so calling it more often costs nothing.
+    func prune() async throws {
+        if isFixtureMode { return }
+        guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
+        _ = try await runner.run(executable: executablePath, arguments: ["prune", "--auto"])
+    }
+
     func backfill(days: Int) async throws {
         if isFixtureMode { return }
         guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
