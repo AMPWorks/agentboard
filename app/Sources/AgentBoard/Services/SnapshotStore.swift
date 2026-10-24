@@ -69,9 +69,6 @@ final class SnapshotStore: ObservableObject {
         return (size, modified)
     }
 
-    /// hook-errors.log's size, or nil when it is missing or empty.
-    var hookErrorsLogSize: Int64? { hookErrorsLogInfo?.size }
-
     /// Reveals hook-errors.log in Finder.
     func revealHookErrorsLog() {
         guard let url = hookErrorsLogURL else { return }
@@ -83,17 +80,6 @@ final class SnapshotStore: ObservableObject {
         StoreStatus.banner(lastError: lastError, lastActionError: lastActionError,
                            lastUpdated: lastUpdated, refreshStartedAt: refreshStartedAt,
                            startedAt: startedAt, now: now)
-    }
-
-    /// True while a refresh has hung past `StoreStatus.refreshStaleAfter`,
-    /// or nothing has succeeded within `StoreStatus.firstSnapshotGrace` of
-    /// `start()`.
-    func isStale(now: Date = Date()) -> Bool {
-        guard lastError == nil else { return false }
-        let banner = StoreStatus.banner(lastError: nil, lastActionError: nil,
-                                        lastUpdated: lastUpdated, refreshStartedAt: refreshStartedAt,
-                                        startedAt: startedAt, now: now)
-        return banner != nil
     }
 
     /// The banner's x for an action error.
