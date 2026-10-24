@@ -67,8 +67,9 @@ Usage: $0 [--no-hooks] [--no-app] [--dry-run] [--prefix DIR] [--enable-codex-hoo
   --no-app              skip building and installing the menu bar app
   --dry-run             show what would change; makes no changes at all
   --prefix DIR          install the .app bundle under DIR (default: ~/Applications)
-  --enable-codex-hooks  opt in: set [features]\\nhooks = true in ~/.codex/config.toml
-                        (backs up the file first; see README for what this does)
+  --enable-codex-hooks  opt in: set [features]\\nhooks = true in ~/.codex/config.toml,
+                        needed for Codex older than 0.124, or when hooks = false is
+                        set (backs up the file first; see README for what this does)
 
 Env vars:
   AGENTBOARD_HOME       data dir (default: ~/Library/Application Support/AgentBoard)

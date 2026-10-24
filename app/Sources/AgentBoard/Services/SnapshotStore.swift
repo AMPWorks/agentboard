@@ -9,7 +9,16 @@ import OSLog
 final class SnapshotStore: ObservableObject {
     @Published private(set) var snapshot: Snapshot = .empty
     @Published private(set) var lastUpdated: Date?
+    /// The last snapshot failure, cleared by the next successful snapshot.
     @Published private(set) var lastError: String?
+    /// The last failed action (mark, focus, dismiss, prune), cleared by the
+    /// next successful action or after `StoreStatus.actionErrorLifetime`.
+    @Published private(set) var lastActionError: ActionError?
+    /// When the oldest `refresh()` still in flight began (reset when one
+    /// succeeds); nil while none is running. Drives the stale banner.
+    @Published private(set) var refreshStartedAt: Date?
+    /// When `start()` ran.
+    @Published private(set) var startedAt: Date?
     @Published var showAll: Bool = false
     /// Set by the popover when it needs the dashboard to open with a
     /// specific session selected; the dashboard clears it after reading it.
@@ -44,6 +53,40 @@ final class SnapshotStore: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
+    /// `<data dir>/hook-errors.log`, the hook's own failure log.
+    var hookErrorsLogURL: URL? {
+        dataDirectory.map { URL(fileURLWithPath: $0).appendingPathComponent("hook-errors.log") }
+    }
+
+    /// hook-errors.log's size in bytes and last write, or nil when it is
+    /// missing or empty (Settings → Diagnostics shows a row only then).
+    var hookErrorsLogInfo: (size: Int64, modified: Date)? {
+        guard let url = hookErrorsLogURL,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = (attributes[.size] as? NSNumber)?.int64Value, size > 0,
+              let modified = attributes[.modificationDate] as? Date
+        else { return nil }
+        return (size, modified)
+    }
+
+    /// Reveals hook-errors.log in Finder.
+    func revealHookErrorsLog() {
+        guard let url = hookErrorsLogURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// The status banner to show at `now`, or nil when healthy.
+    func banner(now: Date = Date()) -> StoreStatus.Banner? {
+        StoreStatus.banner(lastError: lastError, lastActionError: lastActionError,
+                           lastUpdated: lastUpdated, refreshStartedAt: refreshStartedAt,
+                           startedAt: startedAt, now: now)
+    }
+
+    /// The banner's x for an action error.
+    func dismissActionError() {
+        lastActionError = nil
+    }
+
     private let cli: AgentBoardCLI
     private let watcher = DirectoryWatcher()
     private var pollTask: Task<Void, Never>?
@@ -54,6 +97,9 @@ final class SnapshotStore: ObservableObject {
     /// while the dashboard is still open must not drop polling back to
     /// the slow background interval.
     private var visibleCount = 0
+    /// `refresh()` calls in flight (the poll loop, the watcher and the
+    /// views each start one).
+    private var refreshesInFlight = 0
     private var isVisible: Bool { visibleCount > 0 }
     private let log = Logger(subsystem: "io.github.agentboard", category: "store")
 
@@ -89,6 +135,7 @@ final class SnapshotStore: ObservableObject {
 
     func start() {
         guard pollTask == nil else { return }
+        startedAt = Date()
         pathsTask = Task { [weak self] in
             guard let self else { return }
             let directory = await self.resolveDataDirectory()
@@ -108,11 +155,26 @@ final class SnapshotStore: ObservableObject {
         linksTask = Task { [weak self] in
             await self?.runInitialBackfill()
             guard !Task.isCancelled else { return }
+            // The launch prune most often fails because install.sh's own
+            // backfill still holds the write lock; log it, retry once after
+            // refresh-links, and only show the banner if that fails too.
+            let launchPruneOK = await self?.prune(showError: false) ?? true
+            var lastPrune = Date()
             await self?.refreshLinks()
+            if !launchPruneOK {
+                try? await Task.sleep(for: .seconds(Self.pruneLaunchRetryDelay))
+                guard !Task.isCancelled else { return }
+                await self?.prune()
+                lastPrune = Date()
+            }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(600))
+                try? await Task.sleep(for: .seconds(Self.linksInterval))
                 guard !Task.isCancelled else { return }
                 await self?.refreshLinks()
+                if Date().timeIntervalSince(lastPrune) >= Self.pruneInterval {
+                    await self?.prune()
+                    lastPrune = Date()
+                }
             }
         }
     }
@@ -130,14 +192,35 @@ final class SnapshotStore: ObservableObject {
     }
 
     func refresh() async {
+        refreshesInFlight += 1
+        if refreshStartedAt == nil { refreshStartedAt = Date() }
+        defer {
+            refreshesInFlight -= 1
+            if refreshesInFlight == 0 { refreshStartedAt = nil }
+        }
         do {
             let snapshot = try await cli.snapshot(all: showAll)
             self.snapshot = snapshot
             self.lastUpdated = Date()
             self.lastError = nil
+            // The CLI just answered; a refresh still running started before
+            // that and is not yet a hang.
+            if refreshesInFlight > 1 { refreshStartedAt = Date() }
         } catch {
             self.lastError = error.localizedDescription
             log.error("snapshot refresh failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Shows a failed action in the banner; it clears itself after
+    /// `StoreStatus.actionErrorLifetime` unless a newer one replaced it.
+    private func recordActionError(_ action: String, _ error: Error) {
+        let entry = ActionError(action: action, message: error.localizedDescription, at: Date())
+        lastActionError = entry
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(StoreStatus.actionErrorLifetime))
+            guard let self, self.lastActionError == entry else { return }
+            self.lastActionError = nil
         }
     }
 
@@ -146,6 +229,28 @@ final class SnapshotStore: ObservableObject {
             try await cli.refreshLinks()
         } catch {
             log.error("refresh-links failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// `refresh-links` cadence.
+    static let linksInterval: TimeInterval = 600
+    /// How often the app asks for `prune --auto`; the CLI's own 24 h gate
+    /// decides whether anything runs.
+    static let pruneInterval: TimeInterval = 6 * 3600
+    /// How long the launch prune waits before its one retry.
+    static let pruneLaunchRetryDelay: TimeInterval = 60
+
+    /// Runs `prune --auto`; returns whether it succeeded. A failure is always
+    /// logged, and shown in the banner unless `showError` is false.
+    @discardableResult
+    private func prune(showError: Bool = true) async -> Bool {
+        do {
+            try await cli.prune()
+            return true
+        } catch {
+            log.error("prune failed: \(error.localizedDescription, privacy: .public)")
+            if showError { recordActionError("Prune", error) }
+            return false
         }
     }
 
@@ -206,9 +311,10 @@ final class SnapshotStore: ObservableObject {
             for dismissal in dismissals {
                 try await cli.dismiss(dismissal)
             }
+            lastActionError = nil
             await refresh()
         } catch {
-            self.lastError = error.localizedDescription
+            recordActionError(Self.actionTitle(name), error)
             log.error("action \(name, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             await refresh()
         }
@@ -228,6 +334,11 @@ final class SnapshotStore: ObservableObject {
         Task { await refresh() }
     }
 
+    /// "mark done" -> "Mark done", for the banner's "<action> failed: ...".
+    static func actionTitle(_ name: String) -> String {
+        name.prefix(1).uppercased() + name.dropFirst()
+    }
+
     /// Runs a user action against the CLI and logs it by name, so `log
     /// show` ties a row click to the CLIRunner invocation that follows it.
     private func perform(_ name: String, _ session: Session, _ action: () async throws -> Void) async {
@@ -235,9 +346,10 @@ final class SnapshotStore: ObservableObject {
         log.notice("action \(name, privacy: .public) key=\(key, privacy: .public)")
         do {
             try await action()
+            lastActionError = nil
             await refresh()
         } catch {
-            self.lastError = error.localizedDescription
+            recordActionError(Self.actionTitle(name), error)
             log.error("action \(name, privacy: .public) key=\(key, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
         }
     }

@@ -57,14 +57,21 @@ normalized before any of this (made absolute, trailing slash stripped, symlinks 
 relative path, a trailing slash, or a symlinked ancestor all compare equal — `uninstall.sh --prefix
 DIR` applies the exact same quit logic before removing the bundle.
 
-Codex additionally requires `[features]` / `hooks = true` in `~/.codex/config.toml` before it
-will act on `~/.codex/hooks.json` at all — `install.sh` never edits that file on its own (it's
-your config, same as the rest of `config.toml`), but it reads it and prints a prominent warning
-with the exact snippet to add whenever the flag isn't set. Pass `--enable-codex-hooks` to have
-`install.sh` set it for you: this backs up `config.toml` first, then makes the smallest possible
-textual edit (add `hooks = true` under an existing `[features]` section, or append a new one) —
-it never rewrites the file through a TOML parser/serializer, so every other byte, including
-comments, is preserved. Either way, the first time hooks are registered (and on every later
+Codex 0.124 and newer run hooks by default; only `hooks = false` under `[features]` in
+`~/.codex/config.toml` turns them off. Older Codex needs `[features]` / `hooks = true` there
+before it will act on `~/.codex/hooks.json` at all. `install.sh` never edits that file on its own
+(it's your config, same as the rest of `config.toml`), but it reads it and runs `codex --version`
+(2 s timeout) to decide what to say: nothing when the flag is `true` or Codex is 0.124 or newer; a
+warning naming the line when `hooks = false` (or its deprecated alias `codex_hooks = false`) is
+set, whatever the version; a warning with the exact snippet to add when Codex is older than 0.124
+and the flag isn't set; and one softer line when the version can't be read. Pass
+`--enable-codex-hooks` to have `install.sh` set it for you: on Codex 0.124 or newer with no
+`hooks = false` it leaves the file alone and says so; with the deprecated `codex_hooks = false` it
+refuses and asks you to delete that line (the Codex docs do not say which key wins when both are
+set, and the patcher only ever adds lines); otherwise it backs up `config.toml` first,
+then makes the smallest possible textual edit (add `hooks = true` under an existing `[features]`
+section, or append a new one) — it never rewrites the file through a TOML parser/serializer, so
+every other byte, including comments, is preserved. Either way, the first time hooks are registered (and on every later
 `install.sh` re-run while they're still present) you'll see a reminder to run `/hooks` inside
 Codex to trust them — Codex won't act on a hook it hasn't been told to trust, same as Claude Code.
 
@@ -181,6 +188,26 @@ The schema (see `core/agentboard/db.py`) has these tables:
 
 Migrations are tracked with `PRAGMA user_version`; `db.connect()` applies any pending ones.
 
+**Retention.** The app runs `agentboard prune --auto` after its launch backfill and every 6 hours;
+the CLI itself gates it to one real run a day (`notes_meta.last_prune_at`, epoch seconds), so a
+second app instance or a manual run cannot double it up. Each run:
+
+- deletes sessions idle longer than `prune_days` (default 90), with all their events, triage,
+  links and notes, except a session that still has an open `needs_you` note, a PR awaiting you, an
+  active snooze or a live process (for a Claude session, only while `~/.claude/sessions/<pid>.json`
+  still names it, so a crashed session whose pid was reused still ages out); those are skipped and
+  counted in the `cli.prune` log line;
+- compacts: deletes tool-use and subagent events (`PreToolUse`, `PostToolUse`,
+  `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`) older than
+  `compact_days` (default 7), from every session, live or ended. They are most of the table and
+  nothing reads them once the turn is over; prompts, `Stop`s, notifications and session start/end
+  rows are kept;
+- deletes dismissed notes older than `prune_days`;
+- runs `VACUUM` when the free pages exceed 8 MB and a quarter of the file, at most once a week
+  (`notes_meta.last_vacuum_at`).
+
+`0` for either window means never. `agentboard prune --dry-run` prints what a run would delete.
+
 Next to the database live `agentboard.log` and `agentboard.log.1`, the diagnostic log (see
 Diagnostics below), and `hook-errors.log`, the hook's own failure log.
 
@@ -218,7 +245,10 @@ install/uninstall prints an error naming that file, skips just that tool, and st
 other tool and the backfill step — the overall run exits non-zero at the end so the problem isn't
 silently missed. `enable-codex-hooks` is the opt-in that sets Codex's `[features]` / `hooks = true`
 in `~/.codex/config.toml` (see Install/uninstall above); it's normally invoked via
-`install.sh --enable-codex-hooks` rather than directly.
+`install.sh --enable-codex-hooks` rather than directly. It is needed only for Codex older than
+0.124, or to override an explicit `hooks = false`: when `codex --version` reports 0.124 or newer
+and the flag isn't `false`, it prints that hooks are on by default and changes nothing (with or
+without `--dry-run`).
 
 ## State
 
@@ -598,8 +628,8 @@ a later plain `--rebuild` skips them; only `--reset` revisits them. `--rebuild -
 changed rules: it drops the open notes it made itself (never dismissed ones, never ones added by
 `note`, the inbox or a provider) and replays every recorded `Stop`, without reopening anything you
 dismissed. Transcript backfill does not record per-turn `Stop` events, so notes start with what the
-hook has recorded. `agentboard prune` drops dismissed notes older than its window, along with every
-note of a pruned session.
+hook has recorded. `agentboard prune` drops dismissed notes older than its `prune_days` window (never,
+when it is `0`), along with every note of a pruned session.
 
 **An open `needs_you` note puts its session in `needs_you`** (red icon, notification, Needs you
 section, the note's marker line as the waiting reason) until a newer prompt arrives in that
@@ -683,6 +713,8 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
 | `retitle_command` | argv list, string, or `null` | the local `claude` CLI with Haiku | Reads a session's recent context on stdin and prints a new title; `null` turns retitling off. |
 | `retitle_min_prompts` | integer >= 1 | `5` | New prompts since the last retitle before a session is retitled again. |
 | `retitle_max_per_run` | integer >= 0 | `5` | At most this many sessions retitled per `refresh-links`; `0` turns it off. |
+| `prune_days` | integer >= 0 | `90` | `prune` deletes sessions idle this many days (never one with an open `needs_you` note, a PR awaiting you, an active snooze or a live process) and dismissed notes older than this; `0` never deletes. |
+| `compact_days` | integer >= 0 | `7` | `prune` deletes tool-use and subagent events older than this many days; `0` never compacts. |
 | `log_level` | `debug`/`info`/`warn`/`error` | `info` | The diagnostic log's level; `AGENTBOARD_LOG_LEVEL` wins over it. |
 
 ```json
@@ -695,6 +727,8 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
   "prompt_injected_prefixes": ["<task-notification>", "<agent-message", "<cross-session-message"],
   "retitle_min_prompts": 5,
   "retitle_max_per_run": 5,
+  "prune_days": 90,
+  "compact_days": 7,
   "log_level": "info"
 }
 ```
@@ -721,12 +755,17 @@ agentboard enable-codex-hooks [--dry-run]
 agentboard focus <tool> <session_id>
 agentboard resume <tool> <session_id> [--print]
 agentboard map-codex --session ID --cwd DIR [--at TIME]
-agentboard prune [--days 90]
+agentboard prune [--days N] [--compact-days N] [--dry-run] [--auto] [--vacuum]
 agentboard logs [--since 1h|ISO-8601] [--grep TEXT] [--lines N] [--app]
 ```
 
 `hook`, `map-codex` and `backfill --session` are what the hooks run; you never need to call them
-yourself. `install-hooks --bin-path` only previews a different hook path for `install.sh
+yourself. `prune` is the retention sweep described under Data: `--days` and `--compact-days`
+override `prune_days` and `compact_days`, and `0` means never (until this release `--days 0`
+deleted every session; it now deletes none). `--auto` runs only when the last auto run was 24 hours
+ago or more and may vacuum on its own; `--vacuum` always vacuums afterwards; `--dry-run` prints the
+counts and changes nothing (with `--auto` it ignores the daily gate, so it previews the next real
+run). `install-hooks --bin-path` only previews a different hook path for `install.sh
 --dry-run`.
 
 ## Diagnostics
@@ -753,6 +792,17 @@ prune, map-codex, and what install-hooks / uninstall-hooks / enable-codex-hooks 
 alone. Hooks log one `hook.event` line per event at debug (tool, event, session, pid, tty, daemon,
 subagent) and an info `hook.drop` line only when an event is really dropped (no `session_id`,
 empty or unparseable payload). `hook-errors.log` is unchanged and still records hook failures.
+
+**In the app.** A one-line banner under the popover's search field and at the top of the
+dashboard's session list appears only when something is wrong: **Snapshot failed: …** (the CLI or
+the database is unreadable; the last good snapshot stays on screen), **Waiting on the CLI for N s**
+(a snapshot has been running for over 30 seconds), **No snapshot yet; the CLI is not answering**
+(nothing has come back within 45 seconds of launch) or **<action> failed: …** (a mark, focus,
+dismiss or prune that did not work; it clears after 15 seconds or with its x; a prune that fails
+at launch, usually because `install.sh`'s own backfill still holds the database, is only logged
+and retried once a minute later, and the banner shows only if the retry fails too). Its **Open log**
+button reveals `agentboard.log`. It never changes the menu bar icon. Settings → Diagnostics adds a
+`hook-errors.log` row (size, last write, **Reveal**) when that file is not empty.
 
 **Levels.** `debug`, `info` (the default), `warn`, `error`. Set the level with the
 `AGENTBOARD_LOG_LEVEL` environment variable, or `"log_level": "debug"` in
