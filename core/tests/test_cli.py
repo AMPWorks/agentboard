@@ -20,6 +20,20 @@ from tests.helpers import AgentBoardTestCase
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
+# `codex --version` is never run for real here: the Codex hooks-flag
+# messages would otherwise depend on whichever Codex the machine has.
+# Unknown by default; CodexFeatureFlagTests sets a version per test.
+_REAL_CODEX_VERSION = cli._codex_version
+_CODEX_VERSION_PATCH = mock.patch.object(cli, "_codex_version", return_value=None)
+
+
+def setUpModule():
+    _CODEX_VERSION_PATCH.start()
+
+
+def tearDownModule():
+    _CODEX_VERSION_PATCH.stop()
+
 
 def insert_session(conn, tool="claude", session_id="s1", **overrides):
     row = {
@@ -1753,6 +1767,142 @@ class CodexFeatureFlagTests(AgentBoardTestCase):
         self.codex_dir = self.fake_home / ".codex"
         self.config_path = self.codex_dir / "config.toml"
         self.hooks_path = self.codex_dir / "hooks.json"
+        # A Codex old enough to still need [features] hooks = true, unless a
+        # test sets another version on self.codex_version.
+        version_patch = mock.patch.object(cli, "_codex_version", return_value=(0, 123, 0))
+        self.codex_version = version_patch.start()
+        self.addCleanup(version_patch.stop)
+
+    def _install_codex_output(self):
+        self.hooks_path.write_text(json.dumps({}))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_install_hooks(cli.build_parser().parse_args(["install-hooks", "--codex"]))
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def _enable_output(self, *extra):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_enable_codex_hooks(
+                cli.build_parser().parse_args(["enable-codex-hooks", *extra]))
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    # -- codex --version and the 0.124 default ---------------------------------
+
+    def test_codex_version_parses_the_cli_output(self):
+        def run(stdout="", returncode=0, exc=None):
+            def fake(argv, **kwargs):
+                self.assertEqual(argv, ["codex", "--version"])
+                self.assertEqual(kwargs.get("timeout"), cli.CODEX_VERSION_TIMEOUT_SECS)
+                if exc:
+                    raise exc
+                return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="")
+            return fake
+
+        self.assertEqual(_REAL_CODEX_VERSION(run("codex-cli 0.124.0\n")), (0, 124, 0))
+        self.assertEqual(_REAL_CODEX_VERSION(run("codex-cli 1.2\n")), (1, 2, 0))
+        self.assertIsNone(_REAL_CODEX_VERSION(run("codex-cli\n")))
+        self.assertIsNone(_REAL_CODEX_VERSION(run("codex-cli 0.130.0\n", returncode=1)))
+        self.assertIsNone(_REAL_CODEX_VERSION(run(exc=FileNotFoundError("codex"))))
+        self.assertIsNone(_REAL_CODEX_VERSION(run(exc=subprocess.TimeoutExpired("codex", 2))))
+
+    def test_no_warning_on_codex_0_124(self):
+        self.codex_version.return_value = (0, 124, 0)
+        self.config_path.write_text('model = "gpt-5"\n')
+        out = self._install_codex_output()
+        self.assertIn("Run /hooks in Codex to trust the new hooks.", out)
+        self.assertNotIn("warning", out)
+        self.assertNotIn("[features]", out)
+
+    def test_warning_on_older_codex(self):
+        self.codex_version.return_value = (0, 123, 9)
+        self.config_path.write_text('model = "gpt-5"\n')
+        out = self._install_codex_output()
+        self.assertIn("warning: Codex 0.123.9 will ignore", out)
+        self.assertIn("hooks = true is set under [features]", out)
+        self.assertIn("install.sh --enable-codex-hooks", out)
+
+    def test_soft_note_when_version_unknown(self):
+        self.codex_version.return_value = None
+        self.config_path.write_text('model = "gpt-5"\n')
+        out = self._install_codex_output()
+        self.assertIn("Codex 0.124 and newer enable hooks by default; an older Codex needs "
+                      "hooks = true under [features]", out)
+        self.assertNotIn("warning", out)
+
+    def test_explicit_false_warns_on_any_version(self):
+        self.config_path.write_text("[features]\nhooks = false\n")
+        for version in ((0, 200, 0), (0, 100, 0), None):
+            self.codex_version.return_value = version
+            out = self._install_codex_output()
+            self.assertIn(f"warning: hooks = false under [features] in {self.config_path} "
+                          "disables hooks; remove it or run install.sh --enable-codex-hooks", out)
+
+    def test_flag_true_never_warns(self):
+        self.config_path.write_text("[features]\nhooks = true\n")
+        for version in ((0, 200, 0), (0, 100, 0), None):
+            self.codex_version.return_value = version
+            out = self._install_codex_output()
+            self.assertNotIn("warning", out)
+            self.assertNotIn("0.124", out)
+
+    def test_enable_is_noop_on_new_codex(self):
+        self.codex_version.return_value = (0, 130, 1)
+        self.config_path.write_text('model = "gpt-5"\n')
+        out = self._enable_output()
+        self.assertIn(f"Codex 0.130.1 enables hooks by default; {self.config_path} left unchanged",
+                      out)
+        self.assertEqual(self.config_path.read_text(), 'model = "gpt-5"\n')
+        self.assertEqual(list(self.codex_dir.glob("*.agentboard-bak-*")), [])
+        self.assertFalse((self.agentboard_home / "install-manifest.json").exists())
+        out = self._enable_output("--dry-run")
+        self.assertIn("left unchanged", out)
+
+    def test_enable_is_noop_on_new_codex_without_a_config_file(self):
+        self.codex_version.return_value = (0, 124, 0)
+        self._enable_output()
+        self.assertFalse(self.config_path.exists())
+
+    def test_enable_still_patches_explicit_false(self):
+        self.codex_version.return_value = (0, 130, 0)
+        self.config_path.write_text("[features]\nhooks = false\n")
+        self._enable_output()
+        self.assertEqual(tomllib.loads(self.config_path.read_text()), {"features": {"hooks": True}})
+        self.assertEqual(len(list(self.codex_dir.glob("*.agentboard-bak-*"))), 1)
+
+    def test_enable_patches_when_version_unknown(self):
+        self.codex_version.return_value = None
+        self.config_path.write_text('model = "gpt-5"\n')
+        self._enable_output()
+        self.assertIs(tomllib.loads(self.config_path.read_text())["features"]["hooks"], True)
+
+    def test_codex_hooks_alias_is_read(self):
+        self.config_path.write_text("[features]\ncodex_hooks = true\n")
+        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), True)
+        self.config_path.write_text("[features]\ncodex_hooks = false\n")
+        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
+        # `hooks` wins when both are set.
+        self.config_path.write_text("[features]\ncodex_hooks = false\nhooks = true\n")
+        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), True)
+        self.config_path.write_text("[features]\ncodex_hooks = true\nhooks = false\n")
+        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
+
+    def test_alias_false_warns_by_its_own_name_and_enable_overrides_it(self):
+        self.config_path.write_text("[features]\ncodex_hooks = false\n")
+        out = self._install_codex_output()
+        self.assertIn("warning: codex_hooks = false under [features]", out)
+        self._enable_output()
+        data = tomllib.loads(self.config_path.read_text())
+        self.assertEqual(data["features"], {"codex_hooks": False, "hooks": True})
+        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), True)
+
+    def test_enable_leaves_an_alias_true_alone(self):
+        self.config_path.write_text("[features]\ncodex_hooks = true\n")
+        out = self._enable_output()
+        self.assertIn("codex_hooks = true already set under [features]; left unchanged", out)
+        self.assertEqual(self.config_path.read_text(), "[features]\ncodex_hooks = true\n")
 
     # -- _codex_hooks_feature_enabled ----------------------------------------
 
@@ -1767,17 +1917,17 @@ class CodexFeatureFlagTests(AgentBoardTestCase):
         self.config_path.write_text("[features]\nhooks = false\n")
         self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
 
-    def test_feature_flag_section_present_without_the_key(self):
+    def test_feature_flag_section_present_without_the_key_is_unset(self):
         self.config_path.write_text("[features]\njs_repl = true\n")
-        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
+        self.assertIsNone(cli._codex_hooks_feature_enabled(self.config_path))
 
-    def test_feature_flag_no_features_section_at_all(self):
+    def test_feature_flag_no_features_section_at_all_is_unset(self):
         self.config_path.write_text('model = "gpt-5"\n')
-        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
+        self.assertIsNone(cli._codex_hooks_feature_enabled(self.config_path))
 
     def test_feature_flag_features_defined_as_a_non_table_does_not_crash(self):
         self.config_path.write_text('features = "on"\n')
-        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
+        self.assertIsNone(cli._codex_hooks_feature_enabled(self.config_path))
 
     # -- _patch_codex_hooks_feature: the exact matrix the review asked for --
 

@@ -57,14 +57,19 @@ normalized before any of this (made absolute, trailing slash stripped, symlinks 
 relative path, a trailing slash, or a symlinked ancestor all compare equal — `uninstall.sh --prefix
 DIR` applies the exact same quit logic before removing the bundle.
 
-Codex additionally requires `[features]` / `hooks = true` in `~/.codex/config.toml` before it
-will act on `~/.codex/hooks.json` at all — `install.sh` never edits that file on its own (it's
-your config, same as the rest of `config.toml`), but it reads it and prints a prominent warning
-with the exact snippet to add whenever the flag isn't set. Pass `--enable-codex-hooks` to have
-`install.sh` set it for you: this backs up `config.toml` first, then makes the smallest possible
-textual edit (add `hooks = true` under an existing `[features]` section, or append a new one) —
-it never rewrites the file through a TOML parser/serializer, so every other byte, including
-comments, is preserved. Either way, the first time hooks are registered (and on every later
+Codex 0.124 and newer run hooks by default; only `hooks = false` under `[features]` in
+`~/.codex/config.toml` turns them off. Older Codex needs `[features]` / `hooks = true` there
+before it will act on `~/.codex/hooks.json` at all. `install.sh` never edits that file on its own
+(it's your config, same as the rest of `config.toml`), but it reads it and runs `codex --version`
+(2 s timeout) to decide what to say: nothing when the flag is `true` or Codex is 0.124 or newer; a
+warning naming the line when `hooks = false` (or its deprecated alias `codex_hooks = false`) is
+set, whatever the version; a warning with the exact snippet to add when Codex is older than 0.124
+and the flag isn't set; and one softer line when the version can't be read. Pass
+`--enable-codex-hooks` to have `install.sh` set it for you: on Codex 0.124 or newer with no
+`hooks = false` it leaves the file alone and says so; otherwise it backs up `config.toml` first,
+then makes the smallest possible textual edit (add `hooks = true` under an existing `[features]`
+section, or append a new one) — it never rewrites the file through a TOML parser/serializer, so
+every other byte, including comments, is preserved. Either way, the first time hooks are registered (and on every later
 `install.sh` re-run while they're still present) you'll see a reminder to run `/hooks` inside
 Codex to trust them — Codex won't act on a hook it hasn't been told to trust, same as Claude Code.
 
@@ -236,7 +241,10 @@ install/uninstall prints an error naming that file, skips just that tool, and st
 other tool and the backfill step — the overall run exits non-zero at the end so the problem isn't
 silently missed. `enable-codex-hooks` is the opt-in that sets Codex's `[features]` / `hooks = true`
 in `~/.codex/config.toml` (see Install/uninstall above); it's normally invoked via
-`install.sh --enable-codex-hooks` rather than directly.
+`install.sh --enable-codex-hooks` rather than directly. It is needed only for Codex older than
+0.124, or to override an explicit `hooks = false`: when `codex --version` reports 0.124 or newer
+and the flag isn't `false`, it prints that hooks are on by default and changes nothing (with or
+without `--dry-run`).
 
 ## State
 

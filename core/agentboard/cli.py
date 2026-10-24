@@ -1124,14 +1124,53 @@ def _diff(old_text, new_text, label):
 
 # -- Codex [features] hooks flag -------------------------------------------------
 #
-# Codex silently ignores hooks.json unless `[features]\nhooks = true` is set
-# in config.toml. install-hooks never edits that file by default (that's
-# user config, same as settings.json/hooks.json themselves aren't touched
-# beyond the hooks key) -- it only reads it to warn when the flag is
-# missing. `enable-codex-hooks` below is the opt-in that actually sets it.
+# Codex older than 0.124 silently ignores hooks.json unless
+# `[features]\nhooks = true` is set in config.toml; 0.124 and newer run hooks
+# by default, and only `hooks = false` turns them off. install-hooks never
+# edits that file by default (that's user config, same as
+# settings.json/hooks.json themselves aren't touched beyond the hooks key) --
+# it only reads it to warn when the flag matters. `enable-codex-hooks` below
+# is the opt-in that actually sets it.
+
+# The first Codex release that runs hooks without `[features] hooks = true`.
+# The rust-v0.124.0 release notes say "Mark codex_hooks stable" (#19012) and
+# "Hooks are now stable"; the Codex hooks docs say "Hooks are enabled by
+# default". The exact release the default flipped in is secondhand, so it
+# lives in this one constant.
+CODEX_HOOKS_DEFAULT_ON_VERSION = (0, 124, 0)
+CODEX_VERSION_TIMEOUT_SECS = 2
+_CODEX_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+
 
 def _codex_config_path() -> Path:
     return Path.home() / ".codex" / "config.toml"
+
+
+def _codex_version(run=subprocess.run):
+    """The installed Codex CLI's version as a tuple (`codex-cli 0.124.0` ->
+    (0, 124, 0)), or None when codex is missing, fails, hangs past
+    CODEX_VERSION_TIMEOUT_SECS or prints no version."""
+    try:
+        result = run(
+            ["codex", "--version"], capture_output=True, text=True,
+            timeout=CODEX_VERSION_TIMEOUT_SECS, check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    match = _CODEX_VERSION_RE.search(result.stdout or "")
+    if not match:
+        return None
+    return tuple(int(part or 0) for part in match.groups())
+
+
+def _format_version(version) -> str:
+    return ".".join(str(part) for part in version)
+
+
+def _codex_hooks_on_by_default(version) -> bool:
+    return version is not None and tuple(version) >= CODEX_HOOKS_DEFAULT_ON_VERSION
 
 
 def _read_text_no_newline_translation(path: Path) -> str:
@@ -1152,24 +1191,37 @@ def _write_text_no_newline_translation(path: Path, text: str) -> None:
         fh.write(text)
 
 
-def _codex_hooks_feature_enabled(config_path: Path):
-    """True/False if config.toml says so, None if that can't be determined
-    (missing file, no tomllib, the file itself is unparseable TOML, or it
-    isn't valid UTF-8 -- tomllib.load() raises UnicodeDecodeError, not
-    TOMLDecodeError, for that last one)."""
+def _codex_hooks_feature_setting(config_path: Path):
+    """(value, key) of the hooks flag under `[features]` in config.toml:
+    True/False when `hooks`, or else its deprecated alias `codex_hooks`, is
+    set to a boolean (`hooks` wins when both are), and (None, None) when
+    neither is set or that can't be determined (missing file, no tomllib,
+    unparseable TOML, or not valid UTF-8 -- tomllib.load() raises
+    UnicodeDecodeError, not TOMLDecodeError, for that last one)."""
     if not config_path.is_file():
-        return None
+        return None, None
     try:
         import tomllib
     except ImportError:
-        return None
+        return None, None
     try:
         with config_path.open("rb") as fh:
             data = tomllib.load(fh)
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError):
-        return None
+        return None, None
     features = data.get("features")
-    return isinstance(features, dict) and features.get("hooks") is True
+    if not isinstance(features, dict):
+        return None, None
+    for key in ("hooks", "codex_hooks"):
+        if isinstance(features.get(key), bool):
+            return features[key], key
+    return None, None
+
+
+def _codex_hooks_feature_enabled(config_path: Path):
+    """True/False when config.toml sets the hooks flag (or its deprecated
+    `codex_hooks` alias), None when it is unset or unreadable."""
+    return _codex_hooks_feature_setting(config_path)[0]
 
 
 def _any_agentboard_hook(hooks, command) -> bool:
@@ -1188,22 +1240,38 @@ def _print_codex_hooks_reminder(hooks_path: Path, command: str) -> None:
         return
     print("Run /hooks in Codex to trust the new hooks.")
     config_path = _codex_config_path()
-    enabled = _codex_hooks_feature_enabled(config_path)
-    if enabled is not True:
+    enabled, key = _codex_hooks_feature_setting(config_path)
+    if enabled is True:
+        return
+    if enabled is False:
         print(
-            f"warning: Codex will ignore {hooks_path} until "
-            f"hooks = true is set under [features] in {config_path}"
+            f"warning: {key} = false under [features] in {config_path} disables hooks; "
+            "remove it or run install.sh --enable-codex-hooks"
         )
-        try:
-            config_text = (
-                _read_text_no_newline_translation(config_path) if config_path.is_file() else ""
-            )
-        except (OSError, UnicodeDecodeError):
-            print(f"    could not read {config_path} as UTF-8; skipping feature check")
-        else:
-            print("    or run install.sh --enable-codex-hooks, which does this safely:")
-            for line in _codex_features_manual_hint_lines(config_text):
-                print(f"        {line}")
+        return
+    version = _codex_version()
+    if _codex_hooks_on_by_default(version):
+        return
+    if version is None:
+        print(
+            "Codex 0.124 and newer enable hooks by default; an older Codex needs "
+            f"hooks = true under [features] in {config_path} (install.sh --enable-codex-hooks)"
+        )
+        return
+    print(
+        f"warning: Codex {_format_version(version)} will ignore {hooks_path} until "
+        f"hooks = true is set under [features] in {config_path}"
+    )
+    try:
+        config_text = (
+            _read_text_no_newline_translation(config_path) if config_path.is_file() else ""
+        )
+    except (OSError, UnicodeDecodeError):
+        print(f"    could not read {config_path} as UTF-8; skipping feature check")
+    else:
+        print("    or run install.sh --enable-codex-hooks, which does this safely:")
+        for line in _codex_features_manual_hint_lines(config_text):
+            print(f"        {line}")
 
 
 class CodexTomlPatchError(Exception):
@@ -1523,6 +1591,19 @@ def _print_codex_manual_hint(old_text: str, file=None) -> None:
 
 def cmd_enable_codex_hooks(args):
     config_path = _codex_config_path()
+    enabled, key = _codex_hooks_feature_setting(config_path)
+    if enabled is True and key != "hooks":
+        diag.info("cli", "enable_codex_hooks", file=config_path, outcome="alias_set")
+        print(f"{config_path}: {key} = true already set under [features]; left unchanged")
+        return 0
+    if enabled is not False:
+        version = _codex_version()
+        if _codex_hooks_on_by_default(version):
+            diag.info("cli", "enable_codex_hooks", file=config_path, outcome="default_on",
+                      codex_version=_format_version(version), dry_run=bool(args.dry_run))
+            print(f"Codex {_format_version(version)} enables hooks by default; "
+                  f"{config_path} left unchanged")
+            return 0
     # is_file() captured before any write below: a 0-byte config.toml
     # that already existed is "patched" (an empty file is still a file
     # the user created/owns), not "created" -- old_text == "" alone can't

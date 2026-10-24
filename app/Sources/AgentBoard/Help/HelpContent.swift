@@ -49,7 +49,7 @@ enum HelpContent {
             .shortcut(keys: "⌃⌥⌘A", action: "Show or hide the dashboard from anywhere."),
             .paragraph("The gear button (in the popover footer and the dashboard toolbar) opens **Settings…**, this **AgentBoard Help**, **Open Log** and **Quit AgentBoard**. Every button and control has a tooltip: hover over it to see what it does. The ? buttons next to section headers open the matching help topic."),
             .heading("Installing"),
-            .paragraph("`scripts/install.sh` (from a checkout of AgentBoard) installs the command line tool, the hooks and the app, and imports recent history. Re-run it after an upgrade, or after installing Claude Code or Codex for the first time so the new tool gets hooks. Pass `--dry-run` to preview every change first. Codex also needs `hooks = true` under `[features]` in `~/.codex/config.toml` (`install.sh --enable-codex-hooks` adds it) and the new hooks trusted with `/hooks` inside Codex."),
+            .paragraph("`scripts/install.sh` (from a checkout of AgentBoard) installs the command line tool, the hooks and the app, and imports recent history. Re-run it after an upgrade, or after installing Claude Code or Codex for the first time so the new tool gets hooks. Pass `--dry-run` to preview every change first. Codex 0.124 and newer run hooks by default; an older Codex also needs `hooks = true` under `[features]` in `~/.codex/config.toml` (`install.sh --enable-codex-hooks` adds it), and `hooks = false` there turns them off on any version. Either way, trust the new hooks with `/hooks` inside Codex."),
         ])
 
     // MARK: - 2. Session states
@@ -395,7 +395,7 @@ enum HelpContent {
             .keyValue([
                 HelpRow(key: "`agentboard install-hooks`", value: "Register the hooks. `--claude` / `--codex` limit it to one tool; `--dry-run` shows the change. Backs up the file first and leaves other hooks alone."),
                 HelpRow(key: "`agentboard uninstall-hooks`", value: "Remove only AgentBoard's own hook entries. `--claude`, `--codex`, `--dry-run`."),
-                HelpRow(key: "`agentboard enable-codex-hooks`", value: "Turn on `hooks = true` under `[features]` in `~/.codex/config.toml` (backed up first). `--dry-run` previews."),
+                HelpRow(key: "`agentboard enable-codex-hooks`", value: "Turn on `hooks = true` under `[features]` in `~/.codex/config.toml` (backed up first), for Codex older than 0.124 or to undo a `hooks = false`. On Codex 0.124 and newer, which run hooks by default, it changes nothing unless `hooks = false` is set. `--dry-run` previews."),
             ]),
             .heading("Environment variables"),
             .keyValue([
@@ -428,7 +428,7 @@ enum HelpContent {
             .heading("Common problems"),
             .keyValue([
                 HelpRow(key: "No sessions shown", value: "Run `agentboard snapshot` in a terminal. If it lists nothing, the hooks are probably not installed: re-run `scripts/install.sh` (after installing Claude Code or Codex for the first time too). Sessions started before the hooks were installed appear after a backfill. Check **Show hidden** for non-interactive runs."),
-                HelpRow(key: "Codex sessions missing", value: "Codex needs `hooks = true` under `[features]` in `~/.codex/config.toml` (`agentboard enable-codex-hooks`) and the hooks trusted with `/hooks` inside Codex."),
+                HelpRow(key: "Codex sessions missing", value: "Trust the hooks with `/hooks` inside Codex. Codex older than 0.124 also needs `hooks = true` under `[features]` in `~/.codex/config.toml` (`agentboard enable-codex-hooks`); on any version, `hooks = false` there turns hooks off."),
                 HelpRow(key: "“agentboard CLI not found”", value: "The app looks in its own bundle, then `$PATH`, then Settings → CLI & Data → agentboard path override. Re-run `scripts/install.sh` or set the override."),
                 HelpRow(key: "No PR buttons", value: "PR detection needs the GitHub CLI: install `gh` and run `gh auth login`. PRs appear after the next `refresh-links` (at launch and every 10 minutes). `agentboard logs --grep gh` shows each lookup."),
                 HelpRow(key: "A PR still “awaits your review”", value: "Only a review or comment by someone other than automation counts. If a bot account of yours is answering, it is ignored only when it is a GitHub bot or listed in `automation_logins`; if you share one account with the session, respond while the session is idle."),

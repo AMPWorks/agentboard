@@ -617,6 +617,19 @@ def _python3_stub_env(tmp):
     return env
 
 
+def _codex_stub(tmp, version):
+    """A `codex` stub next to the python3 stub whose `--version` prints
+    `codex-cli <version>`, so the Codex hooks-flag messages do not depend
+    on whichever Codex (if any) the machine has. Only for tests whose fake
+    HOME already has ~/.codex: install.sh also counts a `codex` on PATH as
+    Codex being installed."""
+    bindir = tmp / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "codex"
+    stub.write_text(f'#!/bin/bash\necho "codex-cli {version}"\n')
+    stub.chmod(0o755)
+
+
 @unittest.skipUnless(sys.platform == "darwin", "install.sh/uninstall.sh are macOS-only")
 class InstallScriptEndToEndTests(unittest.TestCase):
     """Runs the real install.sh --no-app against a fresh, throwaway HOME
@@ -641,6 +654,8 @@ class InstallScriptEndToEndTests(unittest.TestCase):
         (self.fake_home / ".codex" / "config.toml").write_text('model = "gpt-5"\n')
 
         self.env = _python3_stub_env(self.tmp)
+        # A Codex old enough to still need [features] hooks = true.
+        _codex_stub(self.tmp, "0.123.0")
         self.env["HOME"] = str(self.fake_home)
         for var in ("AGENTBOARD_HOME", "AGENTBOARD_CORE_DIR"):
             self.env.pop(var, None)
@@ -1342,6 +1357,8 @@ class EnableCodexHooksRefusalDoesNotAbortInstallTests(unittest.TestCase):
         (fake_home / ".codex" / "config.toml").write_text("features = { web = [1, 2] }\n")
 
         env = _python3_stub_env(tmp)
+        # On a Codex that enables hooks by default there is nothing to patch.
+        _codex_stub(tmp, "0.123.0")
         env["HOME"] = str(fake_home)
         for var in ("AGENTBOARD_HOME", "AGENTBOARD_CORE_DIR"):
             env.pop(var, None)
