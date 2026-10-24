@@ -1889,14 +1889,29 @@ class CodexFeatureFlagTests(AgentBoardTestCase):
         self.config_path.write_text("[features]\ncodex_hooks = true\nhooks = false\n")
         self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), False)
 
-    def test_alias_false_warns_by_its_own_name_and_enable_overrides_it(self):
-        self.config_path.write_text("[features]\ncodex_hooks = false\n")
+    def test_alias_false_warns_by_its_own_name_and_enable_refuses(self):
+        text = "[features]\ncodex_hooks = false\n"
+        self.config_path.write_text(text)
         out = self._install_codex_output()
         self.assertIn("warning: codex_hooks = false under [features]", out)
-        self._enable_output()
-        data = tomllib.loads(self.config_path.read_text())
-        self.assertEqual(data["features"], {"codex_hooks": False, "hooks": True})
-        self.assertIs(cli._codex_hooks_feature_enabled(self.config_path), True)
+        self.assertIn("remove that line", out)
+        for argv in (["enable-codex-hooks"], ["enable-codex-hooks", "--dry-run"]):
+            rc, out, err = _run_cmd(argv)
+            self.assertEqual(rc, 1)
+            self.assertIn("codex_hooks = false under [features]", err)
+            self.assertIn("remove that line by hand", err)
+        self.assertEqual(self.config_path.read_text(), text)
+        self.assertEqual(list(self.config_path.parent.glob("config.toml.*")), [])
+
+    def test_alias_false_beside_hooks_true_still_warns_and_refuses(self):
+        text = "[features]\nhooks = true\ncodex_hooks = false\n"
+        self.config_path.write_text(text)
+        out = self._install_codex_output()
+        self.assertIn("warning: codex_hooks = false under [features]", out)
+        rc, _, err = _run_cmd(["enable-codex-hooks"])
+        self.assertEqual(rc, 1)
+        self.assertIn("remove that line by hand", err)
+        self.assertEqual(self.config_path.read_text(), text)
 
     def test_enable_leaves_an_alias_true_alone(self):
         self.config_path.write_text("[features]\ncodex_hooks = true\n")

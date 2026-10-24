@@ -1191,26 +1191,42 @@ def _write_text_no_newline_translation(path: Path, text: str) -> None:
         fh.write(text)
 
 
-def _codex_hooks_feature_setting(config_path: Path):
-    """(value, key) of the hooks flag under `[features]` in config.toml:
-    True/False when `hooks`, or else its deprecated alias `codex_hooks`, is
-    set to a boolean (`hooks` wins when both are), and (None, None) when
-    neither is set or that can't be determined (missing file, no tomllib,
-    unparseable TOML, or not valid UTF-8 -- tomllib.load() raises
-    UnicodeDecodeError, not TOMLDecodeError, for that last one)."""
+def _codex_features(config_path: Path):
+    """The `[features]` table of config.toml, or None when it is missing or
+    can't be read (missing file, no tomllib, unparseable TOML, or not valid
+    UTF-8 -- tomllib.load() raises UnicodeDecodeError, not TOMLDecodeError,
+    for that last one)."""
     if not config_path.is_file():
-        return None, None
+        return None
     try:
         import tomllib
     except ImportError:
-        return None, None
+        return None
     try:
         with config_path.open("rb") as fh:
             data = tomllib.load(fh)
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError):
-        return None, None
+        return None
     features = data.get("features")
-    if not isinstance(features, dict):
+    return features if isinstance(features, dict) else None
+
+
+def _codex_alias_disables_hooks(config_path: Path) -> bool:
+    """`codex_hooks = false` under `[features]`, whatever `hooks` says. The
+    Codex docs say only that the deprecated alias "still works", not which
+    key wins when both are set, so a false alias may keep hooks off even
+    beside `hooks = true`."""
+    features = _codex_features(config_path)
+    return features is not None and features.get("codex_hooks") is False
+
+
+def _codex_hooks_feature_setting(config_path: Path):
+    """(value, key) of the hooks flag under `[features]` in config.toml:
+    True/False when `hooks`, or else its deprecated alias `codex_hooks`, is
+    set to a boolean (`hooks` wins when both are), and (None, None) when
+    neither is set or that can't be determined (see _codex_features)."""
+    features = _codex_features(config_path)
+    if features is None:
         return None, None
     for key in ("hooks", "codex_hooks"):
         if isinstance(features.get(key), bool):
@@ -1240,6 +1256,12 @@ def _print_codex_hooks_reminder(hooks_path: Path, command: str) -> None:
         return
     print("Run /hooks in Codex to trust the new hooks.")
     config_path = _codex_config_path()
+    if _codex_alias_disables_hooks(config_path):
+        print(
+            f"warning: codex_hooks = false under [features] in {config_path} may keep hooks off; "
+            "remove that line (enable-codex-hooks does not edit the deprecated alias)"
+        )
+        return
     enabled, key = _codex_hooks_feature_setting(config_path)
     if enabled is True:
         return
@@ -1591,6 +1613,18 @@ def _print_codex_manual_hint(old_text: str, file=None) -> None:
 
 def cmd_enable_codex_hooks(args):
     config_path = _codex_config_path()
+    if _codex_alias_disables_hooks(config_path):
+        # Adding hooks = true beside it would leave two contradicting keys,
+        # and the docs do not say which one Codex honours; removing a line
+        # is outside what the minimal-edit patcher may do, so refuse.
+        diag.info("cli", "enable_codex_hooks", file=config_path, outcome="alias_false",
+                  dry_run=bool(args.dry_run))
+        _report(
+            "error", "enable_codex_hooks",
+            f"error: codex_hooks = false under [features] in {config_path} turns hooks off; "
+            "remove that line by hand (it is the deprecated alias of hooks), then re-run",
+        )
+        return 1
     enabled, key = _codex_hooks_feature_setting(config_path)
     if enabled is True and key != "hooks":
         diag.info("cli", "enable_codex_hooks", file=config_path, outcome="alias_set")

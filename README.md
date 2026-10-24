@@ -66,7 +66,9 @@ warning naming the line when `hooks = false` (or its deprecated alias `codex_hoo
 set, whatever the version; a warning with the exact snippet to add when Codex is older than 0.124
 and the flag isn't set; and one softer line when the version can't be read. Pass
 `--enable-codex-hooks` to have `install.sh` set it for you: on Codex 0.124 or newer with no
-`hooks = false` it leaves the file alone and says so; otherwise it backs up `config.toml` first,
+`hooks = false` it leaves the file alone and says so; with the deprecated `codex_hooks = false` it
+refuses and asks you to delete that line (the Codex docs do not say which key wins when both are
+set, and the patcher only ever adds lines); otherwise it backs up `config.toml` first,
 then makes the smallest possible textual edit (add `hooks = true` under an existing `[features]`
 section, or append a new one) — it never rewrites the file through a TOML parser/serializer, so
 every other byte, including comments, is preserved. Either way, the first time hooks are registered (and on every later
