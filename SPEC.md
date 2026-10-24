@@ -183,7 +183,8 @@ Liveness: `kill -0 pid` (os.kill(pid, 0); PermissionError counts as alive). For 
 treat `~/.claude/sessions/<pid>.json` with matching `sessionId` as confirmation; files there
 may contain only `{pid, sessionId}` — use `status`/`waitingFor` only if present. (Added later:)
 the file is read for every Claude session, pid known or not (never one whose pid differs from
-the session's known pid). Its `status` is a tie-breaker: `busy`/`idle` count when
+the session's known pid; when several files share a `sessionId`, the one with a live pid, then
+the newest `statusUpdatedAt`, wins). Its `status` is a tie-breaker: `busy`/`idle` count when
 `statusUpdatedAt` (ms since the epoch) is newer than the session's `last_event_at`, and `idle`
 also counts when last_event is SubagentStart/SubagentStop and it is newer than the session's
 latest parent prompt (any kind). Any other status (e.g. `shell`) is no signal; `waiting` with

@@ -759,6 +759,37 @@ class LivenessTests(AgentBoardTestCase):
         self.assertEqual(registry["abc"]["waitingFor"], "input needed")
         self.assertNotIn("not-json", registry)
 
+    def test_load_claude_session_registry_picks_one_entry_per_session_deterministically(self):
+        # Two files share a sessionId (a crashed process's leftover next to
+        # the live one): the live pid wins whatever its statusUpdatedAt, and
+        # between dead pids the newest statusUpdatedAt wins, in either
+        # directory order.
+        import os
+
+        sessions_dir = self.fake_home / ".claude" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        dead = 2**30
+
+        def write(pid, at):
+            (sessions_dir / f"{pid}.json").write_text(json.dumps(
+                {"pid": pid, "sessionId": "abc", "status": "idle", "statusUpdatedAt": at}))
+
+        live = os.getpid()
+        for order in ((live, dead), (dead, live)):
+            with self.subTest(order=order):
+                for path in sessions_dir.iterdir():
+                    path.unlink()
+                for pid in order:
+                    write(pid, 1000 if pid == live else 2000)
+                registry = reconcile.load_claude_session_registry(sessions_dir)
+                self.assertEqual(registry["abc"]["pid"], live)
+        for path in sessions_dir.iterdir():
+            path.unlink()
+        write(dead, 2000)
+        write(dead + 1, 3000)
+        self.assertEqual(
+            reconcile.load_claude_session_registry(sessions_dir)["abc"]["pid"], dead + 1)
+
     def test_effective_liveness_prefers_known_pid(self):
         import os
 

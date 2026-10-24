@@ -107,6 +107,38 @@ class SnapshotTests(AgentBoardTestCase):
         entry = cli.build_snapshot(self.conn, include_all=True, now=now)["sessions"][0]
         self.assertEqual(entry["state"], "running")
 
+    def test_registry_file_for_another_pid_is_ignored_and_the_real_one_wins(self):
+        # The session's pid is known; a <otherpid>.json for the same session
+        # id (a crashed earlier process) says busy, fresh: not this
+        # process's news, so the finished turn stays Review.
+        now = datetime(2026, 10, 24, 6, 0, tzinfo=timezone.utc)
+        pid = os.getpid()
+        dead_pid = 2**30
+        insert_session(
+            self.conn, session_id="s1", pid=pid, last_event="Stop",
+            last_event_at="2026-10-24T05:44:20.010000Z",
+            updated_at="2026-10-24T05:44:20.010000Z", last_assistant="All set.",
+        )
+        sessions_dir = self.fake_home / ".claude" / "sessions"
+        sessions_dir.mkdir()
+
+        def write(file_pid, status, at):
+            (sessions_dir / f"{file_pid}.json").write_text(json.dumps({
+                "pid": file_pid, "sessionId": "s1", "status": status,
+                "statusUpdatedAt": int(at.timestamp() * 1000),
+            }))
+
+        write(dead_pid, "busy", datetime(2026, 10, 24, 5, 59, tzinfo=timezone.utc))
+        entry = cli.build_snapshot(self.conn, include_all=True, now=now)["sessions"][0]
+        self.assertEqual((entry["state"], entry["waiting_reason"]),
+                         ("review", "Your turn: All set."))
+        # The live pid's own file is the one consulted, even though the dead
+        # one's statusUpdatedAt is newer and directory order is arbitrary.
+        write(dead_pid, "idle", datetime(2026, 10, 24, 5, 59, tzinfo=timezone.utc))
+        write(pid, "busy", datetime(2026, 10, 24, 5, 50, tzinfo=timezone.utc))
+        entry = cli.build_snapshot(self.conn, include_all=True, now=now)["sessions"][0]
+        self.assertEqual((entry["state"], entry["waiting_reason"]), ("running", None))
+
     def test_default_excludes_noninteractive(self):
         insert_session(self.conn, session_id="s1", interactive=0)
         snapshot = cli.build_snapshot(self.conn, include_all=False)

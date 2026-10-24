@@ -80,8 +80,22 @@ def is_pid_alive(pid):
         return None
 
 
+def _registry_rank(entry):
+    """Sort key choosing between <pid>.json files that share a sessionId (a
+    crashed process's leftover next to the live resume): a live pid first,
+    then the newest statusUpdatedAt, then the higher pid, so the choice
+    never depends on directory order."""
+    updated = _registry_updated_at(entry)
+    return (
+        is_pid_alive(entry.get("pid")) is True,
+        updated.timestamp() if updated is not None else float("-inf"),
+        entry.get("pid"),
+    )
+
+
 def load_claude_session_registry(home: Path) -> dict:
-    """Map sessionId -> status payload from ~/.claude/sessions/<pid>.json."""
+    """Map sessionId -> status payload from ~/.claude/sessions/<pid>.json.
+    When several files carry the same sessionId, _registry_rank picks one."""
     registry = {}
     if not home.is_dir():
         return registry
@@ -101,7 +115,9 @@ def load_claude_session_registry(home: Path) -> dict:
             continue
         data = dict(data)
         data["pid"] = pid
-        registry[session_id] = data
+        current = registry.get(session_id)
+        if current is None or _registry_rank(data) > _registry_rank(current):
+            registry[session_id] = data
     return registry
 
 
