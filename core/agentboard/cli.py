@@ -2266,7 +2266,24 @@ def _set_meta_value(conn, key, value):
     )
 
 
-def _prune_keep_reason(conn, session, config, now):
+def _prune_pid_is_live(session, claude_registry) -> bool:
+    """Whether an un-ended session's pid still belongs to it. A live Claude
+    session writes `updated_at` on every hook event, so one idle for the
+    whole prune window with a live pid is far more often a crashed session
+    whose pid was reused; for Claude the pid only counts when
+    ~/.claude/sessions/<pid>.json names this session."""
+    if session.get("ended_at"):
+        return False
+    pid = session.get("pid")
+    if reconcile.is_pid_alive(pid) is not True:
+        return False
+    if session["tool"] != "claude":
+        return True
+    entry = claude_registry.get(session["session_id"])
+    return entry is not None and entry.get("pid") == pid
+
+
+def _prune_keep_reason(conn, session, config, now, claude_registry=None):
     """Why an old session must survive the prune, or None."""
     tool, session_id = session["tool"], session["session_id"]
     if conn.execute(
@@ -2287,7 +2304,7 @@ def _prune_keep_reason(conn, session, config, now):
         until = reconcile.parse_ts(triage["until"])
         if until is not None and until > now:
             return "snoozed"
-    if not session.get("ended_at") and reconcile.is_pid_alive(session.get("pid")) is True:
+    if _prune_pid_is_live(session, claude_registry or {}):
         return "alive"
     return None
 
@@ -2335,13 +2352,16 @@ def cmd_prune(args):
 
         doomed, skipped = [], {}
         if cutoff:
+            claude_registry = reconcile.load_claude_session_registry(
+                Path.home() / ".claude" / "sessions"
+            )
             rows = conn.execute(
                 "SELECT * FROM sessions WHERE updated_at IS NOT NULL AND updated_at < ?",
                 (cutoff,),
             ).fetchall()
             for row in rows:
                 session = dict(row)
-                reason = _prune_keep_reason(conn, session, config, now)
+                reason = _prune_keep_reason(conn, session, config, now, claude_registry)
                 if reason:
                     skipped[reason] = skipped.get(reason, 0) + 1
                 else:

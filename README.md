@@ -192,7 +192,9 @@ second app instance or a manual run cannot double it up. Each run:
 
 - deletes sessions idle longer than `prune_days` (default 90), with all their events, triage,
   links and notes, except a session that still has an open `needs_you` note, a PR awaiting you, an
-  active snooze or a live process; those are skipped and counted in the `cli.prune` log line;
+  active snooze or a live process (for a Claude session, only while `~/.claude/sessions/<pid>.json`
+  still names it, so a crashed session whose pid was reused still ages out); those are skipped and
+  counted in the `cli.prune` log line;
 - compacts: deletes tool-use and subagent events (`PreToolUse`, `PostToolUse`,
   `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`) older than
   `compact_days` (default 7), from every session, live or ended. They are most of the table and

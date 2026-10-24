@@ -3422,13 +3422,35 @@ class PruneTests(AgentBoardTestCase):
         _run_cmd(["prune"])
         self.assertEqual(self._session_ids(), ["snoozed"])
 
+    def _write_registry(self, pid, session_id):
+        # HOME is a temp dir (AgentBoardTestCase), never the real ~/.claude.
+        sessions_dir = Path(os.environ["HOME"]) / ".claude" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / f"{pid}.json").write_text(
+            json.dumps({"sessionId": session_id, "status": "idle"}))
+
     def test_prune_skips_a_live_process(self):
         old = self._iso(days=120)
         insert_session(self.conn, session_id="alive", updated_at=old, pid=os.getpid())
         insert_session(self.conn, session_id="ended", updated_at=old, pid=os.getpid(),
                        ended_at=old)
+        insert_session(self.conn, tool="codex", session_id="codex-alive", updated_at=old,
+                       pid=os.getpid())
+        self._write_registry(os.getpid(), "alive")
         _run_cmd(["prune"])
-        self.assertEqual(self._session_ids(), ["alive"])
+        self.assertEqual(self._session_ids(), ["alive", "codex-alive"])
+
+    def test_prune_treats_an_unregistered_claude_pid_as_reused(self):
+        old = self._iso(days=120)
+        # A crashed session (no SessionEnd) whose pid now belongs to some
+        # other process: no registry file, or one naming another session.
+        insert_session(self.conn, session_id="crashed", updated_at=old, pid=os.getpid())
+        insert_session(self.conn, session_id="other-owner", updated_at=old, pid=os.getpid())
+        self._write_registry(os.getpid(), "someone-else")
+        rc, out, _ = _run_cmd(["prune"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._session_ids(), [])
+        self.assertIn("pruned 2 session(s) (0 skipped)", out)
 
     def test_compact_deletes_only_tool_events_older_than_window(self):
         insert_session(self.conn, session_id="s1", updated_at=self._iso(days=0))
