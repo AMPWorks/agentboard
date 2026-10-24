@@ -900,6 +900,23 @@ class RegistryTieBreakerTests(AgentBoardTestCase):
         busy = registry("busy", "2026-10-24T08:59:00.000000Z", pid=45785)
         self.assertEqual(self.state(session, busy, now=days_later)[:2], ("running", None))
 
+    def test_registry_idle_from_a_dead_process_is_no_signal(self):
+        # A crash leaves <pid>.json behind with status idle; with the pid
+        # confirmed dead it must not turn an unknown last_event into a Stop.
+        start = "2026-10-22T03:12:00.064000Z"
+        session = base_session(last_event="SessionStart", last_event_at=start,
+                               updated_at=start, pid=45785, last_assistant="Done.")
+        entry = registry("idle", "2026-10-22T03:12:00.158000Z", pid=45785)
+        within = datetime(2026, 10, 22, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(self.state(session, entry, alive=False, now=within)[:2],
+                         ("unconcluded", None))
+        # Same for a stale activity event: dead stays interrupted.
+        self.assertEqual(
+            self.state(self.e50da3af(), registry("idle", "2026-10-24T05:50:00.000000Z"),
+                       alive=False, turn_start=self.PROMPT)[0],
+            "interrupted",
+        )
+
     def test_registry_busy_overrides_review(self):
         session = base_session(last_event="Stop", last_event_at=self.STOP, updated_at=self.STOP,
                                last_assistant="Pick A or B?")

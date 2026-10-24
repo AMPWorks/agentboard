@@ -350,7 +350,7 @@ def compute_state(
     newest parent prompt of any kind, bounds) breaks ties: idle turns a
     stale activity event (a lost Stop, a legacy SubagentStop) or an unknown
     one (SessionStart) into a finished turn, busy turns a finished or
-    unknown one into running while the process is alive. `notification_type` is the
+    unknown one into running, both only while the process is alive. `notification_type` is the
     notification_type of the most recent Notification event, looked up
     from the events table by the caller when `last_event == "Notification"`.
     `turn_finished` is the caller's precomputed `last_turn_finished(conn,
@@ -440,7 +440,7 @@ def compute_state(
     signal = registry_signal(
         registry_entry, session.get("last_event_at"), last_event, last_turn_start_at
     )
-    if signal == "idle" and ((is_activity and alive is True) or unknown_event):
+    if signal == "idle" and alive is True and (is_activity or unknown_event):
         # A finished turn the hooks did not see end (or a legacy row stuck
         # on a background SubagentStop): read it as a Stop.
         last_event = "Stop"

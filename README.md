@@ -261,8 +261,8 @@ a live session), never change a session's state.
 Claude Code also writes `~/.claude/sessions/<pid>.json` with a `busy`/`idle` status; AgentBoard
 reads it for every live Claude session as a tie-breaker when it is newer than the last hook
 event: `idle` turns a stale activity event (a lost `Stop`) or a bare `SessionStart` into a
-finished turn, and `busy` makes a finished or unknown one `running`. Other statuses (e.g.
-`shell`) carry no signal.
+finished turn, and `busy` makes a finished or unknown one `running`; neither applies once the
+process is gone. Other statuses (e.g. `shell`) carry no signal.
 By default the snapshot excludes sessions marked `interactive: false` (non-interactive `claude -p`
 / SDK runs, Codex `exec` runs) and `done` sessions older than 7 days; `--all` includes everything.
 

@@ -146,9 +146,9 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
    PreCompact/PostCompact) AND process alive (or no pid known and last event < 10 min old).
    `interrupted` — would be running but process dead or activity stale > 30 min (older than
    24 h: `unconcluded`, reason "interrupted"). Before this rule the session registry breaks
-   ties (see Liveness): `idle` turns an activity event of a live process, or an unknown last
-   event (SessionStart, a SessionEnd a resume un-ended), into a finished turn (read as Stop);
-   `busy` turns a finished or unknown one into `running` while the process is alive.
+   ties (see Liveness), only while the process is alive: `idle` turns an activity event, or an
+   unknown last event (SessionStart, a SessionEnd a resume un-ended), into a finished turn
+   (read as Stop); `busy` turns a finished or unknown one into `running`.
    SessionStart never changes state on compaction, nor on resume of a live session (the hook
    keeps the previous last_event).
 5. `review`, "PR #N awaits your review" — the session owns a PR that awaits the user (see
