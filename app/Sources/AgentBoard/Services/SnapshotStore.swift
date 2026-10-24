@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import OSLog
 
@@ -25,6 +26,23 @@ final class SnapshotStore: ObservableObject {
     /// or the fallback when that fails), where agentboard.log lives. Nil
     /// until resolved at start.
     @Published private(set) var dataDirectory: String?
+
+    /// `<data dir>/agentboard.log`, once the data directory is resolved.
+    /// Settings → Diagnostics and the gear menu's Open Log reveal it.
+    var logFileURL: URL? {
+        dataDirectory.map { URL(fileURLWithPath: $0).appendingPathComponent("agentboard.log") }
+    }
+
+    /// Whether `logFileURL` exists yet (nothing has logged before it does).
+    var logFileExists: Bool {
+        logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+    }
+
+    /// Reveals agentboard.log in Finder.
+    func revealLog() {
+        guard let url = logFileURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
 
     private let cli: AgentBoardCLI
     private let watcher = DirectoryWatcher()

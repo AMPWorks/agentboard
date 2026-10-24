@@ -53,6 +53,7 @@ struct SessionRowView: View {
                             .padding(.vertical, 1)
                             .background(.orange.opacity(0.2), in: Capsule())
                             .foregroundStyle(.orange)
+                            .help("The session was working when its process died or went quiet for 30 minutes")
                     }
                     if session.notesCount > 0 {
                         notesBadge
@@ -64,12 +65,13 @@ struct SessionRowView: View {
                             .padding(.vertical, 1)
                             .background(.secondary.opacity(0.2), in: Capsule())
                             .foregroundStyle(.secondary)
-                            .help(session.doneReason ?? "auto done")
+                            .help("Finished on its own: \(session.doneReason ?? "done")")
                     }
                     Spacer()
                     Text(RelativeTime.string(from: session.updatedAt))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .help("Last activity")
                 }
                 // A status text is the primary line; the session's own
                 // title then comes second (never the status twice).
@@ -92,6 +94,7 @@ struct SessionRowView: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
+                        .help(reason)
                 }
             }
             if isHovering {
@@ -149,6 +152,11 @@ struct SessionRowView: View {
             .frame(width: 18, height: 18)
             .background(session.tool == "codex" ? Color.purple.opacity(0.25) : Color.blue.opacity(0.25))
             .clipShape(Circle())
+            .help(Self.toolHelp(session))
+    }
+
+    static func toolHelp(_ session: Session) -> String {
+        session.tool == "codex" ? "A Codex CLI session" : "A Claude Code session"
     }
 
     @ViewBuilder
@@ -177,23 +185,23 @@ struct SessionRowView: View {
     @ViewBuilder
     private var fullButtons: some View {
         if session.resumeAvailable {
-            iconButton("arrow.counterclockwise.circle", help: "Resume") { Task { await store.resume(session) } }
+            iconButton("arrow.counterclockwise.circle", help: SessionActionHelp.resume) { Task { await store.resume(session) } }
         }
         copyButton
         markDoneButton
-        iconButton("moon.zzz", help: "Snooze 1 day") { Task { await store.snooze(session, hours: 24) } }
+        iconButton("moon.zzz", help: SessionActionHelp.snooze) { Task { await store.snooze(session, hours: 24) } }
         // PRs have their own buttons on the row; this opens the first
         // other link (a ticket, a URL).
         if let firstLink = session.links.first(where: { !$0.isPR && $0.openURL != nil }),
            let url = firstLink.openURL {
-            iconButton("arrow.up.right.square", help: "Open \(firstLink.kindLabel) \(firstLink.ref)") {
+            iconButton("arrow.up.right.square", help: SessionActionHelp.open(firstLink)) {
                 NSWorkspace.shared.open(url)
             }
         }
     }
 
     private var copyButton: some View {
-        iconButton("doc.on.doc", help: "Copy resume command") {
+        iconButton("doc.on.doc", help: SessionActionHelp.copyResume) {
             Task {
                 let command = await store.resumeCommand(for: session)
                 ClipboardHelper.copy(command)
@@ -202,7 +210,7 @@ struct SessionRowView: View {
     }
 
     private var markDoneButton: some View {
-        iconButton("checkmark.circle", help: "Mark done") { Task { await store.markDone(session) } }
+        iconButton("checkmark.circle", help: SessionActionHelp.markDone) { Task { await store.markDone(session) } }
     }
 
     private func iconButton(_ systemImage: String, help: String, action: @escaping () -> Void) -> some View {

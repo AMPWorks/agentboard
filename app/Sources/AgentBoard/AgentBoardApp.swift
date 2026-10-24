@@ -22,6 +22,11 @@ struct AgentBoardApp: App {
         .windowResizability(.contentSize)
         .defaultSize(width: 900, height: 560)
 
+        Window("AgentBoard Help", id: HelpWindowController.windowID) {
+            HelpView(navigator: .shared)
+        }
+        .defaultSize(width: 880, height: 620)
+
         Settings {
             SettingsView(store: store)
         }
@@ -40,7 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // backgrounded.
         ProcessInfo.processInfo.disableAutomaticTermination("AgentBoard menu bar")
 
-        let stored = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.system.rawValue
+        let stored = UserDefaults.standard.string(forKey: SettingsKeys.appearance) ?? Appearance.system.rawValue
         (Appearance(rawValue: stored) ?? .system).apply()
 
         HotKeyManager.shared.onHotKey = { DashboardWindowController.toggle() }

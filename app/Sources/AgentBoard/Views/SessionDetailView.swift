@@ -68,6 +68,7 @@ struct SessionDetailView: View {
                     .frame(width: 20, height: 20)
                     .background(session.tool == "codex" ? Color.purple.opacity(0.25) : Color.blue.opacity(0.25))
                     .clipShape(Circle())
+                    .help(SessionRowView.toolHelp(session))
                 Text(session.displayTitle)
                     .font(.title2.bold())
             }
@@ -79,6 +80,7 @@ struct SessionDetailView: View {
             Text(session.state.displayName)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+                .help("The session's state; see AgentBoard Help → Session states")
             if let reason = session.waitingReason, !reason.isEmpty {
                 Text(reason)
                     .font(.callout)
@@ -97,9 +99,11 @@ struct SessionDetailView: View {
         HStack {
             if session.isFocusable {
                 Button("Focus") { Task { await store.focus(session) } }
+                    .help(SessionActionHelp.focus)
             }
             if session.resumeAvailable {
                 Button("Resume") { Task { await store.resume(session) } }
+                    .help(SessionActionHelp.resume)
             }
             Button("Copy Resume Command") {
                 Task {
@@ -107,12 +111,16 @@ struct SessionDetailView: View {
                     ClipboardHelper.copy(command)
                 }
             }
+            .help(SessionActionHelp.copyResume)
             if session.state == .done {
                 Button("Reopen") { Task { await store.markOpen(session) } }
+                    .help(SessionActionHelp.reopen)
             } else {
                 Button("Mark Done") { Task { await store.markDone(session) } }
+                    .help(SessionActionHelp.markDone)
             }
             Button("Snooze 1d") { Task { await store.snooze(session, hours: 24) } }
+                .help(SessionActionHelp.snooze)
         }
         .padding(.top, 4)
     }
@@ -150,9 +158,11 @@ struct SessionDetailView: View {
                     Text(link.kindLabel)
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
+                        .help("What kind of link this is: a PR, a ticket or a URL")
                     if let urlString = link.url, let url = URL(string: urlString) {
                         Button(linkLabel(link)) { NSWorkspace.shared.open(url) }
                             .buttonStyle(.link)
+                            .help(SessionActionHelp.open(link))
                     } else {
                         Text(linkLabel(link))
                     }
@@ -163,6 +173,7 @@ struct SessionDetailView: View {
                             .padding(.horizontal, 5)
                             .background(tint.opacity(0.2), in: Capsule())
                             .foregroundStyle(link.isPR ? tint : Color.primary)
+                            .help("The link's state as last reported (refreshed every 10 minutes)")
                     }
                     if link.awaitsYou == true {
                         Label("awaits you", systemImage: "person.crop.circle.badge.exclamationmark")

@@ -23,7 +23,7 @@ final class SystemAppearanceMonitor: ObservableObject {
     }
 
     nonisolated static func systemIsDark(defaults: UserDefaults = .standard) -> Bool {
-        defaults.string(forKey: "AppleInterfaceStyle") == "Dark"
+        defaults.string(forKey: "AppleInterfaceStyle") == "Dark" // not-a-setting: the system's own dark-mode key, read only
     }
 
     private func refresh() {

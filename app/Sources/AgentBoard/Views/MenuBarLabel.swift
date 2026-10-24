@@ -6,13 +6,22 @@ struct MenuBarLabel: View {
     @StateObject private var systemAppearance = SystemAppearanceMonitor()
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
-    @AppStorage("notifyOnNeedsYou") private var notifyOnNeedsYou: Bool = false
+    @AppStorage(SettingsKeys.notifyOnNeedsYou) private var notifyOnNeedsYou: Bool = false
     @AppStorage(MenuBarIconSettings.coloredKey) private var colored: Bool = true
     @AppStorage(MenuBarIconSettings.flashKey) private var flash: Bool = true
     @AppStorage(MenuBarIconSettings.flashStopKey) private var flashStop: String = FlashStopPolicy.onOpen.rawValue
 
     private var urgentCount: Int { store.snapshot.counts.needsYou + store.snapshot.counts.interrupted }
     private var reviewCount: Int { store.snapshot.counts.review }
+
+    /// "AgentBoard: 2 need you, 1 to review", or "AgentBoard: nothing needs you".
+    private var tooltip: String {
+        var parts: [String] = []
+        if urgentCount > 0 { parts.append("\(urgentCount) need\(urgentCount == 1 ? "s" : "") you") }
+        if reviewCount > 0 { parts.append("\(reviewCount) to review") }
+        let summary = parts.isEmpty ? "nothing needs you" : parts.joined(separator: ", ")
+        return "AgentBoard: \(summary). Click to show sessions; ⌃⌥⌘A opens the dashboard."
+    }
 
     private var tier: MenuBarIconState.Tier {
         MenuBarIconState.tier(for: store.snapshot.counts, sessions: store.snapshot.sessions)
@@ -43,9 +52,11 @@ struct MenuBarLabel: View {
                     .font(.caption2)
             }
         }
+        .help(tooltip)
         .onAppear {
             WindowOpener.shared.open = { openWindow(id: DashboardWindowController.windowID) }
             WindowOpener.shared.dismiss = { dismissWindow(id: DashboardWindowController.windowID) }
+            WindowOpener.shared.openHelp = { openWindow(id: HelpWindowController.windowID) }
             applySettings()
             store.start()
         }

@@ -2,7 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @ObservedObject var store: SnapshotStore
-    @State private var selectedState: SessionState?
+    @State private var sidebarSelection: SidebarFilter? = .all
     @State private var toolFilter: String = "all"
     @State private var projectFilter: String = "all"
     @State private var searchText: String = ""
@@ -23,6 +23,8 @@ struct DashboardView: View {
     private var matchedSessions: [Session] {
         SessionSearch(searchText).filter(store.snapshot.sessions, tool: toolFilter, project: projectFilter)
     }
+
+    private var selectedState: SessionState? { SidebarFilter.state(for: sidebarSelection) }
 
     private func listedSessions(from matched: [Session]) -> [Session] {
         matched
@@ -76,21 +78,26 @@ struct DashboardView: View {
                     Text("Claude").tag("claude")
                     Text("Codex").tag("codex")
                 }
+                .help("Show sessions from Claude Code, Codex or both")
                 Picker("Project", selection: $projectFilter) {
                     Text("All Projects").tag("all")
                     ForEach(projects, id: \.self) { Text($0).tag($0) }
                 }
+                .help("Show only one project's sessions")
                 Toggle("Show hidden", isOn: Binding(
                     get: { store.showAll },
                     set: { store.setShowAll($0) }
                 ))
-                .help("Show non-interactive and empty sessions (passes --all to the snapshot)")
+                .help("Also show non-interactive runs (claude -p, codex exec) and sessions done over 7 days ago")
                 Button {
                     Task { await store.refresh() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .help("Refresh")
+                .help("Reload every session's state now")
+            }
+            ToolbarItem {
+                GearMenu(store: store, closesHostWindow: false)
             }
         }
         .navigationTitle("AgentBoard")
@@ -99,7 +106,7 @@ struct DashboardView: View {
     /// Clearing always lands on All, so nothing a filter hid stays hidden
     /// behind a selected sidebar state.
     private func clearFilters() {
-        selectedState = nil
+        sidebarSelection = .all
         toolFilter = "all"
         projectFilter = "all"
         searchText = ""
@@ -108,14 +115,16 @@ struct DashboardView: View {
     private func sidebar(counts: FilteredCounts, hiddenNeedingAttention: Int,
                          hiddenNeedsYouNotes: Int) -> some View {
         VStack(spacing: 0) {
-            List(selection: $selectedState) {
+            List(selection: $sidebarSelection) {
                 Label("All", systemImage: "tray.full")
                     .badge(counts.total)
-                    .tag(SessionState?.none)
+                    .tag(SidebarFilter.all)
+                    .help("List sessions in every state")
                 ForEach(Self.sidebarStates, id: \.self) { state in
                     Label(state.displayName, systemImage: symbol(for: state))
                         .badge(counts.count(for: state))
-                        .tag(SessionState?.some(state))
+                        .tag(SidebarFilter.state(state))
+                        .help("List only \(state.displayName) sessions")
                 }
             }
             // Open notes the filters keep, counted note by note like the

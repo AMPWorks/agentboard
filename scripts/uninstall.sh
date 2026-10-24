@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Removes everything install.sh added: hooks, the app, and (opt-in) the data dir.
-# Restores nothing else (any pre-existing hooks in settings.json/hooks.json are left alone).
+# Leaves everything else alone: other hooks in settings.json/hooks.json stay, and a hooks
+# file is only written back from install-hooks' backup when that reproduces it exactly.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
