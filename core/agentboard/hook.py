@@ -62,12 +62,28 @@ NEEDS_YOU_NOTIFICATION_TYPES = {
     "permission_prompt",
     "elicitation_dialog",
     "agent_needs_input",
+    # A usage-limit pause (Claude Code >= 2.1.234): the limit reset while
+    # the Mac slept and the wait needs Enter, or auto-resume is off.
+    "quota_auto_resume_stale",
+    "quota_auto_resume_disabled",
 }
+
+# The waiting_reason for a needs_you notification that carries no message.
+NOTIFICATION_FALLBACK_REASONS = {
+    "quota_auto_resume_stale": "Usage limit reset while asleep: press Enter to resume",
+    "quota_auto_resume_disabled": "Paused at a usage limit; auto-resume is off",
+}
+
+# Notification types that mean the session is working again (a usage-limit
+# pause that auto-resumed): activity, not a finished turn.
+RESUME_NOTIFICATION_TYPES = {"quota_auto_resume_fired"}
 
 # Notification types that are allowed to change last_event/waiting_reason.
 # Anything else (agent_completed, auth_success, ...) is recorded in the
 # events log but must not disturb the session's cached state.
-RELEVANT_NOTIFICATION_TYPES = NEEDS_YOU_NOTIFICATION_TYPES | {"idle_prompt"}
+RELEVANT_NOTIFICATION_TYPES = (
+    NEEDS_YOU_NOTIFICATION_TYPES | RESUME_NOTIFICATION_TYPES | {"idle_prompt"}
+)
 
 # PreToolUse tool names that mean the agent is blocked on the user, mapped
 # to the waiting_reason shown for them. Add more here as they come up.
@@ -83,8 +99,9 @@ NEEDS_YOU_TOOL_SENTINEL = "NeedsYouToolUse"
 
 # A session's last_event values that mean its turn is over: it stopped, was
 # interrupted, went idle or is waiting on the user. A Notification only
-# ever becomes last_event when it is relevant (idle_prompt or a needs_you
-# type, see _notification_is_relevant), so no type check is needed. The
+# ever becomes last_event when it is relevant (see
+# _notification_is_relevant); of those only a RESUME_NOTIFICATION_TYPES one
+# is not a finished turn (see _row_turn_finished). The
 # needs_you members match reconcile.NEEDS_YOU_EVENTS (reconcile imports
 # from here, not the reverse). A subagent-tagged SubagentStart/SubagentStop
 # (a background agent finishing after the turn) never overwrites these, and
@@ -348,19 +365,53 @@ def _git_branch(cwd: str):
     return normalize_branch(out.stdout.strip())
 
 
+def _stop_failure_text(payload: dict):
+    """A StopFailure's message: the documented last_assistant_message (the
+    API error string itself), else error_details, else the error type;
+    the pre-documentation error_message/reason keys are last fallbacks."""
+    for key in ("last_assistant_message", "error_details", "error", "error_message", "reason"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def failure_reason(error, text):
+    """The waiting_reason of a StopFailure: "<error>: <first line of its
+    text>", or whichever of the two exists. It is the first line of
+    notes.failure_note_text, the text of the error note it records."""
+    error = error.strip() if isinstance(error, str) else ""
+    line = ""
+    for candidate in (text if isinstance(text, str) else "").strip().splitlines():
+        if candidate.strip():
+            line = candidate.strip()
+            break
+    if error and line and line != error:
+        return f"{error}: {line}"
+    return error or line or None
+
+
 def _extract_waiting_reason(event: str, payload: dict):
     if event == "PermissionRequest":
         return payload.get("tool_name")
     if event == "Notification":
-        return payload.get("message") or payload.get("notification_type")
+        notification_type = payload.get("notification_type")
+        if notification_type in RESUME_NOTIFICATION_TYPES:
+            return None
+        return (
+            payload.get("message")
+            or NOTIFICATION_FALLBACK_REASONS.get(notification_type)
+            or notification_type
+        )
     if event == "StopFailure":
-        return payload.get("error_message") or payload.get("reason")
+        return failure_reason(payload.get("error"), _stop_failure_text(payload))
     return None
 
 
 def _extract_extra(payload: dict) -> dict:
     extra = {}
-    for key in ("source", "model", "turn_id", "reason", "error_message"):
+    for key in ("source", "model", "turn_id", "reason", "error_message", "error",
+                "error_details"):
         if key in payload:
             extra[key] = payload[key]
     return extra
@@ -611,6 +662,57 @@ def _record_stop_note(conn, tool, session_id, text, now, event_id) -> None:
               exc=type(exc).__name__, msg=str(exc))
 
 
+def _record_failure_note(conn, tool, session_id, error, text, now, event_id) -> None:
+    """Keep a parent StopFailure (an API error that ended the turn) as an
+    `error` note, attended or not, so Updates shows API failures. Same
+    savepoint and fingerprint de-duplication as _record_stop_note: repeats
+    of one error bump its count. The text comes from
+    notes.failure_note_text, which `notes --rebuild` uses too."""
+    try:
+        conn.execute("SAVEPOINT failure_note")
+    except Exception as exc:
+        _diag("warn", "notes", session=f"{tool}:{session_id}", outcome="error",
+              exc=type(exc).__name__, msg=str(exc))
+        return
+    try:
+        from . import notes
+
+        note_text = notes.failure_note_text(error, text)
+        if note_text:
+            notes.record_note(conn, tool, session_id, "error", note_text, "stop", now,
+                              event_id=event_id)
+            _diag("debug", "note", session=f"{tool}:{session_id}", kind="error",
+                  event_id=event_id)
+        conn.execute("RELEASE failure_note")
+    except Exception as exc:
+        try:
+            conn.execute("ROLLBACK TO failure_note")
+            conn.execute("RELEASE failure_note")
+        except Exception:
+            pass
+        _diag("warn", "notes", session=f"{tool}:{session_id}", outcome="error",
+              exc=type(exc).__name__, msg=str(exc))
+
+
+def _row_turn_finished(conn, tool, session_id, row) -> bool:
+    """True when the session row's last_event is a finished turn (see
+    FINISHED_TURN_EVENTS). A Notification is one unless the newest parent
+    notification was a usage-limit auto-resume, which is activity; that
+    lookup runs only when last_event is a Notification."""
+    if row is None or row["last_event"] not in FINISHED_TURN_EVENTS:
+        return False
+    if row["last_event"] != "Notification":
+        return True
+    found = conn.execute(
+        "SELECT notification_type FROM events WHERE tool=? AND session_id=? "
+        "AND event='Notification' AND agent_id IS NULL "
+        "AND notification_type IN (" + ",".join("?" for _ in RELEVANT_NOTIFICATION_TYPES) + ") "
+        "ORDER BY ts DESC, id DESC LIMIT 1",
+        (tool, session_id, *sorted(RELEVANT_NOTIFICATION_TYPES)),
+    ).fetchone()
+    return not (found and found[0] in RESUME_NOTIFICATION_TYPES)
+
+
 def _drop_background_subagent(conn, tool, session_id, row) -> None:
     """Remove one "subagent" entry from the session's background_types and
     decrement background_tasks (floor 0), only if an entry was removed."""
@@ -656,7 +758,7 @@ def process_payload(conn, tool: str, payload: dict) -> None:
     elif event == "Notification":
         text = _truncate(payload.get("message"))
     elif event == "StopFailure":
-        text = _truncate(payload.get("error_message") or payload.get("reason"))
+        text = _truncate(_stop_failure_text(payload))
 
     extra = _extract_extra(payload)
 
@@ -709,6 +811,10 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         if event == "Stop" and not is_subagent_tagged and text:
             _record_stop_note(conn, tool, session_id, text, now, cursor.lastrowid)
 
+        if event == "StopFailure" and not is_subagent_tagged:
+            _record_failure_note(conn, tool, session_id, payload.get("error"), text, now,
+                                 cursor.lastrowid)
+
         if event == "UserPromptSubmit" and not is_subagent_tagged and not injected:
             conn.execute(
                 "UPDATE triage SET status='open', updated_at=? "
@@ -742,11 +848,11 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         needs_you_tool_reason = _needs_you_tool_reason(event, tool_name)
 
         row_last_event = row["last_event"] if row else None
+        row_finished = _row_turn_finished(conn, tool, session_id, row)
         # A background subagent starting or finishing after the turn ended
         # does not make the session busy again.
         marker_after_turn = (
-            bool(agent_id) and event in SUBAGENT_MARKER_EVENTS
-            and row_last_event in FINISHED_TURN_EVENTS
+            bool(agent_id) and event in SUBAGENT_MARKER_EVENTS and row_finished
         )
         # Compaction (and resuming a live session) continues the same
         # conversation; resuming after a SessionEnd records SessionStart,
@@ -770,7 +876,7 @@ def process_payload(conn, tool: str, payload: dict) -> None:
             # activity event (a subagent working mid-turn, a mid-turn
             # compaction) keeps advancing it, since it is compute_state's
             # freshness signal when liveness is unknown.
-            if row is not None and row_last_event in FINISHED_TURN_EVENTS:
+            if row_finished:
                 new_last_event_at = row["last_event_at"] or now
         elif needs_you_tool_reason is not None:
             new_last_event = NEEDS_YOU_TOOL_SENTINEL

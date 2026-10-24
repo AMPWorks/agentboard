@@ -945,6 +945,71 @@ class HookProcessPayloadTests(AgentBoardTestCase):
         self.assertEqual((event["text"], event["prompt_kind"]), ("hello", None))
         self.assertEqual(self._session_row()["last_prompt"], "hello")
 
+    def test_stop_failure_records_documented_fields(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("StopFailure", error="rate_limit",
+                 error_details="429 Too Many Requests",
+                 last_assistant_message="API Error: Rate limit reached")
+        event = self.conn.execute(
+            "SELECT text, extra FROM events WHERE event='StopFailure'").fetchone()
+        self.assertEqual(event["text"], "API Error: Rate limit reached")
+        extra = json.loads(event["extra"])
+        self.assertEqual((extra["error"], extra["error_details"]),
+                         ("rate_limit", "429 Too Many Requests"))
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "StopFailure")
+        self.assertEqual(row["waiting_reason"], "rate_limit: API Error: Rate limit reached")
+        notes = self.conn.execute("SELECT kind, text, source, count FROM notes").fetchall()
+        self.assertEqual([tuple(n) for n in notes],
+                         [("error", "rate_limit: API Error: Rate limit reached", "stop", 1)])
+        # A repeat bumps the count instead of adding a note.
+        self._at("StopFailure", error="rate_limit",
+                 last_assistant_message="API Error: Rate limit reached")
+        self.assertEqual(self.conn.execute("SELECT count FROM notes").fetchone()[0], 2)
+
+    def test_stop_failure_text_falls_back_to_details_then_error(self):
+        self._at("StopFailure", error="overloaded", error_details="upstream busy")
+        self.assertEqual(self._session_row()["waiting_reason"], "overloaded: upstream busy")
+        self._at("StopFailure", error="server_error")
+        self.assertEqual(self._session_row()["waiting_reason"], "server_error")
+        # The pre-documentation keys still work.
+        self._at("StopFailure", error_message="legacy failure")
+        self.assertEqual(self._session_row()["waiting_reason"], "legacy failure")
+
+    def test_subagent_stop_failure_keeps_parent_state_but_records_reason(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("PreToolUse", tool_name="Agent")
+        self._at("StopFailure", agent_id="sub-1", error="overloaded",
+                 last_assistant_message="API Error: Overloaded")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "PreToolUse")
+        event = self.conn.execute(
+            "SELECT text, extra FROM events WHERE event='StopFailure'").fetchone()
+        self.assertEqual(event["text"], "API Error: Overloaded")
+        self.assertEqual(json.loads(event["extra"])["error"], "overloaded")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0], 0)
+
+    def test_usage_limit_notifications(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("Notification", notification_type="quota_auto_resume_stale")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "Notification")
+        self.assertEqual(row["waiting_reason"],
+                         "Usage limit reset while asleep: press Enter to resume")
+        self._at("Notification", notification_type="quota_auto_resume_disabled",
+                 message="Auto-resume is off")
+        self.assertEqual(self._session_row()["waiting_reason"], "Auto-resume is off")
+        fired = self._at("Notification", notification_type="quota_auto_resume_fired",
+                         message="Resuming")
+        row = self._session_row()
+        self.assertEqual((row["last_event"], row["waiting_reason"]), ("Notification", None))
+        # After an auto-resume a background marker is activity, not a kept
+        # finished turn: last_event_at keeps advancing.
+        late = self._at("SubagentStart", agent_id="sub-1")
+        row = self._session_row()
+        self.assertEqual((row["last_event"], row["last_event_at"]), ("SubagentStart", late))
+        self.assertNotEqual(fired, late)
+
     def test_prompt_less_session_end_marks_non_interactive(self):
         self._at("SessionStart")
         self._at("SessionEnd", reason="other")

@@ -1026,6 +1026,37 @@ class NotesRebuildTests(AgentBoardTestCase):
         self.assertEqual(rc, 0)
         self.assertIn("recorded=0", out)
 
+    def _hook(self, payload):
+        with mock.patch("agentboard.hook.subprocess.run") as run, \
+             mock.patch("agentboard.hook.subprocess.Popen"):
+            run.return_value = mock.Mock(returncode=0, stdout="")
+            hook.process_payload(self.conn, "claude", {"cwd": "/tmp", **payload})
+
+    def test_reset_recreates_stop_failure_error_notes(self):
+        self._hook({"session_id": "s1", "hook_event_name": "UserPromptSubmit", "prompt": "go"})
+        self._hook({"session_id": "s1", "hook_event_name": "StopFailure", "error": "rate_limit",
+                    "last_assistant_message": "API Error: Rate limit reached"})
+        self._hook({"session_id": "s2", "hook_event_name": "StopFailure",
+                    "error": "authentication_failed",
+                    "last_assistant_message": "Invalid API key"})
+        # A subagent's failure records no note, before or after the rebuild.
+        self._hook({"session_id": "s1", "hook_event_name": "StopFailure", "agent_id": "a1",
+                    "error": "overloaded", "last_assistant_message": "API Error: Overloaded"})
+        written = {r["session_id"]: r["text"] for r in _notes_rows(self.conn)}
+        self.assertEqual(written, {"s1": "rate_limit: API Error: Rate limit reached",
+                                   "s2": "authentication_failed: Invalid API key"})
+        s2_note = _notes_rows(self.conn, "session_id='s2'")[0]["id"]
+        _run_cmd(["notes", "--dismiss", str(s2_note)])
+        rc, out, _ = _run_cmd(["notes", "--rebuild", "--reset"])
+        self.assertEqual(rc, 0)
+        self.assertIn("deleted=1", out)
+        self.assertIn("skipped_dismissed=1", out)
+        open_rows = _notes_rows(self.conn, "dismissed_at IS NULL")
+        self.assertEqual(
+            [(r["session_id"], r["kind"], r["text"], r["source"]) for r in open_rows],
+            [("s1", "error", "rate_limit: API Error: Rate limit reached", "backfill")],
+        )
+
 
 class InstallHooksTests(AgentBoardTestCase):
     def setUp(self):

@@ -233,6 +233,13 @@ failures mean `needs_you`, and so does an open `needs_you` note no newer prompt 
 Updates below); live activity means `running`; a dead process or stale activity means
 `interrupted`; anything not finished and not waiting on you is `unconcluded`).
 
+A turn that failed on an API error (Claude Code's `StopFailure`) is `needs_you` with "<error>:
+<first line of the message>", e.g. "rate_limit: API Error: Rate limit reached", and adds an
+`error` note under Updates (repeats bump its count). A usage-limit pause that needs you
+(`quota_auto_resume_stale`: the limit reset while the Mac slept and the wait needs Enter;
+`quota_auto_resume_disabled`: auto-resume is off) is `needs_you` too; an auto-resume
+(`quota_auto_resume_fired`) or any new activity makes the session `running` again.
+
 **Review always says what to do.** A session is `review` only with a concrete reason in
 `waiting_reason`, which the row shows as its second line:
 

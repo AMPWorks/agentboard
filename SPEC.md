@@ -61,7 +61,8 @@ Registered for every event in both tools. Requirements:
 
 Claude events: SessionStart(source, model), UserPromptSubmit(prompt), PreToolUse/PostToolUse/
 PostToolUseFailure(tool_name), PermissionRequest(tool_name), Notification(notification_type,
-message), Stop(last_assistant_message), StopFailure(reason, error_message), SubagentStart/
+message), Stop(last_assistant_message, background_tasks, session_crons), StopFailure(error,
+error_details, last_assistant_message; read as "<error>: <first line>"), SubagentStart/
 SubagentStop(agent_id), SessionEnd(reason). Common: session_id, transcript_path, cwd,
 hook_event_name. Events carrying `agent_id` come from subagents: record them but they only
 ever count as "running" activity, never Stop/review for the parent. (Added later:) a tagged
@@ -125,8 +126,13 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
    reopens it (triage reset to open).
 2. `snoozed` — triage.status = snoozed and until > now (falls through when expired).
 3. `needs_you` — last non-subagent event is PermissionRequest, or Notification with type in
-   {permission_prompt, elicitation_dialog, agent_needs_input}, or StopFailure, and no later
-   activity event. `waiting_reason` = tool_name / notification message / error. Then the
+   {permission_prompt, elicitation_dialog, agent_needs_input, quota_auto_resume_stale,
+   quota_auto_resume_disabled}, or StopFailure, and no later activity event. `waiting_reason` =
+   tool_name / notification message (the usage-limit pauses fall back to "Usage limit reset
+   while asleep: press Enter to resume" / "Paused at a usage limit; auto-resume is off") /
+   "<error>: <first line of the message>" for a StopFailure (e.g. "rate_limit: API Error: Rate
+   limit reached"), which also records an `error` note. A StopFailure stays needs_you until new
+   activity, including a `quota_auto_resume_fired` Notification (read as activity). Then the
    registry fallback, then an open (undismissed) note of kind `needs_you` while no parent
    UserPromptSubmit is newer than the note's `last_ts` (compared as parsed times);
    `waiting_reason` = the note's marker line, else its first line.

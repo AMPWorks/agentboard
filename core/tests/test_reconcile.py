@@ -965,6 +965,27 @@ class BackgroundTaskStateTests(AgentBoardTestCase):
                                         open_update_note=note)
         self.assertEqual(state[:2], ("running", "Waiting on 3 background tasks: subagent, shell"))
 
+    def test_quota_auto_resume_fired_is_activity(self):
+        session = base_session(last_event="Notification")
+        state = reconcile.compute_state(session, None, [], now=NOW, alive=True,
+                                        notification_type="quota_auto_resume_fired")
+        self.assertEqual(state[:2], ("running", None))
+        stale = base_session(last_event="Notification",
+                             last_event_at=iso(NOW - timedelta(hours=2)))
+        state = reconcile.compute_state(stale, None, [], now=NOW, alive=False,
+                                        notification_type="quota_auto_resume_fired")
+        self.assertEqual(state[0], "interrupted")
+
+    def test_quota_auto_resume_stale_is_needs_you(self):
+        for kind, reason in (
+            ("quota_auto_resume_stale", "Usage limit reset while asleep: press Enter to resume"),
+            ("quota_auto_resume_disabled", "Paused at a usage limit; auto-resume is off"),
+        ):
+            session = base_session(last_event="Notification", waiting_reason=reason)
+            state = reconcile.compute_state(session, None, [], now=NOW, alive=True,
+                                            notification_type=kind)
+            self.assertEqual(state[:2], ("needs_you", reason), kind)
+
     def test_background_wait_beats_loop_idle(self):
         state = reconcile.compute_state(self.session(), None, [], now=NOW, alive=True,
                                         unattended=True)

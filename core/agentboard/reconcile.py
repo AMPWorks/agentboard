@@ -9,6 +9,7 @@ from .hook import (
     ACTIVITY_EVENTS,
     NEEDS_YOU_NOTIFICATION_TYPES,
     NEEDS_YOU_TOOL_SENTINEL,
+    RESUME_NOTIFICATION_TYPES,
     SUBAGENT_MARKER_EVENTS,
 )
 from .links import awaiting_reason, links_done_reason, pr_awaits_you
@@ -422,7 +423,10 @@ def compute_state(
     if open_needs_you_note and note_still_raises(open_needs_you_note, last_prompt_at):
         return "needs_you", note_headline(open_needs_you_note), False, None
 
-    is_activity = last_event in ACTIVITY_EVENTS
+    # A usage-limit pause that auto-resumed is the session working again.
+    is_activity = last_event in ACTIVITY_EVENTS or (
+        last_event == "Notification" and notification_type in RESUME_NOTIFICATION_TYPES
+    )
     last_event_at = parse_ts(session.get("last_event_at"))
     age = (now - last_event_at) if last_event_at else None
 

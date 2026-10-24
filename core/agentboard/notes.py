@@ -412,6 +412,19 @@ def classify(text, *, markers=DEFAULT_MARKERS, unattended=True, seen_refs=None):
     return None
 
 
+def failure_note_text(error, text) -> str:
+    """The `error` note a parent StopFailure records: "<error>: <text>"
+    (the documented error type, then the API error message), or whichever
+    of the two exists; "" when neither does. Its first line is the
+    session's waiting_reason (hook.failure_reason), and the hook and
+    `notes --rebuild` both build the note with this, so they agree."""
+    error = error.strip() if isinstance(error, str) else ""
+    body = text.strip() if isinstance(text, str) else ""
+    if error and body and body != error:
+        return f"{error}: {body}"
+    return error or body
+
+
 def first_line(text) -> str:
     """The first non-empty line, with surrounding markdown emphasis removed."""
     for line in (text or "").strip().splitlines():
@@ -556,8 +569,33 @@ def _parse_ts(value):
     return parsed
 
 
+def _extra_field(extra, key):
+    try:
+        value = json.loads(extra) if extra else {}
+    except (TypeError, ValueError):
+        return None
+    return value.get(key) if isinstance(value, dict) else None
+
+
+def _replay_note(conn, stats, tool, session_id, kind, text, ts, event_id) -> bool:
+    """Record one replayed note unless a dismissed note with the same
+    fingerprint already covers its event. True when it was recorded."""
+    covered = conn.execute(
+        "SELECT 1 FROM notes WHERE tool=? AND session_id=? AND fingerprint=? "
+        "AND dismissed_at IS NOT NULL AND last_event_id >= ? LIMIT 1",
+        (tool, session_id, fingerprint(kind, _truncate(text).strip()), event_id),
+    ).fetchone()
+    if covered:
+        stats["skipped_dismissed"] += 1
+        return False
+    record_note(conn, tool, session_id, kind, text, "backfill", ts, event_id=event_id)
+    stats["recorded"] += 1
+    return True
+
+
 def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
-    """Replay recorded parent Stop events through the classifier.
+    """Replay recorded parent Stop events through the classifier, and
+    parent StopFailure events as `error` notes (failure_note_text).
 
     Without reset: replays events with rebuilt_through < id <= hook_from
     (the boundary the migration recorded; the hook owns every event above
@@ -613,19 +651,23 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
                     )
             replay_refs = {}
             rows = conn.execute(
-                "SELECT id, ts, tool, session_id, event, text, prompt_kind FROM events "
+                "SELECT id, ts, tool, session_id, event, text, prompt_kind, extra FROM events "
                 "WHERE agent_id IS NULL AND id <= ? "
-                "AND (event = 'UserPromptSubmit' OR (event = 'Stop' AND id > ?)) "
+                "AND (event = 'UserPromptSubmit' "
+                "     OR (event IN ('Stop', 'StopFailure') AND id > ?)) "
                 "ORDER BY id",
                 (upper, lower),
             )
             for row in rows.fetchall():
-                event_id, ts, tool, session_id, event, text, kind_of_prompt = tuple(row)
+                event_id, ts, tool, session_id, event, text, kind_of_prompt, extra = tuple(row)
                 key = (tool, session_id)
                 if event == "UserPromptSubmit":
                     if text and kind_of_prompt != "injected":
                         last_prompt[key] = (text, kind_of_prompt)
                     continue
+                if event == "StopFailure":
+                    # The error note the hook recorded (_record_failure_note).
+                    text = failure_note_text(_extra_field(extra, "error"), text)
                 if not text or not text.strip():
                     continue
                 if cutoff is not None:
@@ -633,6 +675,10 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
                     if when is None or when < cutoff:
                         continue
                 stats["scanned"] += 1
+                if event == "StopFailure":
+                    if _replay_note(conn, stats, tool, session_id, "error", text, ts, event_id):
+                        replay_refs.setdefault(key, set()).update(refs(text))
+                    continue
                 seen = set(replay_refs.get(key, ()))
                 for note_event, note_ts, note_refs in kept_refs.get(key, ()):
                     earlier = (
@@ -649,17 +695,8 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
                 )
                 if not kind:
                     continue
-                covered = conn.execute(
-                    "SELECT 1 FROM notes WHERE tool=? AND session_id=? AND fingerprint=? "
-                    "AND dismissed_at IS NOT NULL AND last_event_id >= ? LIMIT 1",
-                    (tool, session_id, fingerprint(kind, _truncate(text).strip()), event_id),
-                ).fetchone()
-                if covered:
-                    stats["skipped_dismissed"] += 1
-                    continue
-                record_note(conn, tool, session_id, kind, text, "backfill", ts, event_id=event_id)
-                replay_refs.setdefault(key, set()).update(refs(text))
-                stats["recorded"] += 1
+                if _replay_note(conn, stats, tool, session_id, kind, text, ts, event_id):
+                    replay_refs.setdefault(key, set()).update(refs(text))
 
         new_mark = max(upper, int(meta.get("rebuilt_through", 0))) if not reset else upper
         conn.execute(
