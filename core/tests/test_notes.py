@@ -374,5 +374,108 @@ class ConfigTests(AgentBoardTestCase):
         self.assertFalse(notes.is_valid_note(["update", "x"]))
 
 
+class PromptKindTests(unittest.TestCase):
+    def test_default_injected_prefixes(self):
+        for text in (
+            "<task-notification>\n<task-id>a1</task-id>",
+            '<agent-message from="reviewer">done</agent-message>',
+            '\n  <cross-session-message from="s2">hi</cross-session-message>',
+        ):
+            self.assertEqual(notes.prompt_kind(text), "injected", text)
+
+    def test_loop_cron_and_human(self):
+        self.assertEqual(notes.prompt_kind("# Autonomous loop tick"), "loop")
+        self.assertEqual(notes.prompt_kind("check the queue", cron_prompts=("check the queue",)),
+                         "cron")
+        self.assertEqual(notes.prompt_kind("please fix the build"), "human")
+        self.assertEqual(notes.prompt_kind(None), "human")
+        # Case matters, as in the migration's GLOB.
+        self.assertEqual(notes.prompt_kind("<Task-Notification>"), "human")
+
+    def test_injected_wins_over_loop(self):
+        self.assertEqual(
+            notes.prompt_kind("<task-notification># Autonomous loop", unattended=("<task",)),
+            "injected",
+        )
+
+    def test_config_override(self):
+        config = {"prompt_injected_prefixes": ["[bot]"]}
+        prefixes = notes.injected_prefixes(config)
+        self.assertEqual(prefixes, ("[bot]",))
+        self.assertEqual(notes.prompt_kind("[bot] ping", injected=prefixes), "injected")
+        self.assertEqual(notes.prompt_kind("<task-notification>", injected=prefixes), "human")
+        self.assertEqual(notes.injected_prefixes({}), notes.DEFAULT_INJECTED_PREFIXES)
+        self.assertEqual(notes.injected_prefixes({"prompt_injected_prefixes": []}), ())
+
+    def test_prompt_kind_matches_cron_prompt_longer_than_200_chars(self):
+        long_prompt = "Run the nightly sweep:\n\n" + ("check every queue and report. " * 50)
+        self.assertGreater(len(long_prompt), 1400)
+        stored = " ".join(long_prompt.split())[:200]
+        respaced = long_prompt.replace(" ", "  ").replace("\n\n", "\n")
+        self.assertEqual(notes.prompt_kind(respaced, cron_prompts=(stored,)), "cron")
+        self.assertTrue(notes.is_unattended(respaced, (), cron_prompts=(stored,)))
+        self.assertFalse(notes.is_unattended("something else", (), cron_prompts=(stored,)))
+
+    def test_kind_is_unattended(self):
+        self.assertTrue(notes.kind_is_unattended("loop", "x", ()))
+        self.assertTrue(notes.kind_is_unattended("cron", "x", ()))
+        self.assertFalse(notes.kind_is_unattended("human", "# Autonomous loop", ("# Autonomous",)))
+        self.assertTrue(notes.kind_is_unattended(None, "# Autonomous loop", ("# Autonomous",)))
+
+
+class ClassifyPromptsTests(AgentBoardTestCase):
+    def prompt(self, text, kind=None, session_id="s1", agent_id=None):
+        self.conn.execute(
+            "INSERT INTO events(ts, tool, session_id, event, agent_id, text, prompt_kind) "
+            "VALUES (?, 'claude', ?, 'UserPromptSubmit', ?, ?, ?)",
+            (T1, session_id, agent_id, text, kind),
+        )
+
+    def kinds(self):
+        return [row[0] for row in self.conn.execute("SELECT prompt_kind FROM events ORDER BY id")]
+
+    def test_fills_null_rows(self):
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, cron_prompts) VALUES ('claude', 's1', ?)",
+            (json.dumps(["tick the cron"]),),
+        )
+        self.prompt("<agent-message>hi</agent-message>")
+        self.prompt("# Autonomous loop")
+        self.prompt("tick   the cron")
+        self.prompt("fix it")
+        self.prompt("already set", kind="loop")
+        self.prompt("subagent text", agent_id="a1")
+        changed = notes.classify_prompts(self.conn, {})
+        self.assertEqual(changed, 4)
+        self.assertEqual(self.kinds(), ["injected", "loop", "cron", "human", "loop", None])
+        self.assertEqual(notes.classify_prompts(self.conn, {}), 0)
+
+    def test_reset_reapplies_prefixes(self):
+        self.prompt("[bot] ping", kind="human")
+        self.prompt("<task-notification>", kind="injected")
+        notes.classify_prompts(self.conn, {"prompt_injected_prefixes": ["[bot]"]}, reset=True)
+        self.assertEqual(self.kinds(), ["injected", "human"])
+
+    def test_reset_keeps_hook_recorded_cron_kind(self):
+        # The cron that justified "cron" is gone from sessions.cron_prompts.
+        self.prompt("check the deploy", kind="cron")
+        self.prompt("<agent-message>x</agent-message>", kind="cron")
+        notes.classify_prompts(self.conn, {}, reset=True)
+        self.assertEqual(self.kinds(), ["cron", "injected"])
+
+    def test_rebuild_ignores_injected_prompts_for_the_unattended_flag(self):
+        milestone = ("Opened PR #31 for the fade task and pushed the follow-up commit. " * 8).strip()
+        self.prompt("# Autonomous loop tick")
+        self.prompt('<agent-message from="x">status?</agent-message>')
+        self.conn.execute(
+            "INSERT INTO events(ts, tool, session_id, event, text) "
+            "VALUES (?, 'claude', 's1', 'Stop', ?)", (T1, milestone),
+        )
+        notes.rebuild(self.conn, {}, reset=True)
+        (note,) = open_notes(self.conn)
+        self.assertEqual(note["kind"], "update")
+        self.assertEqual(self.kinds()[:2], ["loop", "injected"])
+
+
 if __name__ == "__main__":
     unittest.main()

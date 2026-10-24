@@ -199,7 +199,7 @@ It targets well under 50 ms per call. The only things that ever shell out are:
   50 ms budget). The branch is re-read on `SessionStart` / `UserPromptSubmit` and on the parent
   `Stop` / `SessionEnd` (so a branch created mid-turn is seen once the session goes idle or
   exits), or whenever a session's branch is still unknown.
-- A short, targeted `ps` walk (at most 3 hops) to find the actual `claude`/`codex` process above
+- A short, targeted `ps` walk (at most 5 hops) to find the actual `claude`/`codex` process above
   the hook's immediate parent, recorded once per session the same way the branch is.
 
 Install/remove the hooks with:
@@ -233,6 +233,13 @@ failures mean `needs_you`, and so does an open `needs_you` note no newer prompt 
 Updates below); live activity means `running`; a dead process or stale activity means
 `interrupted`; anything not finished and not waiting on you is `unconcluded`).
 
+A turn that failed on an API error (Claude Code's `StopFailure`) is `needs_you` with "<error>:
+<first line of the message>", e.g. "rate_limit: API Error: Rate limit reached", and adds an
+`error` note under Updates (repeats bump its count). A usage-limit pause that needs you
+(`quota_auto_resume_stale`: the limit reset while the Mac slept and the wait needs Enter;
+`quota_auto_resume_disabled`: auto-resume is off) is `needs_you` too; an auto-resume
+(`quota_auto_resume_fired`) or any new activity makes the session `running` again.
+
 **Review always says what to do.** A session is `review` only with a concrete reason in
 `waiting_reason`, which the row shows as its second line:
 
@@ -241,11 +248,21 @@ Updates below); live activity means `running`; a dead process or stale activity 
   one GitHub account). This holds even after the session exits, until you respond or it merges.
 - the headline of an open `update` note newer than your last prompt, under a day old;
 - "Your turn: <first line of its last message>" — an attended session stopped (or "Interrupted:
-  your turn"), within 24 h.
+  your turn"), within 24 h of the end of that turn.
 
-A loop session (its last prompt starts with a `note_unattended_prefixes` entry) idling between
-ticks is not waiting on you: it is `running` with "Loop idle between ticks" while its process is
-alive.
+A loop session (its last prompt starts with a `note_unattended_prefixes` entry, or is one of the
+crons its last Stop listed in `session_crons`) idling between ticks is not waiting on you: it is
+`running` with "Loop idle between ticks" while its process is alive. A session whose last Stop
+listed background tasks still in flight (Claude Code's `background_tasks`: subagents, shells,
+monitors, ...) is `running` with "Waiting on N background task(s): <types>" until they finish,
+then "Your turn". A background agent finishing after the turn, and a compaction (including a
+`/compact` typed at an idle prompt) or a resume of a live session, never change a session's state.
+
+Claude Code also writes `~/.claude/sessions/<pid>.json` with a `busy`/`idle` status; AgentBoard
+reads it for every live Claude session as a tie-breaker when it is newer than the last hook
+event: `idle` turns a stale activity event (a lost `Stop`) or a bare `SessionStart` into a
+finished turn, and `busy` makes a finished or unknown one `running`; neither applies once the
+process is gone. Other statuses (e.g. `shell`) carry no signal.
 By default the snapshot excludes sessions marked `interactive: false` (non-interactive `claude -p`
 / SDK runs, Codex `exec` runs) and `done` sessions older than 7 days; `--all` includes everything.
 
@@ -261,7 +278,8 @@ Mark a session's own triage state directly:
 agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
 ```
 
-A new prompt in a session that was marked `done` reopens it automatically.
+A new prompt in a session that was marked `done` reopens it automatically; a prompt Claude Code
+injected itself (a finished background task, another agent's message; see Updates) does not.
 
 A session can also reach `done` on its own, surfaced as `auto_done: true` with a `done_reason` in
 the snapshot; `done_reason: "manual"` and `auto_done: false` means a human marked it done:
@@ -497,7 +515,8 @@ dismiss them.
 The hook classifies each parent (non-subagent) `Stop` message with generic prose rules in
 `core/agentboard/notes.py`: a line starting with a marker (`USER_ACTION:` by default) is a
 `needs_you` note in any turn; in an *unattended* turn (its latest parent, non-subagent prompt
-starts with one of the configured prefixes, `# Autonomous loop` by default) a transient failure
+starts with one of the configured prefixes, `# Autonomous loop` by default, or is one of the
+session's scheduled crons) a transient failure
 (`API Error`, `Request timed out`, ...) is an `error` note, idle and progress one-liners are
 dropped, and a milestone (an `owner/repo#N` or `PR #N`, merged, approved, CI red/green, pushed,
 opened, deployed, blocked, a URL, ...) or any message of 300+ characters is an `update` note.
@@ -532,12 +551,25 @@ references already seen ("Tick: PR #4 is in hand; the plan is ready for your rev
 ordinals such as "step #2" are not references. A
 repeat of an open note (same session, same kind, same first 200 characters once timestamps, clock
 times, durations and tick counts are ignored; errors compare their first line only) bumps its count
-(shown as `×N`) instead of adding a row; a repeat of a dismissed note starts a new one. Both knobs
-live in `config.json`, and those are the only ones:
+(shown as `×N`) instead of adding a row; a repeat of a dismissed note starts a new one.
+
+**Injected prompts are not replies.** Claude Code starts some turns itself: a background task
+finishing (`<task-notification>`), a message from another agent (`<agent-message ...>`) or
+another session (`<cross-session-message ...>`). The hook records each parent prompt's kind
+(`human`, `loop`, `cron` or `injected`, by `prompt_injected_prefixes`). An injected prompt still
+makes the session `running` (Claude works on it), but it is not you answering: it does not reopen
+a session you marked done, release an open `needs_you` note, turn a loop session into an attended
+one (the turn keeps the kind of the prompt before it), count toward retitling, or replace the
+session's first/last prompt. The knobs live in `config.json`, and those are the only ones:
 
 ```json
-{"note_markers": ["USER_ACTION:"], "note_unattended_prefixes": ["# Autonomous loop"]}
+{"note_markers": ["USER_ACTION:"], "note_unattended_prefixes": ["# Autonomous loop"],
+ "prompt_injected_prefixes": ["<task-notification>", "<agent-message", "<cross-session-message"]}
 ```
+
+After changing `note_unattended_prefixes` or `prompt_injected_prefixes`, run `agentboard notes
+--rebuild --reset` so the recorded prompts are re-classified and the notes replayed under the new
+lists.
 
 Anything can also add a note directly:
 
@@ -559,6 +591,8 @@ it cannot. Inbox drop files and provider rows take the same shape in an optional
 
 `notes --rebuild` replays the `Stop` messages already in the `events` table from before the notes
 table existed (`install.sh` runs it after its backfill step), and a second run imports nothing.
+Each rebuild first classifies any recorded prompt that has no kind yet; `--reset` re-classifies
+all of them with the current prefix lists (keeping a prompt the hook recorded as a cron tick).
 `--rebuild --days N` imports only the last N days, but still marks the older events as replayed, so
 a later plain `--rebuild` skips them; only `--reset` revisits them. `--rebuild --reset` re-applies
 changed rules: it drops the open notes it made itself (never dismissed ones, never ones added by
@@ -619,6 +653,14 @@ still `NULL` — except the title, which hooks never write: a newer Claude Code 
 older one, a `/rename` (custom title) beats any generated one, and a first-prompt fallback never
 replaces a real title.
 
+The open-todo count (`todos_open`) needs the whole transcript (task updates are deltas), so it is
+scanned incrementally: each session stores the byte offset the scan reached and the task state at
+that point, and the next run (the hook starts a single-session `backfill --session` after every
+`Stop`) reads only what was appended since. A trailing line Claude Code is still writing is left
+for the next run, and a transcript that shrank or was rewritten restarts the scan from the
+beginning. Transcripts are parsed with no database transaction open; each session is then written
+in its own short transaction, so hooks never wait on a long backfill.
+
 ## Configuration (config.json)
 
 Everything the CLI can be told lives in one optional JSON object, `config.json` in the data
@@ -637,6 +679,7 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
 | `automation_logins` | list of strings | none | GitHub logins (a reviewer bot, an author bot) whose reviews and comments are not a response from you when deciding whether a PR awaits your review. |
 | `note_markers` | list of strings | `["USER_ACTION:"]` | A final-message line starting with one of these becomes a `needs_you` note; `[]` turns marker detection off. |
 | `note_unattended_prefixes` | list of strings | `["# Autonomous loop"]` | A turn whose prompt starts with one of these is unattended (loop) work. |
+| `prompt_injected_prefixes` | list of strings | `["<task-notification>", "<agent-message", "<cross-session-message"]` | A prompt starting with one of these was injected by Claude Code (a finished background task, another agent's or session's message): it counts as activity but never as you replying. |
 | `retitle_command` | argv list, string, or `null` | the local `claude` CLI with Haiku | Reads a session's recent context on stdin and prints a new title; `null` turns retitling off. |
 | `retitle_min_prompts` | integer >= 1 | `5` | New prompts since the last retitle before a session is retitled again. |
 | `retitle_max_per_run` | integer >= 0 | `5` | At most this many sessions retitled per `refresh-links`; `0` turns it off. |
@@ -649,6 +692,7 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
   "automation_logins": ["my-reviewer-bot"],
   "note_markers": ["USER_ACTION:"],
   "note_unattended_prefixes": ["# Autonomous loop"],
+  "prompt_injected_prefixes": ["<task-notification>", "<agent-message", "<cross-session-message"],
   "retitle_min_prompts": 5,
   "retitle_max_per_run": 5,
   "log_level": "info"

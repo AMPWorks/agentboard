@@ -7,12 +7,13 @@ import subprocess
 import sys
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentboard import hook
+from agentboard import hook, reconcile
 from tests.helpers import AgentBoardTestCase
 
 
@@ -706,6 +707,389 @@ class HookProcessPayloadTests(AgentBoardTestCase):
         row = self._session_row()
         self.assertEqual(row["last_event"], "UserPromptSubmit")
 
+    # -- finished turns, background tasks, compaction (state accuracy) ----------
+
+    _clock = 0
+
+    def _at(self, event, **fields):
+        """Send one event at a distinct, increasing timestamp; returns it."""
+        HookProcessPayloadTests._clock += 1
+        ts = f"2026-10-24T05:{HookProcessPayloadTests._clock // 60 % 60:02d}:" \
+             f"{HookProcessPayloadTests._clock % 60:02d}.000000Z"
+        payload = {"session_id": "s1", "cwd": "/tmp", "hook_event_name": event, **fields}
+        with mock.patch("agentboard.hook.subprocess.run") as run, \
+             mock.patch("agentboard.hook.subprocess.Popen"), \
+             mock.patch("agentboard.hook._now_iso", return_value=ts):
+            run.return_value = mock.Mock(returncode=0, stdout="")
+            hook.process_payload(self.conn, "claude", payload)
+        return ts
+
+    def test_tagged_subagent_stop_keeps_a_finished_turn(self):
+        self._at("UserPromptSubmit", prompt="run the review")
+        stop_ts = self._at("Stop", last_assistant_message="Review is running in the background.")
+        self._at("Notification", notification_type="idle_prompt", message="waiting")
+        late = self._at("SubagentStop", agent_id="bg-1")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "Notification")
+        self.assertNotEqual(row["last_event_at"], late)
+        self.assertEqual(row["updated_at"], late)
+        # The same with the Stop itself as the kept event.
+        self.conn.execute("DELETE FROM sessions")
+        self._at("UserPromptSubmit", prompt="again")
+        stop_ts = self._at("Stop", last_assistant_message="done")
+        late = self._at("SubagentStop", agent_id="bg-2")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertEqual(row["last_event_at"], stop_ts)
+        self.assertEqual(row["updated_at"], late)
+
+    def test_tagged_subagent_stop_keeps_needs_you(self):
+        self._at("PermissionRequest", tool_name="Bash")
+        self._at("SubagentStart", agent_id="bg-1")
+        self._at("SubagentStop", agent_id="bg-1")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "PermissionRequest")
+        self.assertEqual(row["waiting_reason"], "Bash")
+
+    def test_kept_finished_turn_keeps_last_event_at(self):
+        self._at("UserPromptSubmit", prompt="go")
+        stop_ts = self._at("Stop", last_assistant_message="done")
+        late = self._at("PostToolUse", agent_id="bg-1", tool_name="Bash")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertEqual(row["last_event_at"], stop_ts)
+        self.assertEqual(row["updated_at"], late)
+
+    def test_tagged_tool_event_mid_turn_still_refreshes_last_event_at(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("PreToolUse", tool_name="Agent")
+        late = self._at("PostToolUse", agent_id="sub-1", tool_name="Bash")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "PreToolUse")
+        self.assertEqual(row["last_event_at"], late)
+
+    def test_tagged_marker_mid_turn_still_becomes_last_event(self):
+        self._at("UserPromptSubmit", prompt="go")
+        late = self._at("SubagentStart", agent_id="sub-1")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "SubagentStart")
+        self.assertEqual(row["last_event_at"], late)
+
+    def test_stop_records_background_tasks_and_crons(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at(
+            "Stop", last_assistant_message="waiting",
+            background_tasks=[
+                {"id": "a", "type": "subagent", "status": "running", "description": "x"},
+                {"id": "b", "type": "shell", "status": "running"},
+                {"id": "c", "type": "subagent", "status": "running"},
+            ],
+            session_crons=[
+                {"id": "c1", "schedule": "*/5 * * * *", "recurring": True,
+                 "prompt": "check   the\nqueue " + "x" * 300},
+                {"id": "c2", "schedule": "0 * * * *", "recurring": True, "prompt": "tick"},
+            ],
+        )
+        row = self._session_row()
+        self.assertEqual(row["background_tasks"], 3)
+        self.assertEqual(json.loads(row["background_types"]), ["subagent", "shell", "subagent"])
+        self.assertEqual(row["session_crons"], 2)
+        prompts = json.loads(row["cron_prompts"])
+        self.assertEqual(prompts[1], "tick")
+        self.assertEqual(len(prompts[0]), hook.CRON_PROMPT_CHARS)
+        self.assertTrue(prompts[0].startswith("check the queue xxx"))
+        extra = json.loads(self.conn.execute(
+            "SELECT extra FROM events WHERE event='Stop'").fetchone()[0])
+        self.assertEqual((extra["background_tasks"], extra["session_crons"]), (3, 2))
+        # A Stop without the arrays (older Claude Code) clears them to unknown.
+        self._at("UserPromptSubmit", prompt="more")
+        self._at("Stop", last_assistant_message="done")
+        row = self._session_row()
+        for col in ("background_tasks", "background_types", "session_crons", "cron_prompts"):
+            self.assertIsNone(row[col], col)
+        # Empty arrays are a known zero.
+        self._at("Stop", last_assistant_message="done", background_tasks=[], session_crons=[])
+        row = self._session_row()
+        self.assertEqual((row["background_tasks"], row["session_crons"]), (0, 0))
+
+    def test_stop_ignores_completed_background_entries(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("Stop", last_assistant_message="waiting", background_tasks=[
+            {"id": "a", "type": "shell", "status": "running"},
+            {"id": "b", "type": "subagent", "status": "completed"},
+            {"id": "c", "type": "monitor", "status": "Killed"},
+            {"id": "d", "type": "workflow", "status": "paused-ish"},
+        ])
+        row = self._session_row()
+        self.assertEqual(row["background_tasks"], 2)
+        self.assertEqual(json.loads(row["background_types"]), ["shell", "workflow"])
+
+    def test_tagged_subagent_stop_decrements_background_tasks(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("Stop", last_assistant_message="waiting", background_tasks=[
+            {"id": "a", "type": "subagent", "status": "running"},
+        ])
+        self._at("SubagentStop", agent_id="bg-1")
+        row = self._session_row()
+        self.assertEqual(row["background_tasks"], 0)
+        self.assertEqual(json.loads(row["background_types"]), [])
+        # Never below zero.
+        self._at("SubagentStop", agent_id="bg-2")
+        self.assertEqual(self._session_row()["background_tasks"], 0)
+
+    def test_tagged_subagent_stop_does_not_decrement_workflow_task(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("Stop", last_assistant_message="waiting", background_tasks=[
+            {"id": "a", "type": "workflow", "status": "running"},
+        ])
+        self._at("SubagentStop", agent_id="bg-1")
+        row = self._session_row()
+        self.assertEqual(row["background_tasks"], 1)
+        self.assertEqual(json.loads(row["background_types"]), ["workflow"])
+
+    def test_compact_session_start_keeps_last_event(self):
+        self._at("UserPromptSubmit", prompt="go")
+        stop_ts = self._at("Stop", last_assistant_message="done")
+        self._at("Notification", notification_type="idle_prompt", message="idle")
+        self._at("SubagentStop", agent_id="bg-1")
+        late = self._at("SessionStart", source="compact")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "Notification")
+        self.assertNotEqual(row["last_event_at"], late)
+        self.assertEqual(row["updated_at"], late)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE event='SessionStart'").fetchone()[0], 1,
+            "the event row is still recorded",
+        )
+        self.assertNotEqual(stop_ts, late)
+
+    def test_mid_turn_compact_session_start_refreshes_last_event_at(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("PreToolUse", tool_name="Bash")
+        late = self._at("SessionStart", source="compact")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "PreToolUse")
+        self.assertEqual(row["last_event_at"], late)
+
+    def test_idle_compaction_keeps_the_finished_turn(self):
+        # A /compact typed at an idle prompt: Stop -> PreCompact ->
+        # PostCompact -> SessionStart(compact) must still read as Your turn.
+        self._at("UserPromptSubmit", prompt="go")
+        stop_ts = self._at("Stop", last_assistant_message="All done.")
+        self._at("PreCompact", trigger="manual")
+        self._at("PostCompact", trigger="manual")
+        late = self._at("SessionStart", source="compact")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertIsNone(row["waiting_reason"])
+        self.assertEqual(row["last_event_at"], stop_ts)
+        self.assertEqual(row["updated_at"], late)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE event IN ('PreCompact', 'PostCompact')"
+            ).fetchone()[0], 2,
+            "the compaction event rows are still recorded",
+        )
+        now = datetime.fromisoformat(late.replace("Z", "+00:00")) + timedelta(minutes=1)
+        state, reason, _auto_done, _done_reason = reconcile.compute_state(
+            dict(row), None, [], now=now, alive=True
+        )
+        self.assertEqual(state, "review")
+        self.assertTrue(reason.startswith("Your turn"), reason)
+
+    def test_idle_compaction_keeps_needs_you(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("PermissionRequest", tool_name="Bash")
+        before = self._session_row()
+        self._at("PreCompact", trigger="auto")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "PermissionRequest")
+        self.assertEqual(row["waiting_reason"], before["waiting_reason"])
+        self.assertEqual(row["last_event_at"], before["last_event_at"])
+
+    def test_mid_turn_compaction_refreshes_last_event_at(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("PreToolUse", tool_name="Bash")
+        late = self._at("PreCompact", trigger="auto")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "PreCompact")
+        self.assertEqual(row["last_event_at"], late)
+
+    def test_resume_session_start_keeps_a_finished_turn(self):
+        self._at("UserPromptSubmit", prompt="go")
+        stop_ts = self._at("Stop", last_assistant_message="done")
+        self._at("SessionStart", source="resume")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertEqual(row["last_event_at"], stop_ts)
+
+    def test_continued_session_start_on_a_backfill_row_writes_session_start(self):
+        # A pre-hooks session backfill recorded (no last_event yet) and then
+        # resumed or compacted: there is no state to keep, so SessionStart
+        # is recorded and the registry tie-breaker can resolve it.
+        for source in ("compact", "resume"):
+            with self.subTest(source=source):
+                self.conn.execute("DELETE FROM sessions")
+                self.conn.execute(
+                    "INSERT INTO sessions(tool, session_id, origin, first_prompt, started_at, "
+                    "updated_at) VALUES ('claude', 's1', 'backfill', 'old work', "
+                    "'2026-10-20T00:00:00.000000Z', '2026-10-20T00:00:00.000000Z')"
+                )
+                late = self._at("SessionStart", source=source)
+                row = self._session_row()
+                self.assertEqual(row["last_event"], "SessionStart")
+                self.assertEqual(row["last_event_at"], late)
+
+    def test_resume_after_session_end_writes_session_start(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("Stop", last_assistant_message="done")
+        self._at("SessionEnd", reason="prompt_input_exit")
+        late = self._at("SessionStart", source="resume")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "SessionStart")
+        self.assertEqual(row["last_event_at"], late)
+        self.assertIsNone(row["ended_at"])
+
+    def test_startup_session_start_still_resets(self):
+        for source in ("startup", "clear", None):
+            self._at("UserPromptSubmit", prompt="go")
+            self._at("Stop", last_assistant_message="done")
+            fields = {"source": source} if source else {}
+            late = self._at("SessionStart", **fields)
+            row = self._session_row()
+            self.assertEqual(row["last_event"], "SessionStart", source)
+            self.assertEqual(row["last_event_at"], late, source)
+
+    def test_subagent_user_prompt_submit_does_not_set_prompts(self):
+        self._at("SessionStart")
+        self._at("UserPromptSubmit", agent_id="sub-1", prompt="subagent instructions")
+        row = self._session_row()
+        self.assertIsNone(row["first_prompt"])
+        self.assertIsNone(row["last_prompt"])
+        self._at("UserPromptSubmit", prompt="the real prompt")
+        self._at("UserPromptSubmit", agent_id="sub-1", prompt="more subagent text")
+        row = self._session_row()
+        self.assertEqual((row["first_prompt"], row["last_prompt"]),
+                         ("the real prompt", "the real prompt"))
+
+    def test_injected_prompt_does_not_reopen_done(self):
+        self._at("UserPromptSubmit", prompt="ship it")
+        self._at("Stop", last_assistant_message="shipped")
+        self.conn.execute(
+            "INSERT INTO triage(tool, session_id, status, updated_at) "
+            "VALUES ('claude', 's1', 'done', '2026-01-01T00:00:00.000000Z')"
+        )
+        self._at("UserPromptSubmit", prompt="<task-notification>bg done</task-notification>")
+        status = lambda: self.conn.execute(  # noqa: E731
+            "SELECT status FROM triage WHERE session_id='s1'").fetchone()[0]
+        self.assertEqual(status(), "done")
+        row = self._session_row()
+        self.assertEqual((row["first_prompt"], row["last_prompt"]), ("ship it", "ship it"))
+        # A real prompt still reopens it.
+        self._at("UserPromptSubmit", prompt="one more thing")
+        self.assertEqual(status(), "open")
+
+    def test_injected_prompt_is_still_activity(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("Stop", last_assistant_message="done")
+        ts = self._at("UserPromptSubmit", prompt='<agent-message from="x">hi</agent-message>')
+        row = self._session_row()
+        self.assertEqual((row["last_event"], row["last_event_at"]), ("UserPromptSubmit", ts))
+        kind = self.conn.execute(
+            "SELECT prompt_kind FROM events ORDER BY id DESC LIMIT 1").fetchone()[0]
+        self.assertEqual(kind, "injected")
+
+    def test_prompt_kind_failure_still_records_the_prompt(self):
+        with mock.patch("agentboard.notes.prompt_kind", side_effect=RuntimeError("boom")):
+            self._at("UserPromptSubmit", prompt="hello")
+        event = self.conn.execute("SELECT text, prompt_kind FROM events").fetchone()
+        self.assertEqual((event["text"], event["prompt_kind"]), ("hello", None))
+        self.assertEqual(self._session_row()["last_prompt"], "hello")
+
+    def test_stop_failure_records_documented_fields(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("StopFailure", error="rate_limit",
+                 error_details="429 Too Many Requests",
+                 last_assistant_message="API Error: Rate limit reached")
+        event = self.conn.execute(
+            "SELECT text, extra FROM events WHERE event='StopFailure'").fetchone()
+        self.assertEqual(event["text"], "API Error: Rate limit reached")
+        extra = json.loads(event["extra"])
+        self.assertEqual((extra["error"], extra["error_details"]),
+                         ("rate_limit", "429 Too Many Requests"))
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "StopFailure")
+        self.assertEqual(row["waiting_reason"], "rate_limit: API Error: Rate limit reached")
+        notes = self.conn.execute("SELECT kind, text, source, count FROM notes").fetchall()
+        self.assertEqual([tuple(n) for n in notes],
+                         [("error", "rate_limit: API Error: Rate limit reached", "stop", 1)])
+        # A repeat bumps the count instead of adding a note.
+        self._at("StopFailure", error="rate_limit",
+                 last_assistant_message="API Error: Rate limit reached")
+        self.assertEqual(self.conn.execute("SELECT count FROM notes").fetchone()[0], 2)
+
+    def test_stop_failure_text_falls_back_to_details_then_error(self):
+        self._at("StopFailure", error="overloaded", error_details="upstream busy")
+        self.assertEqual(self._session_row()["waiting_reason"], "overloaded: upstream busy")
+        self._at("StopFailure", error="server_error")
+        self.assertEqual(self._session_row()["waiting_reason"], "server_error")
+        # The pre-documentation keys still work.
+        self._at("StopFailure", error_message="legacy failure")
+        self.assertEqual(self._session_row()["waiting_reason"], "legacy failure")
+
+    def test_subagent_stop_failure_keeps_parent_state_but_records_reason(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("PreToolUse", tool_name="Agent")
+        self._at("StopFailure", agent_id="sub-1", error="overloaded",
+                 last_assistant_message="API Error: Overloaded")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "PreToolUse")
+        event = self.conn.execute(
+            "SELECT text, extra FROM events WHERE event='StopFailure'").fetchone()
+        self.assertEqual(event["text"], "API Error: Overloaded")
+        self.assertEqual(json.loads(event["extra"])["error"], "overloaded")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0], 0)
+
+    def test_usage_limit_notifications(self):
+        self._at("UserPromptSubmit", prompt="go")
+        self._at("Notification", notification_type="quota_auto_resume_stale")
+        row = self._session_row()
+        self.assertEqual(row["last_event"], "Notification")
+        self.assertEqual(row["waiting_reason"],
+                         "Usage limit reset while asleep: press Enter to resume")
+        self._at("Notification", notification_type="quota_auto_resume_disabled",
+                 message="Auto-resume is off")
+        self.assertEqual(self._session_row()["waiting_reason"], "Auto-resume is off")
+        fired = self._at("Notification", notification_type="quota_auto_resume_fired",
+                         message="Resuming")
+        row = self._session_row()
+        self.assertEqual((row["last_event"], row["waiting_reason"]), ("Notification", None))
+        # After an auto-resume a background marker is activity, not a kept
+        # finished turn: last_event_at keeps advancing.
+        late = self._at("SubagentStart", agent_id="sub-1")
+        row = self._session_row()
+        self.assertEqual((row["last_event"], row["last_event_at"]), ("SubagentStart", late))
+        self.assertNotEqual(fired, late)
+
+    def test_prompt_less_session_end_marks_non_interactive(self):
+        self._at("SessionStart")
+        self._at("SessionEnd", reason="other")
+        self.assertEqual(self._session_row()["interactive"], 0)
+        # A prompted session keeps its interactive flag.
+        self.conn.execute("DELETE FROM sessions")
+        self.conn.execute("DELETE FROM events")
+        self._at("SessionStart")
+        self._at("UserPromptSubmit", prompt="hello")
+        self._at("SessionEnd", reason="other")
+        self.assertIsNone(self._session_row()["interactive"])
+        # A subagent's SessionEnd marks nothing.
+        self.conn.execute("DELETE FROM sessions")
+        self.conn.execute("DELETE FROM events")
+        self._at("SessionStart")
+        self._at("SessionEnd", agent_id="sub-1", reason="other")
+        self.assertIsNone(self._session_row()["interactive"])
+
 
 def _fake_ps_chain(hops):
     """hops: ordered [(pid, ppid, tty, comm), ...] consumed by pid lookups."""
@@ -839,6 +1223,45 @@ class HookNotesTests(AgentBoardTestCase):
              ("s2", "The builder is still on PR #4; I will re-review when it reports back.")],
         )
 
+    def test_agent_message_after_loop_tick_keeps_turn_unattended(self):
+        self._prompt("# Autonomous loop tick")
+        self._prompt('<agent-message from="reviewer">PR #31 looks good</agent-message>')
+        self._stop(self.MILESTONE)
+        (note,) = self._notes()
+        self.assertEqual(note["kind"], "update")
+        kinds = [r[0] for r in self.conn.execute(
+            "SELECT prompt_kind FROM events WHERE event='UserPromptSubmit' ORDER BY id")]
+        self.assertEqual(kinds, ["loop", "injected"])
+        row = self.conn.execute("SELECT last_prompt FROM sessions").fetchone()
+        self.assertEqual(row["last_prompt"], "# Autonomous loop tick")
+
+    def test_cron_tick_stop_records_update_note(self):
+        cron_prompt = "Sweep the review queue and report anything new.\n" + "Check item. " * 40
+        self.assertGreater(len(cron_prompt), 200)
+        self._prompt("set up the sweep")
+        self._stop("Scheduled.", session_crons=[
+            {"id": "c1", "schedule": "*/10 * * * *", "recurring": True, "prompt": cron_prompt},
+        ])
+        # The tick arrives with its whitespace reflowed; no loop prefix.
+        self._prompt(cron_prompt.replace(" ", "  "))
+        self._stop(self.MILESTONE)
+        (note,) = self._notes()
+        self.assertEqual(note["kind"], "update")
+        kind = self.conn.execute(
+            "SELECT prompt_kind FROM events WHERE event='UserPromptSubmit' ORDER BY id DESC"
+        ).fetchone()[0]
+        self.assertEqual(kind, "cron")
+
+    def test_injected_prefix_override_from_config(self):
+        (self.agentboard_home / "config.json").write_text(
+            json.dumps({"prompt_injected_prefixes": ["[relay]"]})
+        )
+        self._prompt("[relay] from the other session")
+        self._prompt("<task-notification>now a human prompt</task-notification>")
+        kinds = [r[0] for r in self.conn.execute(
+            "SELECT prompt_kind FROM events WHERE event='UserPromptSubmit' ORDER BY id")]
+        self.assertEqual(kinds, ["injected", "human"])
+
     def test_waiting_restatement_records_no_note(self):
         self._prompt("# Autonomous loop tick")
         self._stop("Nothing changed this tick:\n- **PR #5.** It still needs your approval.")
@@ -869,13 +1292,25 @@ class HookNotesTests(AgentBoardTestCase):
         self.assertEqual(self._notes(), [])
 
     def test_other_events_never_import_notes(self):
-        sys.modules.pop("agentboard.notes", None)
+        # Parent prompts (classified) and Stops (noted) import notes; tool
+        # use, notifications and subagent events never do.
+        import agentboard
+
+        self._prompt("# Autonomous loop tick")
+        original = sys.modules.pop("agentboard.notes")
+        delattr(agentboard, "notes")
         try:
-            self._prompt("# Autonomous loop tick")
             self._send({"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash"})
+            self._send({"session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "Bash"})
+            self._send({"session_id": "s1", "hook_event_name": "Notification",
+                        "notification_type": "idle_prompt", "message": "idle"})
+            self._send({"session_id": "s1", "hook_event_name": "SubagentStop", "agent_id": "a1"})
+            self._send({"session_id": "s1", "hook_event_name": "UserPromptSubmit",
+                        "agent_id": "a1", "prompt": "subagent prompt"})
             self.assertNotIn("agentboard.notes", sys.modules)
         finally:
-            import agentboard.notes  # noqa: F401  (restore for later tests)
+            sys.modules["agentboard.notes"] = original
+            agentboard.notes = original
 
 
 class FindAgentPidTests(AgentBoardTestCase):
