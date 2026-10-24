@@ -1,3 +1,4 @@
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -144,7 +145,8 @@ class ComputeStateTests(AgentBoardTestCase):
         self.assertEqual(reason, "Your turn: Done. Tests pass.")
 
     def test_unconcluded_old_stop(self):
-        session = base_session(last_event="Stop", updated_at=iso(NOW - timedelta(hours=48)))
+        old = iso(NOW - timedelta(hours=48))
+        session = base_session(last_event="Stop", last_event_at=old, updated_at=old)
         state, _, _auto_done, _done_reason = reconcile.compute_state(session, None, [], now=NOW, alive=False)
         self.assertEqual(state, "unconcluded")
 
@@ -627,7 +629,8 @@ class ReviewReasonTests(AgentBoardTestCase):
         self.assertEqual(unattended[0], "unconcluded")
 
     def test_update_note_older_than_a_day_on_a_dead_session_is_unconcluded(self):
-        session = base_session(last_event="Stop", updated_at=iso(NOW - timedelta(hours=30)))
+        old = iso(NOW - timedelta(hours=30))
+        session = base_session(last_event="Stop", last_event_at=old, updated_at=old)
         note = self.update_note(minutes_ago=30 * 60)
         self.assertEqual(self.state(session=session, update_note=note, alive=False)[:2],
                          ("unconcluded", None))
@@ -665,8 +668,24 @@ class ReviewReasonTests(AgentBoardTestCase):
         self.assertEqual(self.state(unattended=True, alive=None)[:2], ("unconcluded", None))
 
     def test_your_turn_ages_out_after_the_review_window(self):
-        session = base_session(last_event="Stop", updated_at=iso(NOW - timedelta(hours=25)))
+        old = iso(NOW - timedelta(hours=25))
+        session = base_session(last_event="Stop", last_event_at=old, updated_at=old)
         self.assertEqual(self.state(session=session, alive=False)[:2], ("unconcluded", None))
+
+    def test_your_turn_window_counts_from_the_finished_turn(self):
+        # Kept events (background SubagentStops, compactions) advance
+        # updated_at but leave last_event_at at the Stop: a turn that ended
+        # 25 h ago is not "Your turn" however recent the last kept event.
+        session = base_session(last_event="Stop", last_event_at=iso(NOW - timedelta(hours=25)),
+                               updated_at=iso(NOW - timedelta(minutes=5)))
+        self.assertEqual(self.state(session=session, alive=False)[:2], ("unconcluded", None))
+        recent = base_session(last_event="Stop", last_event_at=iso(NOW - timedelta(hours=2)),
+                              updated_at=iso(NOW - timedelta(minutes=5)))
+        self.assertEqual(self.state(session=recent, alive=False)[0], "review")
+        # A row with no last_event_at falls back to updated_at.
+        legacy = base_session(last_event="Stop", last_event_at=None,
+                              updated_at=iso(NOW - timedelta(hours=2)))
+        self.assertEqual(self.state(session=legacy, alive=False)[0], "review")
 
     def test_every_review_has_a_reason(self):
         cases = [
@@ -758,6 +777,37 @@ class LivenessTests(AgentBoardTestCase):
         self.assertEqual(registry["abc"]["waitingFor"], "input needed")
         self.assertNotIn("not-json", registry)
 
+    def test_load_claude_session_registry_picks_one_entry_per_session_deterministically(self):
+        # Two files share a sessionId (a crashed process's leftover next to
+        # the live one): the live pid wins whatever its statusUpdatedAt, and
+        # between dead pids the newest statusUpdatedAt wins, in either
+        # directory order.
+        import os
+
+        sessions_dir = self.fake_home / ".claude" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        dead = 2**30
+
+        def write(pid, at):
+            (sessions_dir / f"{pid}.json").write_text(json.dumps(
+                {"pid": pid, "sessionId": "abc", "status": "idle", "statusUpdatedAt": at}))
+
+        live = os.getpid()
+        for order in ((live, dead), (dead, live)):
+            with self.subTest(order=order):
+                for path in sessions_dir.iterdir():
+                    path.unlink()
+                for pid in order:
+                    write(pid, 1000 if pid == live else 2000)
+                registry = reconcile.load_claude_session_registry(sessions_dir)
+                self.assertEqual(registry["abc"]["pid"], live)
+        for path in sessions_dir.iterdir():
+            path.unlink()
+        write(dead, 2000)
+        write(dead + 1, 3000)
+        self.assertEqual(
+            reconcile.load_claude_session_registry(sessions_dir)["abc"]["pid"], dead + 1)
+
     def test_effective_liveness_prefers_known_pid(self):
         import os
 
@@ -816,6 +866,196 @@ class LivenessTests(AgentBoardTestCase):
         )
         self.assertTrue(alive)
         self.assertEqual(pid, os.getpid())
+
+
+def _ms(value):
+    """An ISO timestamp as the registry's statusUpdatedAt (ms since epoch)."""
+    return int(reconcile.parse_ts(value).timestamp() * 1000)
+
+
+def registry(status, at, pid=99407):
+    return {"pid": pid, "sessionId": "s1", "status": status, "statusUpdatedAt": _ms(at)}
+
+
+class RegistryTieBreakerTests(AgentBoardTestCase):
+    # The e50da3af shape (2026-10-24): last parent prompt, a Stop, the
+    # registry going idle a second later, then a background agent's tagged
+    # SubagentStop that a pre-fix hook made last_event.
+    PROMPT = "2026-10-24T05:42:46.990000Z"
+    STOP = "2026-10-24T05:44:20.010000Z"
+    IDLE = "2026-10-24T05:44:21.015000Z"
+    SUBAGENT_STOP = "2026-10-24T05:47:22.900000Z"
+    LATER = datetime(2026, 10, 24, 6, 30, tzinfo=timezone.utc)
+
+    def e50da3af(self, **overrides):
+        return base_session(
+            last_event="SubagentStop", last_event_at=self.SUBAGENT_STOP,
+            updated_at=self.SUBAGENT_STOP, pid=99407,
+            last_assistant="The review is done; want me to open the PR?", **overrides,
+        )
+
+    def state(self, session, entry, alive=True, turn_start=None, now=None, **kwargs):
+        return reconcile.compute_state(
+            session, None, [], now=now or self.LATER, alive=alive, registry_entry=entry,
+            last_turn_start_at=turn_start, **kwargs,
+        )
+
+    def test_without_the_registry_a_stale_subagent_stop_reads_running(self):
+        self.assertEqual(self.state(self.e50da3af(), None)[:2], ("running", None))
+
+    def test_registry_idle_overrides_stale_subagent_stop(self):
+        entry = registry("idle", "2026-10-24T05:50:00.000000Z")
+        self.assertEqual(
+            self.state(self.e50da3af(), entry, turn_start=self.PROMPT)[:2],
+            ("review", "Your turn: The review is done; want me to open the PR?"),
+        )
+
+    def test_registry_idle_older_than_marker_event_still_counts(self):
+        entry = registry("idle", self.IDLE)
+        self.assertLess(_ms(self.IDLE), _ms(self.SUBAGENT_STOP))
+        self.assertEqual(
+            self.state(self.e50da3af(), entry, turn_start=self.PROMPT)[0], "review"
+        )
+
+    def test_registry_idle_before_latest_prompt_does_not_override_marker_event(self):
+        # Prompt at T1, registry idle at T0 < T1 (lagging), SubagentStart at T2.
+        t0, t1, t2 = (
+            "2026-10-24T05:40:00.000000Z", "2026-10-24T05:41:00.000000Z",
+            "2026-10-24T05:42:00.000000Z",
+        )
+        session = base_session(last_event="SubagentStart", last_event_at=t2, updated_at=t2,
+                               pid=99407)
+        now = datetime(2026, 10, 24, 5, 43, tzinfo=timezone.utc)
+        self.assertEqual(
+            self.state(session, registry("idle", t0), turn_start=t1, now=now)[:2],
+            ("running", None),
+        )
+
+    def test_registry_idle_with_unknown_last_event_reads_as_stop(self):
+        # The 098b77cd shape: a compaction SessionStart (a pre-fix hook made
+        # it last_event), the registry idle 94 ms later.
+        start = "2026-10-22T03:12:00.064000Z"
+        session = base_session(last_event="SessionStart", last_event_at=start,
+                               updated_at=start, pid=45785, last_assistant="Done.")
+        entry = registry("idle", "2026-10-22T03:12:00.158000Z", pid=45785)
+        within = datetime(2026, 10, 22, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(self.state(session, None, now=within)[:2], ("unconcluded", None))
+        self.assertEqual(self.state(session, entry, now=within)[:2],
+                         ("review", "Your turn: Done."))
+        # Days later it is just an old finished turn.
+        days_later = datetime(2026, 10, 24, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(self.state(session, entry, now=days_later)[:2], ("unconcluded", None))
+        # It flips to running the moment the registry reports busy.
+        busy = registry("busy", "2026-10-24T08:59:00.000000Z", pid=45785)
+        self.assertEqual(self.state(session, busy, now=days_later)[:2], ("running", None))
+
+    def test_registry_idle_from_a_dead_process_is_no_signal(self):
+        # A crash leaves <pid>.json behind with status idle; with the pid
+        # confirmed dead it must not turn an unknown last_event into a Stop.
+        start = "2026-10-22T03:12:00.064000Z"
+        session = base_session(last_event="SessionStart", last_event_at=start,
+                               updated_at=start, pid=45785, last_assistant="Done.")
+        entry = registry("idle", "2026-10-22T03:12:00.158000Z", pid=45785)
+        within = datetime(2026, 10, 22, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(self.state(session, entry, alive=False, now=within)[:2],
+                         ("unconcluded", None))
+        # Same for a stale activity event: dead stays interrupted.
+        self.assertEqual(
+            self.state(self.e50da3af(), registry("idle", "2026-10-24T05:50:00.000000Z"),
+                       alive=False, turn_start=self.PROMPT)[0],
+            "interrupted",
+        )
+
+    def test_registry_busy_overrides_review(self):
+        session = base_session(last_event="Stop", last_event_at=self.STOP, updated_at=self.STOP,
+                               last_assistant="Pick A or B?")
+        busy = registry("busy", "2026-10-24T05:44:30.000000Z")
+        self.assertEqual(self.state(session, busy)[:2], ("running", None))
+        # Not alive: the busy file is stale; no change.
+        self.assertEqual(self.state(session, busy, alive=False)[0], "review")
+        # A busy written before the Stop is old news.
+        old = registry("busy", "2026-10-24T05:44:00.000000Z")
+        self.assertEqual(self.state(session, old)[0], "review")
+
+    def test_registry_idle_does_not_override_fresh_activity(self):
+        session = base_session(last_event="PreToolUse", last_event_at=self.STOP,
+                               updated_at=self.STOP)
+        stale_idle = registry("idle", "2026-10-24T05:44:00.000000Z")
+        self.assertEqual(self.state(session, stale_idle)[0], "running")
+
+    def test_registry_shell_status_is_no_signal(self):
+        session = base_session(last_event="SessionStart", last_event_at=self.STOP,
+                               updated_at=self.STOP, pid=8006)
+        shell = registry("shell", "2026-10-24T06:00:00.000000Z", pid=8006)
+        self.assertIsNone(reconcile.registry_signal(shell, self.STOP, "SessionStart", None))
+        self.assertEqual(self.state(session, shell)[:2], ("unconcluded", None))
+
+    def test_registry_signal_needs_a_timestamp(self):
+        self.assertIsNone(reconcile.registry_signal({"status": "idle"}, self.STOP, "Stop", None))
+        self.assertIsNone(reconcile.registry_signal(None, self.STOP, "Stop", None))
+
+
+class BackgroundTaskStateTests(AgentBoardTestCase):
+    def session(self, count=3, types=("subagent", "shell", "subagent"), **overrides):
+        fields = dict(last_event="Stop", last_assistant="Kicked off the review agents.",
+                      background_tasks=count, background_types=json.dumps(list(types)))
+        fields.update(overrides)
+        return base_session(**fields)
+
+    def test_stop_with_background_tasks_is_running_with_reason(self):
+        state = reconcile.compute_state(self.session(), None, [], now=NOW, alive=True)
+        self.assertEqual(state[:2], ("running", "Waiting on 3 background tasks: subagent, shell"))
+        one = reconcile.compute_state(self.session(count=1, types=["subagent"]), None, [],
+                                      now=NOW, alive=True)
+        self.assertEqual(one[1], "Waiting on 1 background task: subagent")
+
+    def test_background_wait_needs_a_live_process(self):
+        state = reconcile.compute_state(self.session(), None, [], now=NOW, alive=False)
+        self.assertEqual(state[0], "review")
+
+    def test_no_background_tasks_is_your_turn(self):
+        for count in (0, None):
+            state = reconcile.compute_state(self.session(count=count, types=[]), None, [],
+                                            now=NOW, alive=True)
+            self.assertEqual(state[:2], ("review", "Your turn: Kicked off the review agents."))
+
+    def test_idle_prompt_with_background_tasks_is_running(self):
+        session = self.session(last_event="Notification")
+        state = reconcile.compute_state(session, None, [], now=NOW, alive=True,
+                                        notification_type="idle_prompt")
+        self.assertEqual(state[0], "running")
+
+    def test_background_wait_beats_open_update_note(self):
+        note = {"last_ts": iso(NOW - timedelta(minutes=5)), "text": "PR #4 merged"}
+        state = reconcile.compute_state(self.session(), None, [], now=NOW, alive=True,
+                                        open_update_note=note)
+        self.assertEqual(state[:2], ("running", "Waiting on 3 background tasks: subagent, shell"))
+
+    def test_quota_auto_resume_fired_is_activity(self):
+        session = base_session(last_event="Notification")
+        state = reconcile.compute_state(session, None, [], now=NOW, alive=True,
+                                        notification_type="quota_auto_resume_fired")
+        self.assertEqual(state[:2], ("running", None))
+        stale = base_session(last_event="Notification",
+                             last_event_at=iso(NOW - timedelta(hours=2)))
+        state = reconcile.compute_state(stale, None, [], now=NOW, alive=False,
+                                        notification_type="quota_auto_resume_fired")
+        self.assertEqual(state[0], "interrupted")
+
+    def test_quota_auto_resume_stale_is_needs_you(self):
+        for kind, reason in (
+            ("quota_auto_resume_stale", "Usage limit reset while asleep: press Enter to resume"),
+            ("quota_auto_resume_disabled", "Paused at a usage limit; auto-resume is off"),
+        ):
+            session = base_session(last_event="Notification", waiting_reason=reason)
+            state = reconcile.compute_state(session, None, [], now=NOW, alive=True,
+                                            notification_type=kind)
+            self.assertEqual(state[:2], ("needs_you", reason), kind)
+
+    def test_background_wait_beats_loop_idle(self):
+        state = reconcile.compute_state(self.session(), None, [], now=NOW, alive=True,
+                                        unattended=True)
+        self.assertEqual(state[1], "Waiting on 3 background tasks: subagent, shell")
 
 
 if __name__ == "__main__":

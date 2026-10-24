@@ -1127,6 +1127,54 @@ class LastParentPromptTimesTests(AgentBoardTestCase):
         for key in (("claude", "s1"), ("codex", "s1"), ("claude", "s2")):
             self.assertEqual(batch.get(key), links.last_parent_prompt_at(self.conn, *key))
 
+    def test_injected_prompts_are_skipped_unless_any_kind(self):
+        rows = [(50, "human"), (40, None), (30, "loop"), (20, "injected"), (10, "injected")]
+        for minutes, kind in rows:
+            self.conn.execute(
+                "INSERT INTO events(ts, tool, session_id, event, prompt_kind) "
+                "VALUES (?, 'claude', 's1', 'UserPromptSubmit', ?)",
+                (iso(NOW - timedelta(minutes=minutes)), kind),
+            )
+        newest_reply = iso(NOW - timedelta(minutes=30))
+        newest_any = iso(NOW - timedelta(minutes=10))
+        self.assertEqual(links.last_parent_prompt_times(self.conn), {("claude", "s1"): newest_reply})
+        self.assertEqual(links.last_parent_prompt_at(self.conn, "claude", "s1"), newest_reply)
+        self.assertEqual(links.last_parent_prompt_times_any(self.conn),
+                         {("claude", "s1"): newest_any})
+        self.assertEqual(links.last_parent_prompt_at(self.conn, "claude", "s1", any_kind=True),
+                         newest_any)
+
+    def test_injected_prompt_does_not_release_a_needs_you_note(self):
+        from agentboard import cli
+
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, first_prompt, last_event, last_event_at, "
+            "updated_at, interactive) VALUES ('claude', 's1', 'go', 'Stop', ?, ?, 1)",
+            (iso(NOW - timedelta(minutes=5)), iso(NOW - timedelta(minutes=5))),
+        )
+        self.conn.execute(
+            "INSERT INTO notes(tool, session_id, ts, last_ts, kind, text, fingerprint, source) "
+            "VALUES ('claude', 's1', ?, ?, 'needs_you', 'USER_ACTION: approve the plan', "
+            "'fp', 'stop')",
+            (iso(NOW - timedelta(minutes=5)), iso(NOW - timedelta(minutes=5))),
+        )
+        self.conn.execute(
+            "INSERT INTO events(ts, tool, session_id, event, text, prompt_kind) "
+            "VALUES (?, 'claude', 's1', 'UserPromptSubmit', '<task-notification>x', 'injected')",
+            (iso(NOW - timedelta(minutes=1)),),
+        )
+        entry = cli.build_snapshot(self.conn, include_all=True, now=NOW)["sessions"][0]
+        self.assertEqual((entry["state"], entry["waiting_reason"]),
+                         ("needs_you", "USER_ACTION: approve the plan"))
+        # A real reply releases it.
+        self.conn.execute(
+            "INSERT INTO events(ts, tool, session_id, event, text, prompt_kind) "
+            "VALUES (?, 'claude', 's1', 'UserPromptSubmit', 'approved', 'human')",
+            (iso(NOW - timedelta(seconds=30)),),
+        )
+        entry = cli.build_snapshot(self.conn, include_all=True, now=NOW)["sessions"][0]
+        self.assertNotEqual(entry["state"], "needs_you")
+
 
 if __name__ == "__main__":
     import unittest

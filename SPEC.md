@@ -55,16 +55,27 @@ Registered for every event in both tools. Requirements:
   `AGENTBOARD_HOOK_SKIP` is set (AgentBoard's own retitle command) the hook records nothing.
 - Capture from env: `ITERM_SESSION_ID`, `TERM_PROGRAM`, `TERM_SESSION_ID`. Capture
   `os.getppid()` as the agent process pid (verify: for Claude the hook's parent may be a shell
-  spawned by claude; walk up with `ps -o ppid= -p` at most 3 levels to find a process whose
+  spawned by claude; walk up with `ps -o ppid= -p` at most 5 levels to find a process whose
   command contains `claude` or `codex`; record that pid).
 - Insert into `events`; upsert `sessions`.
 
 Claude events: SessionStart(source, model), UserPromptSubmit(prompt), PreToolUse/PostToolUse/
 PostToolUseFailure(tool_name), PermissionRequest(tool_name), Notification(notification_type,
-message), Stop(last_assistant_message), StopFailure(reason, error_message), SubagentStart/
+message), Stop(last_assistant_message, background_tasks, session_crons), StopFailure(error,
+error_details, last_assistant_message; read as "<error>: <first line>"), SubagentStart/
 SubagentStop(agent_id), SessionEnd(reason). Common: session_id, transcript_path, cwd,
 hook_event_name. Events carrying `agent_id` come from subagents: record them but they only
-ever count as "running" activity, never Stop/review for the parent.
+ever count as "running" activity, never Stop/review for the parent. (Added later:) a tagged
+SubagentStart/SubagentStop after the parent's turn ended (last_event Stop, Interrupt, a
+relevant Notification, PermissionRequest, StopFailure or a needs_you tool) keeps that
+last_event, and a kept finished turn keeps its `last_event_at`. A `SessionStart` with
+`source` `compact`, or `resume` while the session has not ended, keeps the session's
+`last_event`/`waiting_reason` (the event row is still recorded), and so does a parent
+`PreCompact`/`PostCompact` after the turn ended (a `/compact` at an idle prompt); mid-turn
+they are activity as before. A parent Stop stores the
+count and `type` labels of its `background_tasks` still in flight (status not terminal) and
+the count and prompts of its `session_crons`; a tagged SubagentStop after the turn removes one
+`subagent` entry.
 
 Codex events (hooks.json): SessionStart, SessionEnd, UserPromptSubmit(prompt),
 PreToolUse/PostToolUse, PermissionRequest, Stop(last_assistant_message), Interrupt,
@@ -77,7 +88,8 @@ Truncate stored text (prompt / message / last_assistant) to 4000 chars.
 
 ```
 events(id INTEGER PK, ts TEXT, tool TEXT, session_id TEXT, event TEXT, agent_id TEXT,
-       notification_type TEXT, tool_name TEXT, text TEXT, extra TEXT /*json*/)
+       notification_type TEXT, tool_name TEXT, text TEXT, extra TEXT /*json*/,
+       prompt_kind TEXT /*human|loop|cron|injected, parent prompts; NULL reads as human*/)
 sessions(tool TEXT, session_id TEXT, cwd TEXT, branch TEXT, title TEXT,
          first_prompt TEXT, last_prompt TEXT, last_assistant TEXT,
          started_at TEXT, updated_at TEXT, last_event TEXT, last_event_at TEXT,
@@ -85,6 +97,9 @@ sessions(tool TEXT, session_id TEXT, cwd TEXT, branch TEXT, title TEXT,
          transcript_path TEXT, origin TEXT /*hook|backfill*/, interactive INTEGER,
          ended_at TEXT, ..., title_source TEXT /*custom|generated|cli|ai|summary|fallback*/,
          retitled_at TEXT, retitle_prompt_count INTEGER, retitle_branch TEXT,
+         background_tasks INTEGER, background_types TEXT /*json list*/,
+         session_crons INTEGER, cron_prompts TEXT /*json list*/ /*from the last parent Stop*/,
+         todos_scan_offset INTEGER, todos_scan_state TEXT /*json; incremental todo scan*/,
          PRIMARY KEY(tool, session_id))
 triage(tool, session_id, status TEXT /*done|snoozed|open*/, until TEXT, note TEXT,
        updated_at TEXT, PRIMARY KEY(tool, session_id))
@@ -105,7 +120,9 @@ notes(id INTEGER PK, tool TEXT, session_id TEXT, ts TEXT /*first seen*/, last_ts
 notes_meta(key TEXT PK, value INTEGER)   -- hook_from, rebuilt_through (events.id marks)
 ```
 (`notes`/`notes_meta` added after the original spec, migration 5; the link lifecycle columns
-and the session title columns are migration 6. All of them are NULL on legacy rows.)
+and the session title columns are migration 6; `prompt_kind` and the background, cron and todo
+scan columns are migration 7, which also marks recorded injected prompts by the default
+prefixes. All of them are NULL on legacy rows.)
 Add a `schema_version` pragma (user_version) and simple migrations.
 
 ## State derivation (`reconcile.py`)
@@ -117,15 +134,26 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
    reopens it (triage reset to open).
 2. `snoozed` — triage.status = snoozed and until > now (falls through when expired).
 3. `needs_you` — last non-subagent event is PermissionRequest, or Notification with type in
-   {permission_prompt, elicitation_dialog, agent_needs_input}, or StopFailure, and no later
-   activity event. `waiting_reason` = tool_name / notification message / error. Then the
+   {permission_prompt, elicitation_dialog, agent_needs_input, quota_auto_resume_stale,
+   quota_auto_resume_disabled}, or StopFailure, and no later activity event. `waiting_reason` =
+   tool_name / notification message (the usage-limit pauses fall back to "Usage limit reset
+   while asleep: press Enter to resume" / "Paused at a usage limit; auto-resume is off") /
+   "<error>: <first line of the message>" for a StopFailure (e.g. "rate_limit: API Error: Rate
+   limit reached"), which also records an `error` note. A StopFailure stays needs_you until new
+   activity, including a `quota_auto_resume_fired` Notification (read as activity). Then the
    registry fallback, then an open (undismissed) note of kind `needs_you` while no parent
    UserPromptSubmit is newer than the note's `last_ts` (compared as parsed times);
    `waiting_reason` = the note's marker line, else its first line.
 4. `running` — last event is an activity event (UserPromptSubmit, Pre/PostToolUse, Subagent*,
    PreCompact/PostCompact) AND process alive (or no pid known and last event < 10 min old).
    `interrupted` — would be running but process dead or activity stale > 30 min (older than
-   24 h: `unconcluded`, reason "interrupted").
+   24 h: `unconcluded`, reason "interrupted"). Before this rule the session registry breaks
+   ties (see Liveness), only while the process is alive: `idle` turns an activity event, or an
+   unknown last event (SessionStart, a SessionEnd a resume un-ended), into a finished turn
+   (read as Stop); `busy` turns a finished or unknown one into `running`.
+   SessionStart never changes state on compaction, nor on resume of a live session, and a
+   PreCompact/PostCompact after a finished turn does not either (the hook keeps the previous
+   last_event).
 5. `review`, "PR #N awaits your review" — the session owns a PR that awaits the user (see
    Links: owned, OPEN, no human response yet), live or ended, ahead of every done rule. When
    the PR's author is the active gh login the reason reads "PR #N open, no response yet".
@@ -143,18 +171,28 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
    `unconcluded`, "Ended (<reason>)". SessionEnd is never a review event, and update notes do
    not hold ended sessions. Only owned PRs (rule 5) keep an exited session visible; PRs that
    merely share its branch from before never do.
-9. Live sessions: an open `update` note newer than the last parent prompt and under 24 h old →
-   `review` with its headline. Last event Stop, Interrupt or Notification idle_prompt within
-   24 h of `updated_at`, in an attended turn → `review`, "Your turn: <first line of the last
+9. Live sessions: a finished turn (Stop, Interrupt, Notification idle_prompt) whose last Stop
+   listed background tasks still in flight, with the process alive → `running`, "Waiting on N
+   background task(s): <types>", ahead of the notes below. An open `update` note newer than the
+   last parent prompt and under 24 h old → `review` with its headline. Last event Stop, Interrupt or Notification idle_prompt within
+   24 h of `last_event_at` (which stays at the finished turn through background subagent
+   events and compactions; `updated_at` when unset), in an attended turn → `review`, "Your turn: <first line of the last
    assistant message>" ("Your turn" alone when there is none; Interrupt: "Interrupted: your
    turn"). In an unattended turn (the last prompt starts with a `note_unattended_prefixes`
-   entry) → `running`, "Loop idle between ticks" while the process is alive, else
-   `unconcluded`.
+   entry, or is one of the session's `session_crons` prompts) → `running`, "Loop idle between
+   ticks" while the process is alive, else `unconcluded`.
 10. Otherwise `unconcluded`.
 
 Liveness: `kill -0 pid` (os.kill(pid, 0); PermissionError counts as alive). For Claude, also
 treat `~/.claude/sessions/<pid>.json` with matching `sessionId` as confirmation; files there
-may contain only `{pid, sessionId}` — use `status`/`waitingFor` only if present.
+may contain only `{pid, sessionId}` — use `status`/`waitingFor` only if present. (Added later:)
+the file is read for every Claude session, pid known or not (never one whose pid differs from
+the session's known pid; when several files share a `sessionId`, the one with a live pid, then
+the newest `statusUpdatedAt`, wins). Its `status` is a tie-breaker: `busy`/`idle` count when
+`statusUpdatedAt` (ms since the epoch) is newer than the session's `last_event_at`, and `idle`
+also counts when last_event is SubagentStart/SubagentStop and it is newer than the session's
+latest parent prompt (any kind). Any other status (e.g. `shell`) is no signal; `waiting` with
+no hook event at all is still the needs_you fallback.
 Codex rollout `event_msg` payload types `task_started` / `task_complete` / `turn_aborted` may
 be used as a fallback when hooks are missing for a codex session.
 

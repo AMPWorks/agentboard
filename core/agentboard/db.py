@@ -6,7 +6,7 @@ from pathlib import Path
 
 DB_FILENAME = "agentboard.db"
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _MIGRATIONS = {
     1: """
@@ -125,6 +125,29 @@ _MIGRATIONS = {
     ALTER TABLE sessions ADD COLUMN retitled_at TEXT;
     ALTER TABLE sessions ADD COLUMN retitle_prompt_count INTEGER;
     ALTER TABLE sessions ADD COLUMN retitle_branch TEXT;
+    """,
+    # State accuracy and backfill load: an event records what kind of prompt
+    # it was (human, loop, cron, injected; NULL is legacy and reads as human);
+    # a session records the background tasks and crons its last parent Stop
+    # listed, and how far the incremental todo scan has read its transcript.
+    # Recorded injected prompts are marked by the default prefixes here, so
+    # the app (which never runs `notes --rebuild`) gets them right too. ltrim
+    # with the second argument strips what Python's str.lstrip() strips
+    # (ASCII whitespace), which is what the hook uses,
+    # and GLOB is case-sensitive like str.startswith (LIKE is not).
+    7: """
+    ALTER TABLE events ADD COLUMN prompt_kind TEXT;
+    ALTER TABLE sessions ADD COLUMN background_tasks INTEGER;
+    ALTER TABLE sessions ADD COLUMN background_types TEXT;
+    ALTER TABLE sessions ADD COLUMN session_crons INTEGER;
+    ALTER TABLE sessions ADD COLUMN cron_prompts TEXT;
+    ALTER TABLE sessions ADD COLUMN todos_scan_offset INTEGER;
+    ALTER TABLE sessions ADD COLUMN todos_scan_state TEXT;
+    UPDATE events SET prompt_kind = 'injected'
+     WHERE event = 'UserPromptSubmit' AND agent_id IS NULL
+       AND (ltrim(text, ' ' || char(9, 10, 11, 12, 13)) GLOB '<task-notification>*'
+            OR ltrim(text, ' ' || char(9, 10, 11, 12, 13)) GLOB '<agent-message*'
+            OR ltrim(text, ' ' || char(9, 10, 11, 12, 13)) GLOB '<cross-session-message*');
     """,
 }
 

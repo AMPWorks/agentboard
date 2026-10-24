@@ -72,6 +72,73 @@ class SnapshotTests(AgentBoardTestCase):
         self.assertEqual(entry["key"], "claude:s1")
         self.assertEqual(entry["project"], "proj")
 
+    def test_registry_consulted_when_pid_known(self):
+        # A live session whose last_event is a background agent's late
+        # SubagentStop; its ~/.claude/sessions/<pid>.json (under the test's
+        # fake HOME) says idle, written after the latest prompt.
+        now = datetime(2026, 10, 24, 6, 0, tzinfo=timezone.utc)
+        pid = os.getpid()
+        insert_session(
+            self.conn, session_id="s1", pid=pid, last_event="SubagentStop",
+            last_event_at="2026-10-24T05:47:22.900000Z",
+            updated_at="2026-10-24T05:47:22.900000Z", last_assistant="All set.",
+        )
+        self.conn.execute(
+            "INSERT INTO events(ts, tool, session_id, event, text) VALUES "
+            "('2026-10-24T05:42:46.990000Z', 'claude', 's1', 'UserPromptSubmit', 'go')"
+        )
+        sessions_dir = self.fake_home / ".claude" / "sessions"
+        sessions_dir.mkdir()
+        idle_at = datetime(2026, 10, 24, 5, 44, 21, 15000, tzinfo=timezone.utc)
+        registry_file = sessions_dir / f"{pid}.json"
+        registry_file.write_text(json.dumps({
+            "pid": pid, "sessionId": "s1", "status": "idle",
+            "statusUpdatedAt": int(idle_at.timestamp() * 1000),
+        }))
+        entry = cli.build_snapshot(self.conn, include_all=True, now=now)["sessions"][0]
+        self.assertEqual((entry["state"], entry["waiting_reason"]),
+                         ("review", "Your turn: All set."))
+        # A file another process wrote (a stale pid) is not this session's.
+        registry_file.rename(sessions_dir / "1.json")
+        (sessions_dir / "1.json").write_text(json.dumps({
+            "pid": 1, "sessionId": "s1", "status": "idle",
+            "statusUpdatedAt": int(idle_at.timestamp() * 1000),
+        }))
+        entry = cli.build_snapshot(self.conn, include_all=True, now=now)["sessions"][0]
+        self.assertEqual(entry["state"], "running")
+
+    def test_registry_file_for_another_pid_is_ignored_and_the_real_one_wins(self):
+        # The session's pid is known; a <otherpid>.json for the same session
+        # id (a crashed earlier process) says busy, fresh: not this
+        # process's news, so the finished turn stays Review.
+        now = datetime(2026, 10, 24, 6, 0, tzinfo=timezone.utc)
+        pid = os.getpid()
+        dead_pid = 2**30
+        insert_session(
+            self.conn, session_id="s1", pid=pid, last_event="Stop",
+            last_event_at="2026-10-24T05:44:20.010000Z",
+            updated_at="2026-10-24T05:44:20.010000Z", last_assistant="All set.",
+        )
+        sessions_dir = self.fake_home / ".claude" / "sessions"
+        sessions_dir.mkdir()
+
+        def write(file_pid, status, at):
+            (sessions_dir / f"{file_pid}.json").write_text(json.dumps({
+                "pid": file_pid, "sessionId": "s1", "status": status,
+                "statusUpdatedAt": int(at.timestamp() * 1000),
+            }))
+
+        write(dead_pid, "busy", datetime(2026, 10, 24, 5, 59, tzinfo=timezone.utc))
+        entry = cli.build_snapshot(self.conn, include_all=True, now=now)["sessions"][0]
+        self.assertEqual((entry["state"], entry["waiting_reason"]),
+                         ("review", "Your turn: All set."))
+        # The live pid's own file is the one consulted, even though the dead
+        # one's statusUpdatedAt is newer and directory order is arbitrary.
+        write(dead_pid, "idle", datetime(2026, 10, 24, 5, 59, tzinfo=timezone.utc))
+        write(pid, "busy", datetime(2026, 10, 24, 5, 50, tzinfo=timezone.utc))
+        entry = cli.build_snapshot(self.conn, include_all=True, now=now)["sessions"][0]
+        self.assertEqual((entry["state"], entry["waiting_reason"]), ("running", None))
+
     def test_default_excludes_noninteractive(self):
         insert_session(self.conn, session_id="s1", interactive=0)
         snapshot = cli.build_snapshot(self.conn, include_all=False)
@@ -990,6 +1057,37 @@ class NotesRebuildTests(AgentBoardTestCase):
         rc, out, _ = _run_cmd(["notes", "--rebuild"])
         self.assertEqual(rc, 0)
         self.assertIn("recorded=0", out)
+
+    def _hook(self, payload):
+        with mock.patch("agentboard.hook.subprocess.run") as run, \
+             mock.patch("agentboard.hook.subprocess.Popen"):
+            run.return_value = mock.Mock(returncode=0, stdout="")
+            hook.process_payload(self.conn, "claude", {"cwd": "/tmp", **payload})
+
+    def test_reset_recreates_stop_failure_error_notes(self):
+        self._hook({"session_id": "s1", "hook_event_name": "UserPromptSubmit", "prompt": "go"})
+        self._hook({"session_id": "s1", "hook_event_name": "StopFailure", "error": "rate_limit",
+                    "last_assistant_message": "API Error: Rate limit reached"})
+        self._hook({"session_id": "s2", "hook_event_name": "StopFailure",
+                    "error": "authentication_failed",
+                    "last_assistant_message": "Invalid API key"})
+        # A subagent's failure records no note, before or after the rebuild.
+        self._hook({"session_id": "s1", "hook_event_name": "StopFailure", "agent_id": "a1",
+                    "error": "overloaded", "last_assistant_message": "API Error: Overloaded"})
+        written = {r["session_id"]: r["text"] for r in _notes_rows(self.conn)}
+        self.assertEqual(written, {"s1": "rate_limit: API Error: Rate limit reached",
+                                   "s2": "authentication_failed: Invalid API key"})
+        s2_note = _notes_rows(self.conn, "session_id='s2'")[0]["id"]
+        _run_cmd(["notes", "--dismiss", str(s2_note)])
+        rc, out, _ = _run_cmd(["notes", "--rebuild", "--reset"])
+        self.assertEqual(rc, 0)
+        self.assertIn("deleted=1", out)
+        self.assertIn("skipped_dismissed=1", out)
+        open_rows = _notes_rows(self.conn, "dismissed_at IS NULL")
+        self.assertEqual(
+            [(r["session_id"], r["kind"], r["text"], r["source"]) for r in open_rows],
+            [("s1", "error", "rate_limit: API Error: Rate limit reached", "backfill")],
+        )
 
 
 class InstallHooksTests(AgentBoardTestCase):

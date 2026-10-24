@@ -811,28 +811,43 @@ class GhContext:
         return self.mid_turn_by_session[key]
 
 
-def last_parent_prompt_at(conn, tool, session_id):
-    """The ts of a session's newest parent UserPromptSubmit, or None."""
+# Excludes prompts Claude Code injected itself (a task notification, an
+# agent's message): they are not the user (or the next tick) replying.
+NOT_INJECTED_SQL = "(prompt_kind IS NULL OR prompt_kind <> 'injected')"
+
+
+def last_parent_prompt_at(conn, tool, session_id, *, any_kind=False):
+    """The ts of a session's newest parent UserPromptSubmit that is not
+    injected (any_kind: injected ones too), or None."""
+    kind_filter = "" if any_kind else f"AND {NOT_INJECTED_SQL} "
     row = conn.execute(
         "SELECT ts FROM events WHERE tool=? AND session_id=? AND event='UserPromptSubmit' "
-        "AND agent_id IS NULL ORDER BY id DESC LIMIT 1",
+        f"AND agent_id IS NULL {kind_filter}ORDER BY id DESC LIMIT 1",
         (tool, session_id),
     ).fetchone()
     return row[0] if row else None
 
 
-def last_parent_prompt_times(conn) -> dict:
+def last_parent_prompt_times(conn, *, any_kind=False) -> dict:
     """last_parent_prompt_at for every session in one pass:
     {(tool, session_id): ts}. A session with no parent prompt is absent."""
+    kind_filter = "" if any_kind else f"AND {NOT_INJECTED_SQL} "
     return {
         (row[0], row[1]): row[2]
         for row in conn.execute(
             "SELECT e.tool, e.session_id, e.ts FROM events e JOIN ("
             "  SELECT MAX(id) AS id FROM events WHERE event='UserPromptSubmit' "
-            "  AND agent_id IS NULL GROUP BY tool, session_id"
+            f"  AND agent_id IS NULL {kind_filter}GROUP BY tool, session_id"
             ") newest ON e.id = newest.id"
         )
     }
+
+
+def last_parent_prompt_times_any(conn) -> dict:
+    """{(tool, session_id): ts} of each session's newest parent prompt of any
+    kind, injected ones included: when its latest turn started, which
+    bounds how old a registry "idle" may be (reconcile.registry_signal)."""
+    return last_parent_prompt_times(conn, any_kind=True)
 
 
 TURN_START_EVENTS = ("UserPromptSubmit",)
