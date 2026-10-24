@@ -3409,6 +3409,25 @@ class PruneTests(AgentBoardTestCase):
         _run_cmd(["prune"])
         self.assertEqual(self._session_ids(), ["awaits"])
 
+    def test_prune_keeps_only_an_owned_gh_pr(self):
+        # gh-found PRs are the session's own only when created inside its
+        # lifetime; one that predates the session is inherited from the
+        # branch and does not hold the session back.
+        old, started, ended = self._iso(days=120), self._iso(days=130), self._iso(days=121)
+        inside, before = self._iso(days=125), self._iso(days=140)
+        for session_id, created in (("owns", inside), ("inherits", before)):
+            insert_session(self.conn, session_id=session_id, updated_at=old,
+                           started_at=started, ended_at=ended)
+            self.conn.execute(
+                "INSERT INTO links(tool, session_id, kind, ref, url, state, source, created_at) "
+                "VALUES ('claude', ?, 'pr', '#7', 'https://example.com/pr/7', 'OPEN', 'gh', ?)",
+                (session_id, created),
+            )
+        rc, out, _ = _run_cmd(["prune"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._session_ids(), ["owns"])
+        self.assertIn("pruned 1 session(s) (1 skipped)", out)
+
     def test_prune_skips_active_snooze(self):
         old = self._iso(days=120)
         insert_session(self.conn, session_id="snoozed", updated_at=old)
