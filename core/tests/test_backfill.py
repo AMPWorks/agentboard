@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from unittest import mock
@@ -38,6 +39,29 @@ class ClaudeTranscriptTests(AgentBoardTestCase):
         self.assertEqual(result["last_assistant"], "Fixed it.")
         self.assertEqual(result["last_event"], "Stop")
         self.assertEqual(result["interactive"], 1)
+
+    def test_skips_injected_prompts_by_configured_prefixes(self):
+        path = self.tmp_path / "inj.jsonl"
+        write_jsonl(path, [
+            {"type": "user", "message": {"role": "user", "content": "real prompt"},
+             "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/tmp"},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": '<agent-message from="x">ping</agent-message>'}]},
+             "timestamp": "2026-01-01T00:01:00.000Z"},
+            {"type": "user", "message": {"role": "user", "content": "<task-notification>x"},
+             "timestamp": "2026-01-01T00:02:00.000Z"},
+        ])
+        try:
+            backfill.set_injected_prefixes(backfill.notes.DEFAULT_INJECTED_PREFIXES)
+            self.assertEqual(backfill.parse_claude_transcript(path)["last_prompt"], "real prompt")
+            # A config override replaces the list (local-command tags stay skipped).
+            (self.agentboard_home / "config.json").write_text(
+                json.dumps({"prompt_injected_prefixes": ["<agent-message"]}))
+            backfill.load_injected_prefixes()
+            self.assertEqual(backfill.parse_claude_transcript(path)["last_prompt"],
+                             "<task-notification>x")
+        finally:
+            backfill.set_injected_prefixes(backfill.notes.DEFAULT_INJECTED_PREFIXES)
 
     def test_skips_tool_result_and_meta_and_synthetic_tags(self):
         path = self.tmp_path / "sess2.jsonl"
@@ -302,6 +326,94 @@ class TodosOpenTests(AgentBoardTestCase):
         ])
         self.assertIsNone(backfill._compute_claude_todos_open(path))
 
+    def _task_create(self, n, ts="2026-01-01T00:00:00.000Z"):
+        return _assistant_tool_use(
+            "TaskCreate", {"tasks": json.dumps([{"subject": str(i)} for i in range(n)])}, ts)
+
+    def _append(self, path, entries):
+        with open(path, "a") as fh:
+            for entry in entries:
+                fh.write(json.dumps(entry) + "\n")
+
+    def test_todo_scan_resumes_from_offset(self):
+        path = self.tmp_path / "resume.jsonl"
+        write_jsonl(path, [
+            {"type": "user", "message": {"role": "user", "content": "go"}},
+            self._task_create(3),
+        ])
+        count, state = backfill._scan_claude_todos(path)
+        self.assertEqual(count, 3)
+        self.assertEqual(state["offset"], path.stat().st_size)
+        self._append(path, [
+            _assistant_tool_use("TaskUpdate", {"taskId": "1", "status": "completed"},
+                                "2026-01-01T00:00:01.000Z"),
+        ])
+        # Only the appended line is parsed: the earlier TaskCreate (which
+        # needs two json.loads calls) is not read again.
+        real_loads = json.loads
+        with mock.patch.object(backfill.json, "loads", side_effect=real_loads) as loads:
+            count, state = backfill._scan_claude_todos(path, state)
+        self.assertEqual(count, 2)
+        self.assertEqual(loads.call_count, 1)
+        self.assertEqual(state["offset"], path.stat().st_size)
+        # Nothing new: no parse at all, same answer.
+        with mock.patch.object(backfill.json, "loads", side_effect=real_loads) as loads:
+            again = backfill._scan_claude_todos(path, state)
+        self.assertEqual((again[0], loads.call_count), (2, 0))
+
+    def test_todo_scan_restarts_when_file_shrinks(self):
+        path = self.tmp_path / "shrink.jsonl"
+        write_jsonl(path, [self._task_create(5), {"type": "user", "message": {"content": "x" * 500}}])
+        count, state = backfill._scan_claude_todos(path)
+        self.assertEqual(count, 5)
+        write_jsonl(path, [self._task_create(2)])
+        count, state = backfill._scan_claude_todos(path, state)
+        self.assertEqual(count, 2)
+        self.assertEqual(state["offset"], path.stat().st_size)
+
+    def test_todo_scan_restarts_when_offset_is_not_at_a_line_start(self):
+        path = self.tmp_path / "misaligned.jsonl"
+        write_jsonl(path, [self._task_create(4)])
+        _count, state = backfill._scan_claude_todos(path)
+        stale = dict(state, offset=state["offset"] - 3, task_status={"1": "pending"})
+        count, state = backfill._scan_claude_todos(path, stale)
+        self.assertEqual(count, 4)
+        # A malformed stored state also restarts cleanly.
+        self.assertEqual(backfill._scan_claude_todos(path, {"offset": "x"})[0], 4)
+
+    def test_todo_scan_leaves_a_trailing_partial_line_for_next_run(self):
+        path = self.tmp_path / "partial.jsonl"
+        write_jsonl(path, [self._task_create(2)])
+        complete = path.stat().st_size
+        partial = json.dumps(_assistant_tool_use(
+            "TaskUpdate", {"taskId": "1", "status": "completed"}, "2026-01-01T00:00:01.000Z"))
+        with open(path, "a") as fh:
+            fh.write(partial)  # Claude Code mid-write: no newline yet
+        count, state = backfill._scan_claude_todos(path)
+        self.assertEqual((count, state["offset"]), (2, complete))
+        with open(path, "a") as fh:
+            fh.write("\n")
+        count, state = backfill._scan_claude_todos(path, state)
+        self.assertEqual((count, state["offset"]), (1, path.stat().st_size))
+
+    def test_todo_scan_offsets_are_bytes_not_characters(self):
+        path = self.tmp_path / "utf8.jsonl"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(_assistant_tool_use("TodoWrite", {"todos": [
+                {"content": "café ✓ 日本語", "status": "pending"},
+                {"content": "naïve", "status": "pending"},
+            ]}, "2026-01-01T00:00:00.000Z"), ensure_ascii=False) + "\n")
+        size = path.stat().st_size
+        self.assertGreater(size, len(path.read_text(encoding="utf-8")))
+        count, state = backfill._scan_claude_todos(path)
+        self.assertEqual((count, state["offset"]), (2, size))
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_assistant_tool_use("TodoWrite", {"todos": [
+                {"content": "café ✓", "status": "completed"},
+            ]}, "2026-01-01T00:00:01.000Z"), ensure_ascii=False) + "\n")
+        count, state = backfill._scan_claude_todos(path, state)
+        self.assertEqual((count, state["offset"]), (0, path.stat().st_size))
+
     def test_codex_update_plan_last_call_wins(self):
         path = self.tmp_path / "rollout_plan1.jsonl"
         write_jsonl(path, [
@@ -495,6 +607,33 @@ class UpsertBackfillSessionTests(AgentBoardTestCase):
         # null fields get filled in
         self.assertEqual(row["title"], "backfill title")
         self.assertEqual(row["interactive"], 0)
+
+    def test_backfill_restores_interactive_when_transcript_has_a_prompt(self):
+        # The hook marked a prompt-less SessionEnd as a helper; the transcript
+        # shows a real first prompt (hooks installed mid-way).
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, origin, interactive) "
+            "VALUES ('claude','s1','hook',0), ('claude','s2','hook',0)"
+        )
+        fields = {
+            "cwd": "/tmp", "branch": None, "title": None, "first_prompt": "fix the bug",
+            "last_prompt": None, "last_assistant": None, "started_at": None,
+            "updated_at": None, "last_event": None, "last_event_at": None,
+            "transcript_path": None, "interactive": 1,
+        }
+        backfill.upsert_backfill_session(self.conn, "claude", "s1", fields)
+        # No prompt in the transcript either: it stays a helper.
+        backfill.upsert_backfill_session(self.conn, "claude", "s2",
+                                         dict(fields, first_prompt=None))
+        rows = dict(self.conn.execute(
+            "SELECT session_id, interactive FROM sessions ORDER BY session_id").fetchall())
+        self.assertEqual(rows, {"s1": 1, "s2": 0})
+        # An sdk-cli transcript parses as interactive 0 and never flips it.
+        self.conn.execute("UPDATE sessions SET interactive=0 WHERE session_id='s1'")
+        backfill.upsert_backfill_session(self.conn, "claude", "s1",
+                                         dict(fields, interactive=0))
+        self.assertEqual(self.conn.execute(
+            "SELECT interactive FROM sessions WHERE session_id='s1'").fetchone()[0], 0)
 
     def test_corrects_legacy_head_branch_on_hook_origin_row(self):
         self.conn.execute(
@@ -791,6 +930,98 @@ class BackfillSingleSessionTests(AgentBoardTestCase):
 
         for col in backfill.BACKFILL_COLUMNS:
             self.assertEqual(row[col], full_conn_fields[col], col)
+
+    def test_second_run_resumes_the_todo_scan(self):
+        path = self.tmp_path / "sessR.jsonl"
+        self._claude_fixture(path)
+        backfill.backfill_single_session(self.conn, "claude", "sessR", transcript_path=str(path))
+        row = self.conn.execute("SELECT * FROM sessions WHERE session_id='sessR'").fetchone()
+        self.assertEqual((row["todos_open"], row["todos_scan_offset"]),
+                         (1, path.stat().st_size))
+        self.assertEqual(json.loads(row["todos_scan_state"])["last_mechanism"], "task")
+        with open(path, "a") as fh:
+            fh.write(json.dumps(_assistant_tool_use(
+                "TaskUpdate", {"taskId": "2", "status": "completed"},
+                "2026-01-01T00:00:04.000Z")) + "\n")
+        with mock.patch.object(backfill, "_scan_claude_todos",
+                               wraps=backfill._scan_claude_todos) as scan:
+            backfill.backfill_single_session(self.conn, "claude", "sessR",
+                                             transcript_path=str(path))
+        self.assertGreater(scan.call_args.args[1]["offset"], 0, "resumed, not from 0")
+        row = self.conn.execute("SELECT * FROM sessions WHERE session_id='sessR'").fetchone()
+        self.assertEqual((row["todos_open"], row["todos_scan_offset"]),
+                         (0, path.stat().st_size))
+
+    def test_offset_write_skipped_when_another_run_advanced_it(self):
+        path = self.tmp_path / "sessC.jsonl"
+        self._claude_fixture(path)
+        backfill.backfill_single_session(self.conn, "claude", "sessC", transcript_path=str(path))
+        base, state = backfill.stored_todo_scan(self.conn, "claude", "sessC")
+        fields = backfill.parse_claude_transcript(path, todos_state=state)
+        fields["todos_scan_base"] = base
+        fields["last_assistant"] = "newer text"
+        # Another run (a concurrent per-Stop re-parse) advanced the offset.
+        self.conn.execute(
+            "UPDATE sessions SET todos_scan_offset=?, todos_open=7 WHERE session_id='sessC'",
+            (base + 100,),
+        )
+        fields["todos_open"] = 3
+        backfill.upsert_backfill_session(self.conn, "claude", "sessC", fields)
+        row = self.conn.execute("SELECT * FROM sessions WHERE session_id='sessC'").fetchone()
+        self.assertEqual((row["todos_open"], row["todos_scan_offset"]), (7, base + 100))
+        self.assertEqual(row["last_assistant"], "newer text", "other columns still update")
+        # The same on a hook-origin row.
+        self.conn.execute("UPDATE sessions SET origin='hook' WHERE session_id='sessC'")
+        backfill.upsert_backfill_session(self.conn, "claude", "sessC", fields)
+        row = self.conn.execute("SELECT * FROM sessions WHERE session_id='sessC'").fetchone()
+        self.assertEqual((row["todos_open"], row["todos_scan_offset"]), (7, base + 100))
+
+    def test_run_backfill_holds_no_transaction_while_parsing(self):
+        projects = self.fake_home / ".claude" / "projects" / "-tmp-proj"
+        projects.mkdir(parents=True)
+        for name in ("a", "b"):
+            self._claude_fixture(projects / f"{name}.jsonl")
+        real_parse = backfill.parse_claude_transcript
+        writes = []
+
+        def slow_parse(path, todos_state=None):
+            # Mid-parse, a hook's write on another connection must not wait.
+            other = sqlite3.connect(str(self.agentboard_home / "agentboard.db"), timeout=0.2,
+                                    isolation_level=None)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute(
+                    "INSERT INTO events(ts, tool, session_id, event) "
+                    "VALUES ('t', 'claude', 'hook', 'PreToolUse')")
+                other.execute("COMMIT")
+                writes.append(path.name)
+            finally:
+                other.close()
+            return real_parse(path, todos_state=todos_state)
+
+        with mock.patch.object(backfill, "parse_claude_transcript", side_effect=slow_parse):
+            stats = backfill.run_backfill(self.conn, days=None)
+        self.assertEqual(sorted(writes), ["a.jsonl", "b.jsonl"])
+        self.assertEqual((stats["claude"], stats["errors"]), (2, 0))
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_run_backfill_upsert_failure_counts_and_continues(self):
+        projects = self.fake_home / ".claude" / "projects" / "-tmp-proj"
+        projects.mkdir(parents=True)
+        for name in ("a", "b"):
+            self._claude_fixture(projects / f"{name}.jsonl")
+        real_upsert = backfill.upsert_backfill_session
+
+        def flaky(conn, tool, session_id, fields):
+            if session_id == "a":
+                raise RuntimeError("boom")
+            return real_upsert(conn, tool, session_id, fields)
+
+        with mock.patch.object(backfill, "upsert_backfill_session", side_effect=flaky):
+            stats = backfill.run_backfill(self.conn, days=None)
+        self.assertEqual((stats["claude"], stats["errors"]), (1, 1))
+        ids = [r[0] for r in self.conn.execute("SELECT session_id FROM sessions")]
+        self.assertEqual(ids, ["b"])
 
     def test_uses_explicit_transcript_path(self):
         path = self.tmp_path / "sess2.jsonl"

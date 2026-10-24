@@ -102,6 +102,20 @@ class RetitleTests(AgentBoardTestCase):
             self.prompt("s1", "sub", agent_id="a1")
         self.assertEqual(self.retitle()[0], 0)
 
+    def test_injected_prompts_do_not_count_or_reach_the_context(self):
+        self.session(prompts=3)
+        for i in range(3):
+            self.prompt("s1", f"<task-notification>task {i} done</task-notification>")
+        self.conn.execute("UPDATE events SET prompt_kind='injected' WHERE text LIKE '<task-%'")
+        self.assertEqual(titles.parent_prompt_count(self.conn, "claude", "s1"), 3)
+        self.assertEqual(titles.parent_prompt_counts(self.conn), {("claude", "s1"): 3})
+        self.assertEqual(self.retitle()[0], 0)
+        self.prompt("s1", "a real prompt")
+        self.prompt("s1", "another real prompt")
+        count, runner = self.retitle()
+        self.assertEqual(count, 1)
+        self.assertNotIn("task-notification", runner.calls[0][1])
+
     def test_counts_are_relative_to_the_last_retitle(self):
         self.session(prompts=7, retitle_prompt_count=5, retitle_branch="feature-x",
                      retitled_at=iso(NOW - timedelta(days=1)))

@@ -107,7 +107,8 @@ class DbTests(AgentBoardTestCase):
         old.close()
         conn = db.connect(path)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0],
+                             db.SCHEMA_VERSION)
             link = conn.execute("SELECT * FROM links").fetchone()
             self.assertEqual((link["ref"], link["url"], link["state"]),
                              ("#1", "https://x/1", "MERGED"))
@@ -120,6 +121,53 @@ class DbTests(AgentBoardTestCase):
                 self.assertIsNone(session[col], col)
         finally:
             conn.close()
+
+    def test_migration_7_adds_columns_and_marks_injected_prompts(self):
+        path = self.tmp_path / "v6.db"
+        old = sqlite3.connect(str(path), isolation_level=None)
+        for version in (1, 2, 3, 4, 5, 6):
+            old.executescript(db._MIGRATIONS[version])
+        old.execute("PRAGMA user_version = 6")
+        rows = [
+            (None, "<task-notification>\n<task-id>a1</task-id>"),
+            (None, "\n\t <agent-message from=\"x\">hi</agent-message>"),
+            (None, "<cross-session-message from=\"y\">hello</cross-session-message>"),
+            (None, "please fix the build"),
+            (None, "<Task-Notification> not the real tag"),
+            ("sub-1", "<task-notification>tagged</task-notification>"),
+        ]
+        for agent_id, text in rows:
+            old.execute(
+                "INSERT INTO events(ts, tool, session_id, event, agent_id, text) "
+                "VALUES ('t', 'claude', 's1', 'UserPromptSubmit', ?, ?)",
+                (agent_id, text),
+            )
+        old.execute(
+            "INSERT INTO events(ts, tool, session_id, event, text) "
+            "VALUES ('t', 'claude', 's1', 'Stop', '<task-notification>')"
+        )
+        old.execute("INSERT INTO sessions(tool, session_id) VALUES ('claude', 's1')")
+        old.close()
+        conn = db.connect(path)
+        try:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 7)
+            kinds = [row[0] for row in conn.execute("SELECT prompt_kind FROM events ORDER BY id")]
+            self.assertEqual(
+                kinds, ["injected", "injected", "injected", None, None, None, None]
+            )
+            session = conn.execute("SELECT * FROM sessions").fetchone()
+            for col in ("background_tasks", "background_types", "session_crons",
+                        "cron_prompts", "todos_scan_offset", "todos_scan_state"):
+                self.assertIn(col, session.keys())
+                self.assertIsNone(session[col], col)
+        finally:
+            conn.close()
+
+    def test_existing_migrations_are_unchanged(self):
+        # Migrations already applied in the field are never edited.
+        self.assertEqual(sorted(db._MIGRATIONS), [1, 2, 3, 4, 5, 6, 7])
+        self.assertIn("ALTER TABLE sessions ADD COLUMN retitle_branch TEXT;", db._MIGRATIONS[6])
+        self.assertNotIn("prompt_kind", db._MIGRATIONS[6])
 
     def test_db_file_created_under_agentboard_home(self):
         self.assertTrue((self.agentboard_home / "agentboard.db").exists())

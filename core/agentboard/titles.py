@@ -120,7 +120,8 @@ def parent_prompt_counts(conn) -> dict:
         (row[0], row[1]): row[2]
         for row in conn.execute(
             "SELECT tool, session_id, COUNT(*) FROM events "
-            "WHERE event='UserPromptSubmit' AND agent_id IS NULL GROUP BY tool, session_id"
+            "WHERE event='UserPromptSubmit' AND agent_id IS NULL "
+            f"AND {links_mod.NOT_INJECTED_SQL} GROUP BY tool, session_id"
         )
     }
 
@@ -128,7 +129,7 @@ def parent_prompt_counts(conn) -> dict:
 def parent_prompt_count(conn, tool, session_id) -> int:
     return conn.execute(
         "SELECT COUNT(*) FROM events WHERE tool=? AND session_id=? "
-        "AND event='UserPromptSubmit' AND agent_id IS NULL",
+        f"AND event='UserPromptSubmit' AND agent_id IS NULL AND {links_mod.NOT_INJECTED_SQL}",
         (tool, session_id),
     ).fetchone()[0]
 
@@ -204,6 +205,7 @@ def build_context(conn, session) -> str:
     rows = conn.execute(
         "SELECT event, text FROM events WHERE tool=? AND session_id=? AND agent_id IS NULL "
         "AND event IN ('UserPromptSubmit', 'Stop') AND text IS NOT NULL AND text <> '' "
+        f"AND (event = 'Stop' OR {links_mod.NOT_INJECTED_SQL}) "
         "ORDER BY id DESC LIMIT ?",
         (session["tool"], session["session_id"], CONTEXT_TURNS * 2),
     ).fetchall()
