@@ -395,7 +395,7 @@ enum HelpContent {
             .keyValue([
                 HelpRow(key: "`agentboard install-hooks`", value: "Register the hooks. `--claude` / `--codex` limit it to one tool; `--dry-run` shows the change. Backs up the file first and leaves other hooks alone."),
                 HelpRow(key: "`agentboard uninstall-hooks`", value: "Remove only AgentBoard's own hook entries. `--claude`, `--codex`, `--dry-run`."),
-                HelpRow(key: "`agentboard enable-codex-hooks`", value: "Turn on `hooks = true` under `[features]` in `~/.codex/config.toml` (backed up first), for Codex older than 0.124 or to undo a `hooks = false`. On Codex 0.124 and newer, which run hooks by default, it changes nothing unless `hooks = false` is set. `--dry-run` previews."),
+                HelpRow(key: "`agentboard enable-codex-hooks`", value: "Turn on `hooks = true` under `[features]` in `~/.codex/config.toml` (backed up first), for Codex older than 0.124 or to undo a `hooks = false`. On Codex 0.124 and newer, which run hooks by default, it changes nothing unless `hooks = false` is set. It refuses while the deprecated `codex_hooks = false` is set, since Codex does not document which key wins; remove that line by hand. `--dry-run` previews."),
             ]),
             .heading("Environment variables"),
             .keyValue([

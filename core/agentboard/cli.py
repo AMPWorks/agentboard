@@ -1621,7 +1621,7 @@ def cmd_enable_codex_hooks(args):
                   dry_run=bool(args.dry_run))
         _report(
             "error", "enable_codex_hooks",
-            f"error: codex_hooks = false under [features] in {config_path} turns hooks off; "
+            f"error: codex_hooks = false under [features] in {config_path} may keep hooks off; "
             "remove that line by hand (it is the deprecated alias of hooks), then re-run",
         )
         return 1
