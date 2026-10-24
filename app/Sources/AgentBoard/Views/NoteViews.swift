@@ -80,6 +80,10 @@ struct UpdatesSectionView: View {
                 Text(UpdatesFeed.header(listed: listed, total: total))
                     .font(.caption.bold())
                     .foregroundStyle(.secondary)
+                    .help("Open updates: what sessions said that is worth keeping, until you dismiss it")
+                HelpButton(topic: .updates, tooltip: "Explain the Updates feed in AgentBoard Help",
+                           closesHostWindow: true)
+                    .font(.caption)
                 Spacer()
                 Button(clearPlan.title) {
                     let plan = clearPlan
@@ -139,6 +143,7 @@ struct UpdateRowView: View {
                         .frame(width: 14, height: 14)
                         .background(row.session.tool == "codex" ? Color.purple.opacity(0.25) : Color.blue.opacity(0.25))
                         .clipShape(Circle())
+                        .help(SessionRowView.toolHelp(row.session))
                     Text(row.project.isEmpty ? row.session.displayTitle : row.project)
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
@@ -261,6 +266,7 @@ private struct GroupedNoteLine: View {
         .padding(.top, 2)
         .contentShape(Rectangle())
         .onTapGesture { open() }
+        .help("Open this update in the dashboard")
     }
 }
 
@@ -300,6 +306,7 @@ struct SessionNotesSection: View {
                 if session.notes.count > 1 {
                     Button("Dismiss All") { Task { await store.dismissNotes(for: session) } }
                         .controlSize(.small)
+                        .help("Dismiss every open update of this session, including ones not listed")
                 }
             }
             .id(NoteFocus.sectionID)
@@ -323,6 +330,7 @@ struct SessionNotesSection: View {
                     Spacer(minLength: 8)
                     Button("Dismiss") { Task { await store.dismissNote(note, of: session) } }
                         .controlSize(.small)
+                        .help("Dismiss this update; a later repeat starts a new one")
                 }
                 .padding(8)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))

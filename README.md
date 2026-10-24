@@ -84,10 +84,12 @@ in place:
 - The installed app, the `core` symlink, and its entire version store (`core.d/`) are removed
   (see the core copy layout below) — but only if `core` still points into a store `uninstall.sh`
   recognizes as its own; otherwise it refuses and leaves both alone (see below).
-- `--enable-codex-hooks`' edit to `~/.codex/config.toml` (`[features]` / `hooks = true`) is **not**
-  reversed by `uninstall.sh` — only its own backup file (`config.toml.agentboard-bak-<timestamp>`)
-  is left beside it. That flag is a Codex-wide config choice, not something `uninstall.sh` should
-  silently undo; restore the backup yourself if you want it reverted.
+- `--enable-codex-hooks`' edit to an existing `~/.codex/config.toml` (`[features]` /
+  `hooks = true`) is **not** reversed by `uninstall.sh` — only its own backup file
+  (`config.toml.agentboard-bak-<timestamp>`) is left beside it. That flag is a Codex-wide config
+  choice, not something `uninstall.sh` should silently undo; restore the backup yourself if you
+  want it reverted. A `config.toml` that `--enable-codex-hooks` created (none existed before, so
+  there is no backup) is deleted, but only while it still holds nothing but that setting.
 - The data directory is left in place unless you pass `--purge-data`.
 
 Both scripts resolve all paths relative to the repository they live in — there's nothing to edit
@@ -278,6 +280,20 @@ the snapshot; `done_reason: "manual"` and `auto_done: false` means a human marke
 `agentboard mark <tool> <id> open` after an exit rejects these for that session ("Reopened")
 until it genuinely resumes (a new prompt clears the exit marker and makes it live again).
 
+## Help
+
+The app has a built-in guide: open the gear menu (at the right of the popover footer, or in the
+dashboard toolbar) and choose **AgentBoard Help**. It covers sessions and their states, the
+popover, Updates, search, the dashboard, PR links and integrations, every Settings control, every
+`config.json` key, the CLI, troubleshooting, and data and privacy, with a search field that finds
+topics by their contents. The ? buttons next to each Settings section header and next to the
+popover's Updates header and search field open the matching topic. The same gear menu opens
+**Settings…** and **Open Log** and holds **Quit AgentBoard**, and every control in the app has a
+tooltip saying what it does.
+
+The guide mirrors this README (`app/Sources/AgentBoard/Help/HelpContent.swift`); tests check that
+every `config.json` key, Settings key and CLI subcommand and option appears in it.
+
 ## Menu bar icon
 
 The menu bar icon takes the color of the most urgent session, so you can tell whether an agent
@@ -406,10 +422,10 @@ these generic mechanisms, all handled in `core/agentboard/links.py`:
 3. **Provider commands** — list external integrations in `$AGENTBOARD_HOME/config.json`:
 
    ```json
-   {"providers": [{"name": "...", "command": ["..."], "interval_minutes": 10}]}
+   {"providers": [{"name": "...", "command": ["..."]}]}
    ```
 
-   `agentboard refresh-links` runs each one (30s timeout), passing the open sessions as JSON on
+   `agentboard refresh-links` runs every provider on each run (30s timeout each), passing the open sessions as JSON on
    stdin, and reads back `[{"session": "tool:id", "links": [...]}]` from stdout. This is how a
    team-specific integration plugs in without any code in AgentBoard itself; see
    `examples/providers/` for a fully generic example (reads git trailers).
@@ -504,7 +520,10 @@ negated or pending, "PR #5 has not merged yet", "no tests failed", "None of the 
 background in a since/until/once/if/unless clause, "the queue is empty since the logging work
 merged"), or
 news (a repair, a bug, a fix, something found or wrong, a heads-up) in 160+ characters. Softer events behind a quiet lead ("Nothing changed: PR #5 is
-approved and deployed") restate a known state and stay quiet. A PR or issue reference makes a
+approved and deployed") restate a known state and stay quiet. A progress note on work another
+agent is still doing ("still building", "still working", "holds the lock", "takes no action", "no
+new work", "nothing new this tick", ...) is dropped too when it is under 400 characters and carries
+no link, even without idle wording. A PR or issue reference makes a
 milestone only the first time the session's notes (open or dismissed) mention that reference: "The
 builder is still fixing PR #4's findings" is kept once, not every tick, while an event about it
 ("PR #4 merged", "opened", "deployed", "CI went red", "filed", "is now blocked") is kept every
@@ -600,6 +619,42 @@ still `NULL` — except the title, which hooks never write: a newer Claude Code 
 older one, a `/rename` (custom title) beats any generated one, and a first-prompt fallback never
 replaces a real title.
 
+## Configuration (config.json)
+
+Everything the CLI can be told lives in one optional JSON object, `config.json` in the data
+directory (`~/Library/Application Support/AgentBoard/config.json`, or
+`$AGENTBOARD_HOME/config.json`; `agentboard paths` prints the directory). The file does not exist
+until you create it, every key is optional, and a missing or unreadable file means every default.
+It is read fresh by each command, so an edit applies on the next snapshot, hook event or
+`refresh-links`. The app's own settings (Settings window) are separate and live in its macOS
+defaults (`io.github.agentboard`). Every key core reads is registered in
+`core/agentboard/config_keys.py`:
+
+| Key | Type | Default | What it does |
+|-----|------|---------|--------------|
+| `providers` | list of objects | none | External integrations `refresh-links` runs: `name` labels one in the log, `command` is the argv to run (see Links & integrations). |
+| `ticket_patterns` | list of objects | none | Ticket references matched against each session's branch and first prompt: `regex` is a regular expression, `url` a link with `{ref}` where the match goes. |
+| `automation_logins` | list of strings | none | GitHub logins (a reviewer bot, an author bot) whose reviews and comments are not a response from you when deciding whether a PR awaits your review. |
+| `note_markers` | list of strings | `["USER_ACTION:"]` | A final-message line starting with one of these becomes a `needs_you` note; `[]` turns marker detection off. |
+| `note_unattended_prefixes` | list of strings | `["# Autonomous loop"]` | A turn whose prompt starts with one of these is unattended (loop) work. |
+| `retitle_command` | argv list, string, or `null` | the local `claude` CLI with Haiku | Reads a session's recent context on stdin and prints a new title; `null` turns retitling off. |
+| `retitle_min_prompts` | integer >= 1 | `5` | New prompts since the last retitle before a session is retitled again. |
+| `retitle_max_per_run` | integer >= 0 | `5` | At most this many sessions retitled per `refresh-links`; `0` turns it off. |
+| `log_level` | `debug`/`info`/`warn`/`error` | `info` | The diagnostic log's level; `AGENTBOARD_LOG_LEVEL` wins over it. |
+
+```json
+{
+  "providers": [{"name": "trailers", "command": ["/path/to/provider"]}],
+  "ticket_patterns": [{"regex": "[A-Z][A-Z0-9]+-\\d+", "url": "https://tickets.example.com/browse/{ref}"}],
+  "automation_logins": ["my-reviewer-bot"],
+  "note_markers": ["USER_ACTION:"],
+  "note_unattended_prefixes": ["# Autonomous loop"],
+  "retitle_min_prompts": 5,
+  "retitle_max_per_run": 5,
+  "log_level": "info"
+}
+```
+
 ## CLI reference
 
 ```
@@ -614,16 +669,21 @@ agentboard note --kind needs_you|update|error --text T [--session TOOL:ID]
 agentboard notes [--session TOOL:ID] [--kind K ...] [--all] [--json]
 agentboard notes --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID] [--kind K ...]
 agentboard notes --rebuild [--days N] [--reset] [--json]
-agentboard backfill [--days 30]
+agentboard backfill [--days 30] [--session TOOL:ID --transcript PATH]
 agentboard refresh-links
 agentboard install-hooks [--claude] [--codex] [--dry-run]
 agentboard uninstall-hooks [--claude] [--codex] [--dry-run]
 agentboard enable-codex-hooks [--dry-run]
 agentboard focus <tool> <session_id>
 agentboard resume <tool> <session_id> [--print]
+agentboard map-codex --session ID --cwd DIR [--at TIME]
 agentboard prune [--days 90]
 agentboard logs [--since 1h|ISO-8601] [--grep TEXT] [--lines N] [--app]
 ```
+
+`hook`, `map-codex` and `backfill --session` are what the hooks run; you never need to call them
+yourself. `install-hooks --bin-path` only previews a different hook path for `install.sh
+--dry-run`.
 
 ## Diagnostics
 

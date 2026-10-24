@@ -32,7 +32,7 @@ agentboard/
                             hooks for whichever of claude/codex are present, runs backfill,
                             optionally enables launch at login. Flags: --no-hooks, --no-app,
                             --dry-run, --prefix. Idempotent; safe to re-run to upgrade.
-  scripts/uninstall.sh      removes hooks (restoring nothing else), app, optionally data dir
+  scripts/uninstall.sh      removes its own hooks (other hooks stay), app, optionally data dir
   README.md
 ```
 
@@ -184,7 +184,7 @@ host is built in. Everything environment-specific arrives through these generic 
    "cwd": "...", "links": [...], "status": "..."}`; ingested and deleted on next snapshot. For
    tools that can't exec the CLI.
 3. **Provider commands** — `$AGENTBOARD_HOME/config.json` `"providers": [{"name": "...",
-   "command": ["..."], "interval_minutes": 10}]`. `refresh-links` runs each (timeout 30 s),
+   "command": ["..."]}]`. Every `refresh-links` runs each (timeout 30 s),
    passing the open sessions as JSON on stdin; the command prints `[{"session": "tool:id",
    "links": [...]}]`. This is how a team-specific integration (e.g. a ticket-workflow skill's
    state files, a JIRA lookup) plugs in without code in AgentBoard. Ship one example provider

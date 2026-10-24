@@ -116,6 +116,7 @@ struct MenuBarView: View {
                 TextField("Filter sessions", text: $store.popoverQuery)
                     .textFieldStyle(.plain)
                     .focused($searchFocused)
+                    .help("Filter sessions and updates: words, \"quoted phrases\", or field:value such as branch:main or state:review (⌘F)")
                 if !store.popoverQuery.isEmpty {
                     Button {
                         clearQuery()
@@ -127,6 +128,8 @@ struct MenuBarView: View {
                     .help("Clear filter")
                     .accessibilityLabel("Clear filter")
                 }
+                HelpButton(topic: .search, tooltip: "Explain search: words, quotes and field:value filters",
+                           closesHostWindow: true)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -164,6 +167,7 @@ struct MenuBarView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
             Button("Clear") { clearQuery() }
+                .help("Clear the filter and show every session")
         }
         .padding()
     }
@@ -177,10 +181,22 @@ struct MenuBarView: View {
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 10)
                 .padding(.top, 4)
+                .help(Self.sectionHelp(section.kind))
             ForEach(section.sessions) { session in
                 SessionRowView(session: session, store: store)
                     .padding(.horizontal, 4)
             }
+        }
+    }
+
+    static func sectionHelp(_ kind: PopoverSections.Kind) -> String {
+        switch kind {
+        case .needsYou: return "Sessions waiting on you (a prompt, a question, a failure) and interrupted ones"
+        case .review: return "Sessions with something for you to act on; the last line of each row says what"
+        case .running: return "Sessions working right now"
+        case .unconcluded: return "Sessions that ended or stopped without finishing"
+        case .snoozed: return "Snoozed sessions that match the filter"
+        case .done: return "Done sessions that match the filter"
         }
     }
 
@@ -204,6 +220,7 @@ struct MenuBarView: View {
         .font(.caption.bold())
         .foregroundStyle(.secondary)
         .padding(.horizontal, 10)
+        .help("Sessions that ended or stopped without finishing; click to show or hide them")
     }
 
     private var footer: some View {
@@ -211,13 +228,13 @@ struct MenuBarView: View {
             Button("Open Dashboard") {
                 DashboardWindowController.show()
             }
+            .help("Open the dashboard window with every session (⌃⌥⌘A)")
             Spacer()
             Button("Refresh") {
                 Task { await store.refresh() }
             }
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
-            }
+            .help("Reload every session's state now")
+            GearMenu(store: store, closesHostWindow: true)
         }
         .padding(8)
         .buttonStyle(.plain)
