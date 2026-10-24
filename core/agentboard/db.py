@@ -6,7 +6,7 @@ from pathlib import Path
 
 DB_FILENAME = "agentboard.db"
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _MIGRATIONS = {
     1: """
@@ -108,6 +108,23 @@ _MIGRATIONS = {
     INSERT INTO notes_meta(key, value)
         VALUES ('hook_from', (SELECT COALESCE(MAX(id), 0) FROM events)),
                ('rebuilt_through', 0);
+    """,
+    # Session lifecycle: a PR link records its head branch, close time,
+    # who reported it, its creation time, the first human response and
+    # whether the active gh login authored it; a session records where its
+    # title came from and when (at which prompt count, on which branch) it
+    # was last retitled.
+    6: """
+    ALTER TABLE links ADD COLUMN branch TEXT;
+    ALTER TABLE links ADD COLUMN closed_at TEXT;
+    ALTER TABLE links ADD COLUMN source TEXT;
+    ALTER TABLE links ADD COLUMN created_at TEXT;
+    ALTER TABLE links ADD COLUMN responded_at TEXT;
+    ALTER TABLE links ADD COLUMN self_authored INTEGER;
+    ALTER TABLE sessions ADD COLUMN title_source TEXT;
+    ALTER TABLE sessions ADD COLUMN retitled_at TEXT;
+    ALTER TABLE sessions ADD COLUMN retitle_prompt_count INTEGER;
+    ALTER TABLE sessions ADD COLUMN retitle_branch TEXT;
     """,
 }
 

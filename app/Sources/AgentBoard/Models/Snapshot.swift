@@ -164,8 +164,43 @@ struct Link: Codable, Sendable, Identifiable, Equatable, Hashable {
     var url: String?
     var state: String?
     var title: String?
+    /// The PR's head branch (or the session's branch when it was reported).
+    /// Missing from older CLIs, like `owned` and `awaitsYou`.
+    var branch: String?
+    /// The session opened this PR itself (reported it, or gh found it on
+    /// the session's branch created during the session).
+    var owned: Bool?
+    /// Owned, open, and nobody but automation has reviewed or commented.
+    var awaitsYou: Bool?
 
     var id: String { "\(kind):\(ref)" }
+
+    enum CodingKeys: String, CodingKey {
+        case kind, ref, url, state, title, branch, owned
+        case awaitsYou = "awaits_you"
+    }
+
+    init(kind: String, ref: String, url: String? = nil, state: String? = nil, title: String? = nil,
+         branch: String? = nil, owned: Bool? = nil, awaitsYou: Bool? = nil) {
+        self.kind = kind
+        self.ref = ref
+        self.url = url
+        self.state = state
+        self.title = title
+        self.branch = branch
+        self.owned = owned
+        self.awaitsYou = awaitsYou
+    }
+
+    var isPR: Bool { kind == "pr" }
+
+    /// The PR number in `#123` (or `owner/repo#123`), for ordering.
+    var number: Int? {
+        guard let hash = ref.lastIndex(of: "#") else { return Int(ref) }
+        return Int(ref[ref.index(after: hash)...])
+    }
+
+    var openURL: URL? { url.flatMap { $0.isEmpty ? nil : URL(string: $0) } }
 
     /// Display label for the link's kind. Kinds are an open set (pr, ticket,
     /// url, or whatever a provider/skill reports); unrecognized kinds fall
@@ -282,6 +317,8 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     static func == (lhs: Session, rhs: Session) -> Bool {
         lhs.key == rhs.key && lhs.updatedAt == rhs.updatedAt && lhs.state == rhs.state
             && lhs.notesCount == rhs.notesCount && lhs.notes == rhs.notes
+            && lhs.title == rhs.title && lhs.statusText == rhs.statusText
+            && lhs.waitingReason == rhs.waitingReason && lhs.links == rhs.links
     }
     func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
@@ -299,6 +336,9 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     var resumeAvailable: Bool { !(alive || state == .running || state == .needsYou) }
 
     var isAutoDone: Bool { autoDone == true }
+
+    /// The row's primary line (see `SessionDisplay`).
+    var displayTitle: String { SessionDisplay.primaryTitle(self) }
 }
 
 struct Snapshot: Codable, Sendable, Equatable {

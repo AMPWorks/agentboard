@@ -84,9 +84,40 @@ class DbTests(AgentBoardTestCase):
         old.close()
         conn = db.connect(path)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
             meta = dict(conn.execute("SELECT key, value FROM notes_meta").fetchall())
             self.assertEqual(meta, {"hook_from": 3, "rebuilt_through": 0})
+        finally:
+            conn.close()
+
+    def test_migration_6_adds_lifecycle_columns_to_a_v5_database(self):
+        path = self.tmp_path / "v5.db"
+        old = sqlite3.connect(str(path), isolation_level=None)
+        for version in (1, 2, 3, 4, 5):
+            old.executescript(db._MIGRATIONS[version])
+        old.execute("PRAGMA user_version = 5")
+        old.execute(
+            "INSERT INTO sessions(tool, session_id, title, branch) "
+            "VALUES ('claude', 's1', 'old title', 'feature-x')"
+        )
+        old.execute(
+            "INSERT INTO links(tool, session_id, kind, ref, url, state, checked_at) "
+            "VALUES ('claude', 's1', 'pr', '#1', 'https://x/1', 'MERGED', 't')"
+        )
+        old.close()
+        conn = db.connect(path)
+        try:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 6)
+            link = conn.execute("SELECT * FROM links").fetchone()
+            self.assertEqual((link["ref"], link["url"], link["state"]),
+                             ("#1", "https://x/1", "MERGED"))
+            for col in ("branch", "closed_at", "source", "created_at", "responded_at",
+                        "self_authored"):
+                self.assertIsNone(link[col], col)
+            session = conn.execute("SELECT * FROM sessions").fetchone()
+            self.assertEqual((session["title"], session["branch"]), ("old title", "feature-x"))
+            for col in ("title_source", "retitled_at", "retitle_prompt_count", "retitle_branch"):
+                self.assertIsNone(session[col], col)
         finally:
             conn.close()
 

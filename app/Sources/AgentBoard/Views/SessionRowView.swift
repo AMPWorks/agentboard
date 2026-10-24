@@ -42,7 +42,7 @@ struct SessionRowView: View {
             toolBadge
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(session.title)
+                    Text(session.displayTitle)
                         .font(compact ? .body : .headline)
                         .foregroundStyle(SessionColor.color(for: session))
                         .lineLimit(1)
@@ -71,21 +71,26 @@ struct SessionRowView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                // A status text is the primary line; the session's own
+                // title then comes second (never the status twice).
+                if let title = SessionDisplay.secondaryTitle(session) {
+                    Text(title)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                HStack(spacing: 6) {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    PRLinkButtons(session: session, onOverflow: showDetail)
+                }
                 if let reason = session.waitingReason, !reason.isEmpty {
                     Text(reason)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-                if let status = session.statusText, !status.isEmpty {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .italic()
                         .lineLimit(1)
                 }
             }
@@ -104,6 +109,16 @@ struct SessionRowView: View {
             DashboardWindowController.show()
         }
         popoverWindow?.close()
+    }
+
+    /// The "+N" PR button: the detail view lists every link.
+    private func showDetail() {
+        store.requestSelection(session.key)
+        if compact {
+            let popoverWindow = NSApp.keyWindow
+            DashboardWindowController.show()
+            popoverWindow?.close()
+        }
     }
 
     private var subtitle: String {
@@ -167,7 +182,10 @@ struct SessionRowView: View {
         copyButton
         markDoneButton
         iconButton("moon.zzz", help: "Snooze 1 day") { Task { await store.snooze(session, hours: 24) } }
-        if let firstLink = session.links.first(where: { $0.url != nil }), let url = URL(string: firstLink.url!) {
+        // PRs have their own buttons on the row; this opens the first
+        // other link (a ticket, a URL).
+        if let firstLink = session.links.first(where: { !$0.isPR && $0.openURL != nil }),
+           let url = firstLink.openURL {
             iconButton("arrow.up.right.square", help: "Open \(firstLink.kindLabel) \(firstLink.ref)") {
                 NSWorkspace.shared.open(url)
             }

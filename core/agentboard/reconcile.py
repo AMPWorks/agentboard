@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .hook import ACTIVITY_EVENTS, NEEDS_YOU_NOTIFICATION_TYPES, NEEDS_YOU_TOOL_SENTINEL
-from .links import has_open_pr, links_done_reason
+from .links import awaiting_reason, links_done_reason, pr_awaits_you
+from .notes import first_line
 
 # Claude SessionEnd reasons that mean the user actually finished and quit,
 # as opposed to e.g. /clear or /resume. Codex's SessionEnd reason is
@@ -18,7 +19,16 @@ CLEAN_EXIT_REASONS = {"prompt_input_exit", "logout"}
 # clean exit.
 NEEDS_YOU_EVENT_NAMES = {"PermissionRequest", "StopFailure", NEEDS_YOU_TOOL_SENTINEL}
 
-REVIEW_EVENTS = {"Stop", "Interrupt", "SessionEnd"}
+# Events after which it is the user's turn (with Notification
+# idle_prompt). SessionEnd is not one: a session the user exited is not
+# waiting on them (see compute_state's ended-session rules).
+REVIEW_EVENTS = {"Stop", "Interrupt"}
+
+LOOP_IDLE_REASON = "Loop idle between ticks"
+REOPENED_REASON = "Reopened"
+YOUR_TURN_REASON = "Your turn"
+INTERRUPTED_REASON = "Interrupted: your turn"
+ENDED_MID_TURN_REASON = "Ended mid-turn"
 NEEDS_YOU_EVENTS = {"PermissionRequest", "StopFailure", NEEDS_YOU_TOOL_SENTINEL}
 
 RUNNING_FRESH_MINUTES = 10
@@ -218,6 +228,28 @@ def note_still_raises(note, last_prompt_at) -> bool:
     return not prompt_ts > note_ts
 
 
+def _aware(value):
+    parsed = parse_ts(value)
+    if parsed is not None and parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def your_turn_reason(last_event, last_assistant) -> str:
+    """The Review reason for an attended session that stopped: what it
+    said last, so the row reads as what to answer."""
+    if last_event == "Interrupt":
+        return INTERRUPTED_REASON
+    line = first_line(last_assistant).replace("**", "").strip()
+    if not line:
+        return YOUR_TURN_REASON
+    return f"{YOUR_TURN_REASON}: {line}"[:NOTE_HEADLINE_CHARS]
+
+
+def _todos_left_reason(count) -> str:
+    return f"{count} todo{'' if count == 1 else 's'} left open"
+
+
 def compute_state(
     session,
     triage,
@@ -229,19 +261,23 @@ def compute_state(
     turn_finished=None,
     open_needs_you_note=None,
     last_prompt_at=None,
+    open_update_note=None,
+    unattended=False,
 ):
     """Compute (state, waiting_reason, auto_done, done_reason) for one session.
 
     `session` is a mapping of the sessions table columns. `triage` is a
     mapping of the triage row or None. `links` is a list of link row
-    mappings. `alive` is the result of effective_liveness (True/False/None).
-    `registry_entry` is the matching ~/.claude/sessions/<pid>.json payload,
-    used only as a fallback when hook-driven state gives no signal.
-    `notification_type` is the notification_type of the most recent
-    Notification event, looked up from the events table by the caller when
-    `last_event == "Notification"`. `turn_finished` is the caller's
-    precomputed `last_turn_finished(conn, tool, session_id)`, only needed
-    (and only looked at) once the session has actually ended.
+    mappings (with the migration-6 columns: branch, closed_at, source,
+    created_at, responded_at, self_authored). `alive` is the result of
+    effective_liveness (True/False/None). `registry_entry` is the matching
+    ~/.claude/sessions/<pid>.json payload, used only as a fallback when
+    hook-driven state gives no signal. `notification_type` is the
+    notification_type of the most recent Notification event, looked up
+    from the events table by the caller when `last_event == "Notification"`.
+    `turn_finished` is the caller's precomputed `last_turn_finished(conn,
+    tool, session_id)`; only a Codex exit still needs it (a clean Claude
+    exit is the user typing /exit at the prompt, so the turn was over).
 
     `done_reason` is one of "manual", "pr merged", "link done", "clean
     exit", or None; `auto_done` is True whenever done_reason is set and
@@ -253,7 +289,21 @@ def compute_state(
     ts of the session's latest parent UserPromptSubmit event, or None. The
     note raises the session to needs_you only while no parent prompt is
     newer than the note's last_ts: a human reply (or the next scheduled
-    tick) releases the state, and a re-emitted request re-raises it.
+    tick) releases the state, and a re-emitted request re-raises it. The
+    same `last_prompt_at` is "new work" for the done-by-link rule.
+    `open_update_note` is the newest open note of kind update (same shape);
+    it makes a live session Review with its headline while it still
+    raises and is under REVIEW_WINDOW_HOURS old. `unattended` is True when
+    the session's last prompt came from a loop rather than a person
+    (notes.is_unattended): such a session idling between ticks is not
+    waiting on anyone.
+
+    Precedence: manual done, snooze, hook needs_you, registry needs_you,
+    open needs_you note; running/interrupted; an owned PR awaiting the user
+    (review); a mark-open after the end ("Reopened"); done-by-link; the
+    ended-session rules (clean exit done, open todos, unclean end); then a
+    live session's update note, "Your turn", loop idle; else unconcluded.
+    Every review carries a reason.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -315,34 +365,55 @@ def compute_state(
         # Ambiguous: unknown liveness, age between the two thresholds.
         # Falls through below.
 
+    # A PR the session opened that the user has not answered keeps it in
+    # Review, live or ended, ahead of every done rule. Inherited PRs (on
+    # the branch before the session started) never do.
+    awaiting = [link for link in links if pr_awaits_you(link, session, now)]
+    if awaiting:
+        return "review", awaiting_reason(awaiting), False, None
+
+    if auto_done_suppressed:
+        return "unconcluded", REOPENED_REASON, False, None
+
     # Only once needs_you/running/interrupted are ruled out does a
     # merged/closed/done link (or a clean-exit auto-done) retire the
     # session -- a live session with a merged PR that just got a new
     # prompt must still read as active.
-    link_reason = links_done_reason(links)
+    link_reason = links_done_reason(links, session.get("branch"), last_prompt_at)
     if link_reason:
         return "done", None, True, link_reason
 
-    if ended_at and not auto_done_suppressed:
+    if ended_at:
         tool = session.get("tool")
-        clean_exit = _is_clean_exit(tool, session.get("end_reason"))
-        todos_open = session.get("todos_open")
-        no_open_todos = todos_open is None or todos_open <= 0
-        no_open_pr = not has_open_pr(links)
-        if clean_exit and bool(turn_finished) and no_open_todos and no_open_pr:
+        end_reason = session.get("end_reason")
+        if _is_clean_exit(tool, end_reason):
+            if tool != "claude" and not turn_finished:
+                return "unconcluded", ENDED_MID_TURN_REASON, False, None
+            todos_open = session.get("todos_open")
+            if todos_open is not None and todos_open > 0:
+                return "unconcluded", _todos_left_reason(todos_open), False, None
             return "done", None, True, "clean exit"
+        return "unconcluded", f"Ended ({end_reason})" if end_reason else "Ended", False, None
+
+    window = timedelta(hours=REVIEW_WINDOW_HOURS)
+    if open_update_note and note_still_raises(open_update_note, last_prompt_at):
+        note_ts = _aware(open_update_note.get("last_ts"))
+        if note_ts is not None and now - note_ts <= window:
+            headline = note_headline(open_update_note)
+            if headline:
+                return "review", headline, False, None
 
     is_review_event = last_event in REVIEW_EVENTS or (
         last_event == "Notification" and notification_type == "idle_prompt"
     )
-    updated_at = parse_ts(session.get("updated_at"))
-    review_age = (now - updated_at) if updated_at else None
-
-    if (
-        is_review_event
-        and review_age is not None
-        and review_age <= timedelta(hours=REVIEW_WINDOW_HOURS)
-    ):
-        return "review", None, False, None
+    if is_review_event:
+        if unattended:
+            if alive is True:
+                return "running", LOOP_IDLE_REASON, False, None
+            return "unconcluded", None, False, None
+        updated_at = _aware(session.get("updated_at"))
+        review_age = (now - updated_at) if updated_at else None
+        if review_age is not None and review_age <= window:
+            return "review", your_turn_reason(last_event, session.get("last_assistant")), False, None
 
     return "unconcluded", None, False, None

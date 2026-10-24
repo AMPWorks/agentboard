@@ -21,6 +21,7 @@ from . import hook as hook_mod
 from . import links
 from . import notes as notes_mod
 from . import reconcile
+from . import titles
 
 STATES = ["needs_you", "interrupted", "running", "review", "unconcluded", "snoozed", "done"]
 
@@ -35,7 +36,7 @@ CODEX_EVENTS = [
     "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
 ]
 
-DEFAULT_DONE_RETENTION_DAYS = 7
+DEFAULT_DONE_RETENTION_DAYS = links.SNAPSHOT_RETENTION_DAYS
 
 # TERM_PROGRAM values AgentBoard knows how to turn into a real app name for
 # `open -a`. Anything else: focus/resume can't do anything but fail.
@@ -99,7 +100,8 @@ def _session_links(conn, session, config):
     for link in links.collect_offline_links(session, config):
         by_key[(link["kind"], link["ref"])] = link
     rows = conn.execute(
-        "SELECT kind, ref, url, state, title FROM links WHERE tool=? AND session_id=?",
+        "SELECT kind, ref, url, state, title, checked_at, branch, closed_at, source, "
+        "created_at, responded_at, self_authored FROM links WHERE tool=? AND session_id=?",
         (session["tool"], session["session_id"]),
     ).fetchall()
     for row in rows:
@@ -154,17 +156,8 @@ def _open_notes_by_session(conn) -> dict:
     return by_key
 
 
-def _last_parent_prompt_at(conn, tool, session_id):
-    row = conn.execute(
-        "SELECT ts FROM events WHERE tool=? AND session_id=? AND event='UserPromptSubmit' "
-        "AND agent_id IS NULL ORDER BY id DESC LIMIT 1",
-        (tool, session_id),
-    ).fetchone()
-    return row["ts"] if row else None
-
-
 def _build_session_entry(conn, session, triage_by_key, claude_registry, config, now,
-                         notes_by_key=None):
+                         notes_by_key=None, prompt_times=None):
     session = dict(session)
     tool = session["tool"]
     session_id = session["session_id"]
@@ -189,20 +182,35 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
     if session.get("ended_at"):
         turn_finished = reconcile.last_turn_finished(conn, tool, session_id)
 
-    open_needs_you_note = next((n for n in session_notes if n["kind"] == "needs_you"), None)
-    last_prompt_at = None
-    if open_needs_you_note is not None:
-        open_needs_you_note = dict(
-            open_needs_you_note,
-            headline=notes_mod.headline(open_needs_you_note["text"], notes_mod.markers(config)),
-        )
-        last_prompt_at = _last_parent_prompt_at(conn, tool, session_id)
+    marker_list = notes_mod.markers(config)
+
+    def with_headline(note):
+        if note is None:
+            return None
+        return dict(note, headline=notes_mod.headline(note["text"], marker_list))
+
+    open_needs_you_note = with_headline(
+        next((n for n in session_notes if n["kind"] == "needs_you"), None)
+    )
+    open_update_note = with_headline(
+        next((n for n in session_notes if n["kind"] == "update"), None)
+    )
+    # One value for every rule that asks "has the user (or the next tick)
+    # prompted since?": note release and the done-by-link new-work check.
+    if prompt_times is None:
+        last_prompt_at = links.last_parent_prompt_at(conn, tool, session_id)
+    else:
+        last_prompt_at = prompt_times.get((tool, session_id))
+    unattended = notes_mod.is_unattended(
+        session.get("last_prompt"), notes_mod.unattended_prefixes(config)
+    )
 
     state, waiting_reason, auto_done, done_reason = reconcile.compute_state(
         session, triage, session_link_rows, now=now, alive=alive,
         registry_entry=registry_entry, notification_type=notification_type,
         turn_finished=turn_finished, open_needs_you_note=open_needs_you_note,
-        last_prompt_at=last_prompt_at,
+        last_prompt_at=last_prompt_at, open_update_note=open_update_note,
+        unattended=unattended,
     )
 
     cwd = session.get("cwd")
@@ -217,6 +225,9 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
         "auto_done": auto_done,
         "done_reason": done_reason,
         "title": title,
+        "title_source": session.get("title_source") if session.get("title") else (
+            "fallback" if session.get("first_prompt") else None
+        ),
         "cwd": cwd,
         "project": os.path.basename(cwd) if cwd else None,
         "branch": session.get("branch"),
@@ -238,6 +249,9 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
                 "url": link.get("url"),
                 "state": link.get("state"),
                 "title": link.get("title"),
+                "branch": link.get("branch"),
+                "owned": links.pr_is_owned(link, session, now),
+                "awaits_you": links.pr_awaits_you(link, session, now),
             }
             for link in session_link_rows
         ],
@@ -276,10 +290,12 @@ def build_snapshot(conn, include_all=False, now=None):
     )
     config = links.load_config(home)
     notes_by_key = _open_notes_by_session(conn)
+    # One grouped query, not one per session on every 3 s poll.
+    prompt_times = links.last_parent_prompt_times(conn)
 
     entries = [
         _build_session_entry(conn, session, triage_by_key, claude_registry, config, now,
-                             notes_by_key)
+                             notes_by_key, prompt_times)
         for session in sessions
     ]
 
@@ -443,10 +459,12 @@ def cmd_link(args):
             "url": args.url,
             "state": args.state,
             "title": args.title,
+            "branch": args.branch,
         }
         now_iso = _now_iso()
         conn.execute("BEGIN IMMEDIATE")
-        links.upsert_link(conn, tool, session_id, link, now_iso)
+        links.upsert_link(conn, tool, session_id, link, now_iso,
+                          branch=links.session_branch(conn, tool, session_id), source="cli")
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -474,6 +492,37 @@ def cmd_status(args):
         conn.execute("COMMIT")
     finally:
         conn.close()
+    return 0
+
+
+def cmd_title(args):
+    text = " ".join((args.text or "").split())
+    if not text:
+        _report("error", "title", "agentboard title: --text is empty")
+        return 1
+    conn = db.connect()
+    try:
+        resolved = links.resolve_session(conn, explicit=args.session)
+        if not resolved:
+            _report("warn", "title", "agentboard title: could not resolve a session",
+                    explicit=args.session)
+            return 0
+        tool, session_id = resolved
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            applied = titles.set_cli_title(conn, tool, session_id, text)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+    if not applied:
+        _report("info", "title",
+                "agentboard title: kept the session's own title (set by the user, or no such session)",
+                key=f"{tool}:{session_id}")
+        return 0
+    diag.info("cli", "title", key=f"{tool}:{session_id}", text=f"<redacted:{len(text)} chars>")
     return 0
 
 
@@ -2346,6 +2395,8 @@ def build_parser():
     p.add_argument("--url", default=None)
     p.add_argument("--state", choices=["OPEN", "MERGED", "CLOSED", "DONE"], default=None)
     p.add_argument("--title", default=None)
+    p.add_argument("--branch", default=None,
+                   help="the PR's head branch (default: the session's current branch)")
     p.add_argument("--session", default=None, help="TOOL:ID, auto-resolved if omitted")
     p.set_defaults(func=cmd_link)
 
@@ -2354,6 +2405,11 @@ def build_parser():
     p.add_argument("--ttl", type=float, default=None, help="minutes until this status expires")
     p.add_argument("--session", default=None, help="TOOL:ID, auto-resolved if omitted")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("title", help="name a session (a title you set yourself is kept)")
+    p.add_argument("--text", required=True)
+    p.add_argument("--session", default=None, help="TOOL:ID, auto-resolved if omitted")
+    p.set_defaults(func=cmd_title)
 
     p = sub.add_parser("note", help="add a retained note to a session")
     p.add_argument("--kind", choices=list(notes_mod.KINDS), required=True)
