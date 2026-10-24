@@ -49,7 +49,7 @@ enum HelpContent {
             .shortcut(keys: "⌃⌥⌘A", action: "Show or hide the dashboard from anywhere."),
             .paragraph("The gear button (in the popover footer and the dashboard toolbar) opens **Settings…**, this **AgentBoard Help**, **Open Log** and **Quit AgentBoard**. Every button and control has a tooltip: hover over it to see what it does. The ? buttons next to section headers open the matching help topic."),
             .heading("Installing"),
-            .paragraph("`scripts/install.sh` (from a checkout of AgentBoard) installs the command line tool, the hooks and the app, and imports recent history. Re-run it after an upgrade, or after installing Claude Code or Codex for the first time so the new tool gets hooks. Pass `--dry-run` to preview every change first. Codex also needs `hooks = true` under `[features]` in `~/.codex/config.toml` (`install.sh --enable-codex-hooks` adds it) and the new hooks trusted with `/hooks` inside Codex."),
+            .paragraph("`scripts/install.sh` (from a checkout of AgentBoard) installs the command line tool, the hooks and the app, and imports recent history. Re-run it after an upgrade, or after installing Claude Code or Codex for the first time so the new tool gets hooks. Pass `--dry-run` to preview every change first. Codex 0.124 and newer run hooks by default; an older Codex also needs `hooks = true` under `[features]` in `~/.codex/config.toml` (`install.sh --enable-codex-hooks` adds it), and `hooks = false` there turns them off on any version. Either way, trust the new hooks with `/hooks` inside Codex."),
         ])
 
     // MARK: - 2. Session states
@@ -101,6 +101,8 @@ enum HelpContent {
                 HelpRow(key: "Snoozed, Done", value: "Only while you search, at the bottom."),
             ]),
             .paragraph("Within a section the most recently updated session comes first."),
+            .heading("Status banner"),
+            .paragraph("A colored line under the search field (and at the top of the dashboard's session list) appears only when something is wrong. **Snapshot failed** (red) means the `agentboard` CLI or its database could not be read; the board keeps showing the last good snapshot until the next one succeeds. **Waiting on the CLI for N s** means a snapshot has been running for over 30 seconds; **No snapshot yet; the CLI is not answering** means nothing has come back since launch. **<action> failed** reports a click that did not work (mark, focus, dismiss) and goes away after 15 seconds or with its x. **Open log** reveals `agentboard.log`, which has the details. The banner never changes the menu bar icon."),
             .heading("A session row"),
             .bullets([
                 "The **dot** is the state color (hover for the color key), and the round **C** or **X** badge is the tool (Claude Code or Codex).",
@@ -308,6 +310,7 @@ enum HelpContent {
             .keyValue([
                 HelpRow(key: "Verbose logging", value: "Off by default. Also logs every background snapshot and the CLI's debug detail (it passes `AGENTBOARD_LOG_LEVEL=debug` to every CLI call). Key `verboseLogging`."),
                 HelpRow(key: "Open log", value: "Reveals `agentboard.log` in Finder (also in the gear menu as **Open Log**)."),
+                HelpRow(key: "hook-errors.log", value: "Shown only when the hooks have recorded a failure: its size, when it was last written, and **Reveal** to show it in Finder."),
             ]),
             .paragraph("Settings that change what the CLI records or detects (update markers, PR automation accounts, retitling, the log level) live in config.json instead: see **config.json reference**."),
         ])
@@ -328,6 +331,8 @@ enum HelpContent {
                 HelpRow(key: "`retitle_command`", value: "Argv list or shell-style string, or `null`. Default: the local `claude` CLI with Haiku, when installed. Reads a session's recent context on stdin and prints a new title. `null` turns retitling off."),
                 HelpRow(key: "`retitle_min_prompts`", value: "Integer ≥ 1, default `5`. New prompts since the last retitle before a session is retitled again."),
                 HelpRow(key: "`retitle_max_per_run`", value: "Integer ≥ 0, default `5`. At most this many sessions retitled per `refresh-links`; `0` turns it off."),
+                HelpRow(key: "`prune_days`", value: "Integer ≥ 0, default `90`. The daily `prune` deletes sessions idle this many days, with their events, links and updates, and dismissed updates older than this. A session with an open needs_you update, a PR awaiting you, an active snooze or a live process is never deleted. `0` never deletes."),
+                HelpRow(key: "`compact_days`", value: "Integer ≥ 0, default `7`. The daily `prune` deletes tool-use and subagent events older than this many days (prompts, replies and session start and end are kept). `0` never compacts."),
                 HelpRow(key: "`log_level`", value: "`debug`, `info`, `warn` or `error`, default `info`. The diagnostic log's level; the `AGENTBOARD_LOG_LEVEL` environment variable wins over it."),
             ]),
             .heading("Example"),
@@ -340,6 +345,8 @@ enum HelpContent {
               "note_unattended_prefixes": ["# Autonomous loop"],
               "retitle_min_prompts": 5,
               "retitle_max_per_run": 5,
+              "prune_days": 90,
+              "compact_days": 7,
               "log_level": "info"
             }
             """#),
@@ -381,14 +388,14 @@ enum HelpContent {
             .keyValue([
                 HelpRow(key: "`agentboard backfill`", value: "Import Claude Code transcripts and Codex rollouts from the last `--days N` (default 30). Never overwrites what the hooks recorded. The hooks also run it with `--session TOOL:ID` and `--transcript PATH` to re-read one session."),
                 HelpRow(key: "`agentboard refresh-links`", value: "Read the inbox, run providers, look up GitHub PRs and their reviews, and retitle sessions. The only command that touches the network."),
-                HelpRow(key: "`agentboard prune`", value: "Delete sessions (and their events, links and updates) not updated in `--days N` (default 90)."),
+                HelpRow(key: "`agentboard prune`", value: "Delete sessions (and their events, links and updates) idle for `--days N` (config `prune_days`, default 90), except ones with an open needs_you update, a PR awaiting you, an active snooze or a live process; delete tool-use events older than `--compact-days N` (config `compact_days`, default 7) and dismissed updates older than `--days`. `0` means never for either (`--days 0` used to delete everything). `--dry-run` prints the counts only; `--auto` runs at most once a day (the app calls it) and vacuums when the file has grown sparse; `--vacuum` always vacuums afterwards."),
                 HelpRow(key: "`agentboard map-codex`", value: "Internal: match a Codex session to its rollout file (`--session`, `--cwd`, `--at`). The Codex hook runs it."),
             ]),
             .heading("Hooks"),
             .keyValue([
                 HelpRow(key: "`agentboard install-hooks`", value: "Register the hooks. `--claude` / `--codex` limit it to one tool; `--dry-run` shows the change. Backs up the file first and leaves other hooks alone."),
                 HelpRow(key: "`agentboard uninstall-hooks`", value: "Remove only AgentBoard's own hook entries. `--claude`, `--codex`, `--dry-run`."),
-                HelpRow(key: "`agentboard enable-codex-hooks`", value: "Turn on `hooks = true` under `[features]` in `~/.codex/config.toml` (backed up first). `--dry-run` previews."),
+                HelpRow(key: "`agentboard enable-codex-hooks`", value: "Turn on `hooks = true` under `[features]` in `~/.codex/config.toml` (backed up first), for Codex older than 0.124 or to undo a `hooks = false`. On Codex 0.124 and newer, which run hooks by default, it changes nothing unless `hooks = false` is set. `--dry-run` previews."),
             ]),
             .heading("Environment variables"),
             .keyValue([
@@ -414,11 +421,14 @@ enum HelpContent {
                 "The app logs every CLI call to the macOS unified log (subsystem `io.github.agentboard`).",
                 "**Open Log** (gear menu, or Settings → Diagnostics) reveals the log in Finder; `agentboard logs` prints it, and `agentboard logs --app` merges the app's lines in.",
                 "**Verbose logging** in Settings → Diagnostics turns on debug detail for both the app and the CLI. Without the app, set `AGENTBOARD_LOG_LEVEL=debug` or `\"log_level\": \"debug\"` in config.json.",
+                "Settings → Diagnostics shows a **hook-errors.log** row, with **Reveal**, only when that file is not empty.",
             ]),
+            .heading("The status banner"),
+            .paragraph("When the popover or dashboard shows **Snapshot failed: …**, the `agentboard` CLI or the database is unreadable (a missing CLI, a moved data directory, a full or failing disk); the sessions shown are the last good snapshot. **Waiting on the CLI for N s** or **No snapshot yet** means the CLI is hanging. Click **Open log** and look at the latest `cli.error` or `cli.end … exit=` lines, or run `agentboard snapshot` in a terminal to see the error directly. The banner clears by itself on the next successful snapshot."),
             .heading("Common problems"),
             .keyValue([
                 HelpRow(key: "No sessions shown", value: "Run `agentboard snapshot` in a terminal. If it lists nothing, the hooks are probably not installed: re-run `scripts/install.sh` (after installing Claude Code or Codex for the first time too). Sessions started before the hooks were installed appear after a backfill. Check **Show hidden** for non-interactive runs."),
-                HelpRow(key: "Codex sessions missing", value: "Codex needs `hooks = true` under `[features]` in `~/.codex/config.toml` (`agentboard enable-codex-hooks`) and the hooks trusted with `/hooks` inside Codex."),
+                HelpRow(key: "Codex sessions missing", value: "Trust the hooks with `/hooks` inside Codex. Codex older than 0.124 also needs `hooks = true` under `[features]` in `~/.codex/config.toml` (`agentboard enable-codex-hooks`); on any version, `hooks = false` there turns hooks off."),
                 HelpRow(key: "“agentboard CLI not found”", value: "The app looks in its own bundle, then `$PATH`, then Settings → CLI & Data → agentboard path override. Re-run `scripts/install.sh` or set the override."),
                 HelpRow(key: "No PR buttons", value: "PR detection needs the GitHub CLI: install `gh` and run `gh auth login`. PRs appear after the next `refresh-links` (at launch and every 10 minutes). `agentboard logs --grep gh` shows each lookup."),
                 HelpRow(key: "A PR still “awaits your review”", value: "Only a review or comment by someone other than automation counts. If a bot account of yours is answering, it is ignored only when it is a GitHub bot or listed in `automation_logins`; if you share one account with the session, respond while the session is idle."),
@@ -442,10 +452,12 @@ enum HelpContent {
                 HelpRow(key: "Hooks", value: "Entries in `~/.claude/settings.json` and `~/.codex/hooks.json`, backed up before every change."),
                 HelpRow(key: "App settings", value: "The macOS defaults domain `io.github.agentboard`."),
             ]),
+            .heading("How long it is kept"),
+            .paragraph("Once a day the app runs `agentboard prune --auto`. It deletes sessions idle for 90 days (`prune_days`) together with their events, links and updates, but never one that still has an open needs_you update, a PR awaiting you, an active snooze or a live process. Tool-use and subagent events, most of the database, are deleted after 7 days (`compact_days`) from every session; prompts, replies and session start and end stay. Dismissed updates go after `prune_days`. When enough space is free the database is vacuumed, at most once a week. Set either value to `0` in config.json to keep everything."),
             .paragraph("Besides its own data directory, AgentBoard reads only Claude Code's and Codex's files under `~/.claude` and `~/.codex` (transcripts, the session registry) and each session's git branch."),
             .heading("Network"),
             .paragraph("Only `agentboard refresh-links` uses the network, and only through tools you set up: the GitHub CLI `gh` (PRs and their reviews), the provider commands in config.json, and the retitle command (by default the local `claude` CLI, which sends a short summary of a session's recent prompts and replies to the model). The snapshot the app polls never touches the network. Set `\"retitle_command\": null` to turn retitling off."),
             .heading("Removing AgentBoard"),
-            .paragraph("`scripts/uninstall.sh` removes the app, the installed CLI and only AgentBoard's own hook entries; any other hooks in `~/.claude/settings.json` and `~/.codex/hooks.json` are left as they are. When removing those entries leaves a file exactly as it was before the install, the original bytes are written back from the backup `install-hooks` made, so its formatting returns too; if the install created the file and nothing else is left in it, the file is deleted. A `hooks = true` that `enable-codex-hooks` added to an existing `~/.codex/config.toml` stays (its backup sits beside it); a `config.toml` that `enable-codex-hooks` created and that still holds nothing else is deleted. The data directory is kept unless you pass `--purge-data`. `--dry-run` previews; `--no-hooks` and `--no-app` skip parts. `agentboard prune --days N` deletes old sessions without uninstalling."),
+            .paragraph("`scripts/uninstall.sh` removes the app, the installed CLI and only AgentBoard's own hook entries; any other hooks in `~/.claude/settings.json` and `~/.codex/hooks.json` are left as they are. When removing those entries leaves a file exactly as it was before the install, the original bytes are written back from the backup `install-hooks` made, so its formatting returns too; if the install created the file and nothing else is left in it, the file is deleted. A `hooks = true` that `enable-codex-hooks` added to an existing `~/.codex/config.toml` stays (its backup sits beside it); a `config.toml` that `enable-codex-hooks` created and that still holds nothing else is deleted. The data directory is kept unless you pass `--purge-data`. `--dry-run` previews; `--no-hooks` and `--no-app` skip parts. `agentboard prune --days N` deletes old sessions without uninstalling (`--days 0` deletes none)."),
         ])
 }

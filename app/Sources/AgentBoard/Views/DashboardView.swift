@@ -170,6 +170,15 @@ struct DashboardView: View {
     }
 
     private func list(_ sessions: [Session]) -> some View {
+        VStack(spacing: 0) {
+            // CLI or database failures, at the top of the session list.
+            StatusBannerView(store: store, insets: EdgeInsets(top: 8, leading: 8, bottom: 4, trailing: 8))
+            sessionList(sessions)
+        }
+        .navigationSplitViewColumnWidth(min: 280, ideal: 340)
+    }
+
+    private func sessionList(_ sessions: [Session]) -> some View {
         List(sessions, selection: $selectedSessionKey) { session in
             SessionRowView(session: session, store: store, compact: false)
                 .tag(session.key)
@@ -182,7 +191,6 @@ struct DashboardView: View {
             guard let session = singleSelectedSession(in: keys), session.isFocusable else { return }
             Task { await store.focus(session) }
         }
-        .navigationSplitViewColumnWidth(min: 280, ideal: 340)
     }
 
     private func singleSelectedSession(in keys: Set<String>) -> Session? {
