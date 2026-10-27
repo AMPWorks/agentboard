@@ -200,6 +200,10 @@ struct Link: Codable, Sendable, Identifiable, Equatable, Hashable {
         return Int(ref[ref.index(after: hash)...])
     }
 
+    /// The compact label for a PR button: `#123` even when the ref is
+    /// `owner/repo#123`; the ref as given when it has no number.
+    var shortLabel: String { number.map { "#\($0)" } ?? ref }
+
     var openURL: URL? { url.flatMap { $0.isEmpty ? nil : URL(string: $0) } }
 
     /// Display label for the link's kind. Kinds are an open set (pr, ticket,

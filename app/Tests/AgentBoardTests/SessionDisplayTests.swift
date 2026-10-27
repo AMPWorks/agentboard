@@ -63,6 +63,12 @@ struct PRButtonsTests {
         #expect(layout.overflow == 0)
     }
 
+    @Test func prShortLabelDropsTheRepo() {
+        #expect(Link(kind: "pr", ref: "#42").shortLabel == "#42")
+        #expect(Link(kind: "pr", ref: "acme/widgets#7").shortLabel == "#7")
+        #expect(Link(kind: "pr", ref: "acme/widgets").shortLabel == "acme/widgets")
+    }
+
     @Test func prNumberParsing() {
         #expect(Link(kind: "pr", ref: "#42").number == 42)
         #expect(Link(kind: "pr", ref: "acme/widgets#7").number == 7)

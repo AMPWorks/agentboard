@@ -60,7 +60,9 @@ struct PRLinkButtons: View {
         } label: {
             HStack(spacing: 2) {
                 Image(systemName: PRStyle.symbol(for: link))
-                Text(link.ref)
+                Text(link.shortLabel)
+                    .lineLimit(1)
+                    .fixedSize()
             }
             .font(.caption2.monospacedDigit().weight(awaits ? .bold : .regular))
             .padding(.horizontal, 5)
