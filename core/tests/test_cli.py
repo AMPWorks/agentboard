@@ -15,7 +15,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentboard import cli, hook
+from agentboard import cli, hook, reconcile
 from tests.helpers import AgentBoardTestCase
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -80,11 +80,128 @@ class SnapshotTests(AgentBoardTestCase):
             "project", "branch", "first_prompt", "last_prompt", "last_assistant",
             "started_at", "updated_at", "ended_at", "alive", "interactive",
             "can_focus", "resume_command", "status_text", "links", "triage",
-            "notes", "notes_count",
+            "notes", "notes_count", "model", "context_tokens", "context_at",
         ):
             self.assertIn(key, entry)
         self.assertEqual(entry["key"], "claude:s1")
         self.assertEqual(entry["project"], "proj")
+        self.assertIn("usage", snapshot)
+
+    def test_session_model_and_context_fields(self):
+        insert_session(self.conn, session_id="s1", model="claude-opus-5-5",
+                       context_tokens=308011, context_at="2026-06-15T10:00:00.000Z")
+        insert_session(self.conn, session_id="s2")
+        entries = {e["session_id"]: e
+                   for e in cli.build_snapshot(self.conn, include_all=True)["sessions"]}
+        self.assertEqual(
+            (entries["s1"]["model"], entries["s1"]["context_tokens"],
+             entries["s1"]["context_at"]),
+            ("claude-opus-5-5", 308011, "2026-06-15T10:00:00.000Z"))
+        self.assertEqual(
+            (entries["s2"]["model"], entries["s2"]["context_tokens"],
+             entries["s2"]["context_at"]), (None, None, None))
+
+    def test_usage_is_empty_without_any_source(self):
+        insert_session(self.conn, session_id="s1")
+        self.assertEqual(cli.build_snapshot(self.conn, include_all=True)["usage"], [])
+
+    def test_usage_reads_the_rate_limit_file_under_home(self):
+        (self.fake_home / ".claude" / "rate-limits.json").write_text(json.dumps({
+            "cached_at": 1792841643,
+            "five_hour": {"used_percentage": 57, "resets_at": 1792848600},
+            "seven_day": {"used_percentage": 70, "resets_at": 1793120400},
+        }))
+        before_reset = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc)
+        snapshot = cli.build_snapshot(self.conn, include_all=True, now=before_reset)
+        (claude,) = snapshot["usage"]
+        self.assertEqual((claude["source"], claude["label"], claude["updated_at"]),
+                         ("claude", "Claude", "2026-10-24T11:34:03Z"))
+        self.assertEqual(claude["windows"][0],
+                         {"label": "5h", "used_percentage": 57, "resets_at": "2026-10-24T13:30:00Z"})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._print_snapshot_table(snapshot, now=before_reset)
+        self.assertIn("usage: Claude 5h 57% \u00b7 7d 70%", out.getvalue())
+
+    def test_usage_reads_drop_files_from_the_usage_directory(self):
+        directory = self.agentboard_home / "usage"
+        directory.mkdir()
+        (directory / "acme.json").write_text(json.dumps({
+            "label": "Acme", "updated_at": "2026-10-24T11:00:00Z",
+            "windows": [{"label": "daily", "used_percentage": 20}]}))
+        now = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc)
+        snapshot = cli.build_snapshot(self.conn, include_all=True, now=now)
+        self.assertEqual([(s["source"], s["label"]) for s in snapshot["usage"]], [("acme", "Acme")])
+
+    def test_malformed_usage_files_never_break_the_snapshot(self):
+        insert_session(self.conn, session_id="s1")
+        directory = self.agentboard_home / "usage"
+        directory.mkdir()
+        (directory / "deep.json").write_text("[" * 20000 + "]" * 20000)
+        (directory / "edge.json").write_text(json.dumps({
+            "updated_at": "9999-12-31T23:59:59-05:00",
+            "windows": [{"label": "5h", "used_percentage": 3,
+                         "resets_at": "9999-12-31T23:59:59-05:00"}]}))
+        (directory / "ok.json").write_text(json.dumps({
+            "updated_at": "2026-10-24T11:00:00Z",
+            "windows": [{"label": "daily", "used_percentage": 20}]}))
+        now = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc)
+        snapshot = cli.build_snapshot(self.conn, include_all=True, now=now)
+        self.assertEqual([s["source"] for s in snapshot["usage"]], ["edge", "ok"])
+        self.assertEqual([s["session_id"] for s in snapshot["sessions"]], ["s1"])
+
+    def test_any_usage_reader_failure_yields_an_empty_list(self):
+        insert_session(self.conn, session_id="s1")
+        with mock.patch.object(cli.usage_mod, "read_usage_sources",
+                               side_effect=RuntimeError("boom")), \
+                mock.patch.object(cli.diag, "debug") as debug:
+            snapshot = cli.build_snapshot(self.conn, include_all=True)
+        self.assertEqual(snapshot["usage"], [])
+        self.assertEqual([s["session_id"] for s in snapshot["sessions"]], ["s1"])
+        debug.assert_called_once_with("usage", "sources_failed", exc="RuntimeError")
+
+    def test_usage_table_line_drops_reset_windows_like_the_app(self):
+        usage = [
+            {"source": "claude", "label": "Claude", "windows": [
+                {"label": "5h", "used_percentage": 57, "resets_at": "2026-10-24T13:30:00Z"},
+                {"label": "7d", "used_percentage": 70, "resets_at": "2026-10-27T17:00:00Z"},
+                {"label": "zeta", "used_percentage": 5},
+            ]},
+            {"source": "codex", "label": "Codex", "windows": [
+                {"label": "5h", "used_percentage": 12.5, "resets_at": "2026-10-24T13:00:00Z"},
+            ]},
+        ]
+        before = datetime(2026, 10, 24, 12, 59, tzinfo=timezone.utc)
+        after = datetime(2026, 10, 24, 13, 30, tzinfo=timezone.utc)
+        self.assertEqual(cli._usage_table_line(usage, now=before),
+                         "usage: Claude 5h 57% \u00b7 7d 70% \u00b7 zeta 5%; Codex 5h 12.5%")
+        self.assertEqual(cli._usage_table_line(usage, now=after),
+                         "usage: Claude 7d 70% \u00b7 zeta 5%")
+        late = datetime(2026, 10, 28, tzinfo=timezone.utc)
+        self.assertEqual(cli._usage_table_line(usage, now=late), "usage: Claude zeta 5%")
+        del usage[0]["windows"][2]
+        self.assertIsNone(cli._usage_table_line(usage, now=late))
+        self.assertIsNone(cli._usage_table_line([], now=late))
+        self.assertIsNone(cli._usage_table_line(None, now=late))
+
+    def test_snapshot_via_shim_stays_quiet_with_bad_usage_files(self):
+        (self.fake_home / ".claude" / "rate-limits.json").write_text("{not json")
+        (self.agentboard_home / "usage").mkdir()
+        (self.agentboard_home / "usage" / "x.json").write_text("[]")
+        env = _python3_stub_env(self.tmp_path / "stub-bin")
+        env["HOME"] = str(self.fake_home)
+        env["AGENTBOARD_HOME"] = str(self.agentboard_home)
+        shim = Path(cli.__file__).resolve().parent.parent / "bin" / "agentboard"
+        result = subprocess.run([str(shim), "snapshot", "--json"], env=env,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(json.loads(result.stdout)["usage"], [])
+        log = self.agentboard_home / "agentboard.log"
+        text = log.read_text() if log.exists() else ""
+        for line in text.splitlines():
+            if "usage" in line:
+                self.assertIn("debug", line.lower())
 
     def test_registry_consulted_when_pid_known(self):
         # A live session whose last_event is a background agent's late
@@ -729,6 +846,94 @@ class LinkStatusCommandTests(AgentBoardTestCase):
             "SELECT status_text FROM sessions WHERE tool='claude' AND session_id='s1'"
         ).fetchone()
         self.assertEqual(row["status_text"], "hacking")
+
+    def test_status_reports_model_and_context_without_touching_the_text(self):
+        insert_session(self.conn, session_id="s1", status_text="kept")
+        with _no_auto_resolution():
+            rc, _, err = _run_cmd(["status", "--session", "claude:s1", "--model",
+                                   "acme-large-2", "--context-tokens", "51200"])
+        self.assertEqual((rc, err), (0, ""))
+        row = self.conn.execute(
+            "SELECT model, context_tokens, context_at, status_text FROM sessions "
+            "WHERE session_id='s1'").fetchone()
+        self.assertEqual((row["model"], row["context_tokens"], row["status_text"]),
+                         ("acme-large-2", 51200, "kept"))
+        self.assertIsNotNone(reconcile.parse_ts(row["context_at"]))
+
+    def test_status_context_replaces_a_stored_future_time(self):
+        # status measures "now", so only a future stored time could be
+        # newer; that one is bogus and must not freeze the size.
+        insert_session(self.conn, session_id="s1", context_tokens=900,
+                       context_at="2999-01-01T00:00:00.000Z")
+        with _no_auto_resolution():
+            _run_cmd(["status", "--session", "claude:s1", "--context-tokens", "5"])
+        row = self.conn.execute(
+            "SELECT context_tokens, context_at FROM sessions WHERE session_id='s1'").fetchone()
+        self.assertEqual(row["context_tokens"], 5)
+        self.assertLess(reconcile.parse_ts(row["context_at"]),
+                        datetime.now(timezone.utc) + timedelta(seconds=5))
+
+    def test_inbox_future_context_at_is_clamped_and_status_replaces_it(self):
+        insert_session(self.conn, session_id="s1")
+        inbox = self.agentboard_home / "inbox"
+        inbox.mkdir()
+        (inbox / "m.json").write_text(json.dumps({
+            "session": "claude:s1", "context_tokens": 51200,
+            "context_at": "2099-01-01T00:00:00Z"}))
+        now = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc)
+        cli.build_snapshot(self.conn, include_all=True, now=now)
+        row = self.conn.execute(
+            "SELECT context_tokens, context_at FROM sessions WHERE session_id='s1'").fetchone()
+        self.assertEqual((row["context_tokens"], row["context_at"]),
+                         (51200, "2026-10-24T12:00:00.000000Z"))
+        with _no_auto_resolution():
+            _run_cmd(["status", "--session", "claude:s1", "--context-tokens", "7000"])
+        row = self.conn.execute(
+            "SELECT context_tokens FROM sessions WHERE session_id='s1'").fetchone()
+        self.assertEqual(row["context_tokens"], 7000)
+
+    def test_status_rejects_a_context_size_beyond_sqlite_integer(self):
+        insert_session(self.conn, session_id="s1")
+        err = io.StringIO()
+        with _no_auto_resolution(), contextlib.redirect_stderr(err), \
+                self.assertRaises(SystemExit) as raised:
+            cli.build_parser().parse_args(
+                ["status", "--session", "claude:s1", "--context-tokens", str(2 ** 63)])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("below 2**63", err.getvalue())
+
+    def test_status_needs_something_to_set(self):
+        insert_session(self.conn, session_id="s1")
+        with _no_auto_resolution():
+            rc, _, err = _run_cmd(["status", "--session", "claude:s1"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--text, --model or --context-tokens", err)
+        with _no_auto_resolution():
+            rc, _, err = _run_cmd(["status", "--session", "claude:s1", "--model", " "])
+        self.assertEqual(rc, 2)
+        for bad in ("-1", "12k"):
+            with self.subTest(bad=bad), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    cli.build_parser().parse_args(["status", "--context-tokens", bad])
+
+    def test_status_ttl_without_text_is_rejected(self):
+        insert_session(self.conn, session_id="s1", status_text="kept")
+        with _no_auto_resolution():
+            rc, _, err = _run_cmd(["status", "--session", "claude:s1", "--model", "m",
+                                   "--ttl", "5"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--ttl applies to --text", err)
+        row = self.conn.execute(
+            "SELECT model, status_text FROM sessions WHERE session_id='s1'").fetchone()
+        self.assertEqual((row["model"], row["status_text"]), (None, "kept"))
+        with _no_auto_resolution():
+            rc, _, err = _run_cmd(["status", "--session", "claude:s1", "--text", "busy",
+                                   "--ttl", "5"])
+        self.assertEqual((rc, err), (0, ""))
+        row = self.conn.execute(
+            "SELECT status_text, status_until FROM sessions WHERE session_id='s1'").fetchone()
+        self.assertEqual(row["status_text"], "busy")
+        self.assertIsNotNone(row["status_until"])
 
     def test_link_unresolvable_exits_zero(self):
         args = cli.build_parser().parse_args(["link", "--kind", "pr", "--ref", "#5"])

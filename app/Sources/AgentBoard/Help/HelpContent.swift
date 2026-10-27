@@ -111,7 +111,7 @@ enum HelpContent {
                 "The **first line** is what the session says it is doing right now (an `agentboard status` text) when it has one, else its title. Titles follow the work: see PRs, links and integrations.",
                 "Small tags: **Interrupted**; a speech bubble with the number of open updates (red when one needs you); **auto** when the session finished on its own. The time is when it last changed.",
                 "The **second line** is the session's own title when a status text leads the first line.",
-                "Then the **project · branch**, and one button per PR (`#N`: green open, purple merged, red closed, outlined and bold when it awaits your review). A PR button opens the PR in the browser without touching the terminal; past three PRs a **+N** button opens the session in the dashboard.",
+                "Then the **project · branch**, a small **model · context** tag such as `Opus 5.5 · 308k` or `gpt-5-codex · 45k` (the model the session last ran, shortened when the id has a known shape, and how many tokens its latest request sent; hover for the full model id and how old the count is), and one button per PR (`#N`: green open, purple merged, red closed, outlined and bold when it awaits your review). A PR button opens the PR in the browser without touching the terminal; past three PRs a **+N** button opens the session in the dashboard.",
                 "The **last line** is the waiting reason: what the session needs from you, or why it is in Review.",
             ]),
             .heading("Clicking a row"),
@@ -122,6 +122,7 @@ enum HelpContent {
             ]),
             .heading("Footer"),
             .paragraph("**Open Dashboard** opens the full window, **Refresh** reloads the snapshot right away, and the gear menu holds **Settings…**, **AgentBoard Help**, **Open Log** and **Quit AgentBoard**."),
+            .paragraph("Above the buttons, one **plan usage** line per source that has numbers, led by the source's name, such as `Claude · 5h 57% · 7d 70% · resets in 1h 55m` or `Codex · 5h 12% · 7d 31%`: how much of each limit window is used and when the soonest resets. The window names come from the source. A line turns orange at 80% and red at 95%. Hover it for each window's reset time, where the numbers were read and how old they are; numbers over an hour old say so in the line (`Claude as of 3h ago`), because a source is only as fresh as its last report on this Mac. A window that has already reset is left out until newer numbers arrive. With no source (an API key, Bedrock or Vertex, most gateways) there is no line at all. Sources are explained under PRs, links and integrations. **Settings → Show plan usage** hides the lines."),
             .heading("Keyboard"),
             .shortcut(keys: "Type", action: "The search field has the cursor when the popover opens, so you can type a filter right away."),
             .shortcut(keys: "⌘F", action: "Focus the search field again."),
@@ -216,7 +217,7 @@ enum HelpContent {
                 "**All** and one entry per state (Needs you, Interrupted, Review, Running, Unconcluded, Snoozed, Done), each with a count of the sessions the filters keep. Select one to list only that state.",
                 "**Updates** shows how many open updates the filters keep.",
                 "A red warning with **Clear** appears when the filters hide something that needs you.",
-                "At the bottom, the color key for the row dots.",
+                "At the bottom, the color key for the row dots, and under it the **plan usage** lines (the same as the popover footer's, one per source that has numbers).",
             ]),
             .heading("Toolbar"),
             .keyValue([
@@ -237,7 +238,7 @@ enum HelpContent {
             .bullets([
                 "**Header**: tool badge, title (and the session's own title under a status text), state, the waiting reason in orange, and the done reason.",
                 "**Action bar**: **Focus** brings the terminal tab to the front; **Resume** opens a new terminal tab running `claude --resume <id>` or `codex resume <id>` in the session's directory (shown once its process has exited); **Copy Resume Command** copies that command; **Mark Done** hides the session (**Reopen** brings a done one back); **Snooze 1d** hides it for 24 hours.",
-                "**Metadata**: project, directory, branch, when it started, last updated and ended, and whether its process is alive.",
+                "**Metadata**: project, directory, branch, when it started, last updated and ended, and whether its process is alive; then, once known, **Model** (the full model id) and **Context** (the tokens its latest request sent, and how long ago that was measured). Both refresh when a turn finishes.",
                 "**Links**: every PR, ticket and URL with its state, and **awaits you** on a PR waiting for your review. Click one to open it.",
                 "**First prompt**, **Last prompt**, the session's **Updates** (each with Dismiss), and the **Last assistant message**.",
             ]),
@@ -262,15 +263,18 @@ enum HelpContent {
             .code(#"""
             agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state OPEN|MERGED|CLOSED|DONE] [--title T] [--branch B]
             agentboard status --text "phase/label" [--ttl MIN]
+            agentboard status --model MODEL_ID [--context-tokens N]
             agentboard title --text "what this session is doing"
             """#),
             .bullets([
                 "`link` records a PR, ticket or URL. A PR reported this way counts as the session's own; `--branch` is its head branch (default: the session's current branch).",
-                "`status` sets what the session is doing right now; the row shows it as its first line until `--ttl` minutes pass.",
+                "`status` sets what the session is doing right now; the row shows it as its first line until `--ttl` minutes pass. `--model` (any model id) and `--context-tokens` (the context size now) let any agent fill the row's model · context tag; a context size never replaces a newer measurement. Give any of `--text`, `--model` and `--context-tokens`.",
                 "`title` names the session until its work moves on far enough for a generated retitle. A title you set yourself in Claude Code (`/rename`) is never replaced.",
             ]),
             .heading("Inbox drop directory"),
-            .paragraph("A tool that cannot run the CLI can drop a JSON file in the `inbox/` folder of the data directory (`agentboard paths` shows it): `{\"session\": \"tool:id\" or null, \"cwd\": \"...\", \"links\": [...], \"status\": \"...\", \"notes\": [...]}`. It is read and deleted on the next snapshot."),
+            .paragraph("A tool that cannot run the CLI can drop a JSON file in the `inbox/` folder of the data directory (`agentboard paths` shows it): `{\"session\": \"tool:id\" or null, \"cwd\": \"...\", \"links\": [...], \"status\": \"...\", \"notes\": [...], \"model\": \"...\", \"context_tokens\": 51200, \"context_at\": \"ISO time\"}` (every field optional; `context_at` defaults to when it is read, and a later time is clamped to it). It is read and deleted on the next snapshot."),
+            .heading("Plan usage sources"),
+            .paragraph("The plan usage lines in the popover footer and the dashboard sidebar come from local files only, read on every snapshot: Claude Code's own cache `~/.claude/rate-limits.json` (it exists only on plans with usage limits), Codex's newest rollout (AgentBoard copies its rate limits into `usage/codex.json` when a turn ends; nothing under an API key), and any file another agent or tool keeps in the `usage/` folder of the data directory: `{\"label\": \"My agent\", \"updated_at\": \"ISO time\", \"windows\": [{\"label\": \"5h\", \"used_percentage\": 57, \"resets_at\": \"ISO time\"}]}`. The file name is the source's name; replace the file (write a temporary file, then rename it) whenever the numbers change. A window may also carry `used_usd`, `limit_usd` and `period`. A source not updated for 7 days is hidden."),
             .heading("Providers"),
             .paragraph("List external integrations under `providers` in config.json. `refresh-links` runs each command (30 second timeout) with the open sessions as JSON on stdin and reads back `[{\"session\": \"tool:id\", \"links\": [...], \"notes\": [...]}]` from stdout. This is how a team-specific integration plugs in without any code in AgentBoard; `examples/providers/` in the AgentBoard checkout has a generic one that reads git trailers."),
             .heading("Ticket patterns"),
@@ -303,6 +307,7 @@ enum HelpContent {
             .heading("General"),
             .keyValue([
                 HelpRow(key: "Launch at login", value: "Off by default. Starts AgentBoard when you log in. Stored by macOS (System Settings → General → Login Items), not in AgentBoard's defaults."),
+                HelpRow(key: "Show plan usage", value: "On by default. Shows one plan-usage line per source (how much of each limit window is used, when it resets) in the popover footer and the dashboard sidebar. A line appears only when its source has numbers. Key `showPlanUsage`."),
             ]),
             .heading("CLI & Data"),
             .keyValue([
@@ -379,7 +384,7 @@ enum HelpContent {
             .heading("Reporting from inside a session"),
             .keyValue([
                 HelpRow(key: "`agentboard link`", value: "Record a link: `--kind pr|ticket|url`, `--ref REF`, and optionally `--url`, `--state OPEN|MERGED|CLOSED|DONE`, `--title`, `--branch` (a PR's head branch), `--session`."),
-                HelpRow(key: "`agentboard status`", value: "Set what the session is doing: `--text`, `--ttl MIN` (minutes until it expires), `--session`."),
+                HelpRow(key: "`agentboard status`", value: "Set what the session is doing: `--text`, `--ttl MIN` (minutes until the text expires; needs `--text`), `--session`; or report its model and context size: `--model`, `--context-tokens`."),
                 HelpRow(key: "`agentboard title`", value: "Name the session: `--text`, `--session`. A title you set with `/rename` is kept."),
                 HelpRow(key: "`agentboard note`", value: "Add an update: `--kind needs_you|update|error`, `--text`, `--session`."),
             ]),
@@ -453,14 +458,14 @@ enum HelpContent {
             .paragraph("Everything AgentBoard knows stays on your Mac. There is no server, no account and no telemetry."),
             .heading("What is stored where"),
             .keyValue([
-                HelpRow(key: "Data directory", value: "`~/Library/Application Support/AgentBoard` (or `$AGENTBOARD_HOME`; `agentboard paths` shows it): `agentboard.db` (sessions, events, triage, links, updates) with its transient `agentboard.db-wal` and `agentboard.db-shm`, `agentboard.log` and `agentboard.log.1`, `hook-errors.log`, `install-manifest.json` (what `install-hooks` created or backed up, so uninstalling can undo exactly that), the optional `config.json`, the `inbox/` folder and the `reparse-locks/` folder (one small marker per session, so the end-of-turn hooks start at most one transcript re-read every few seconds)."),
+                HelpRow(key: "Data directory", value: "`~/Library/Application Support/AgentBoard` (or `$AGENTBOARD_HOME`; `agentboard paths` shows it): `agentboard.db` (sessions, events, triage, links, updates) with its transient `agentboard.db-wal` and `agentboard.db-shm`, `agentboard.log` and `agentboard.log.1`, `hook-errors.log`, `install-manifest.json` (what `install-hooks` created or backed up, so uninstalling can undo exactly that), the optional `config.json`, the `inbox/` folder, the `usage/` folder (plan-usage files, one per source) and the `reparse-locks/` folder (one small marker per session, so the end-of-turn hooks start at most one transcript re-read every few seconds)."),
                 HelpRow(key: "Installed CLI", value: "`~/.local/share/agentboard/core` (a copy of the core files; the hooks run it)."),
                 HelpRow(key: "Hooks", value: "Entries in `~/.claude/settings.json` and `~/.codex/hooks.json`, backed up before every change."),
                 HelpRow(key: "App settings", value: "The macOS defaults domain `io.github.agentboard`."),
             ]),
             .heading("How long it is kept"),
             .paragraph("Once a day the app runs `agentboard prune --auto`. It deletes sessions idle for 90 days (`prune_days`) together with their events, links and updates, but never one that still has an open needs_you update, a PR awaiting you, an active snooze or a live process. Tool-use and subagent events, most of the database, are deleted after 7 days (`compact_days`) from every session; prompts, replies and session start and end stay. Dismissed updates go after `prune_days`. When enough space is free the database is vacuumed, at most once a week. Set either value to `0` in config.json to keep everything."),
-            .paragraph("Besides its own data directory, AgentBoard reads only Claude Code's and Codex's files under `~/.claude` and `~/.codex` (transcripts, the session registry) and each session's git branch."),
+            .paragraph("Besides its own data directory, AgentBoard reads only Claude Code's and Codex's files under `~/.claude` and `~/.codex` (transcripts and rollouts, the session registry, and Claude Code's plan-usage cache `rate-limits.json`) and each session's git branch."),
             .heading("Network"),
             .paragraph("Only `agentboard refresh-links` uses the network, and only through tools you set up: the GitHub CLI `gh` (PRs and their reviews), the provider commands in config.json, and the retitle command (by default the local `claude` CLI, which sends a short summary of a session's recent prompts and replies to the model). The snapshot the app polls never touches the network. Set `\"retitle_command\": null` to turn retitling off."),
             .heading("Removing AgentBoard"),

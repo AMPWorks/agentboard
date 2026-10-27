@@ -100,6 +100,7 @@ sessions(tool TEXT, session_id TEXT, cwd TEXT, branch TEXT, title TEXT,
          background_tasks INTEGER, background_types TEXT /*json list*/,
          session_crons INTEGER, cron_prompts TEXT /*json list*/ /*from the last parent Stop*/,
          todos_scan_offset INTEGER, todos_scan_state TEXT /*json; incremental todo scan*/,
+         model TEXT, context_tokens INTEGER, context_at TEXT /*when the size was measured*/,
          PRIMARY KEY(tool, session_id))
 triage(tool, session_id, status TEXT /*done|snoozed|open*/, until TEXT, note TEXT,
        updated_at TEXT, PRIMARY KEY(tool, session_id))
@@ -122,7 +123,8 @@ notes_meta(key TEXT PK, value INTEGER)   -- hook_from, rebuilt_through (events.i
 (`notes`/`notes_meta` added after the original spec, migration 5; the link lifecycle columns
 and the session title columns are migration 6; `prompt_kind` and the background, cron and todo
 scan columns are migration 7, which also marks recorded injected prompts by the default
-prefixes. All of them are NULL on legacy rows.)
+prefixes; `model`/`context_tokens`/`context_at` are migration 8. All of them are NULL on legacy
+rows.)
 Add a `schema_version` pragma (user_version) and simple migrations.
 
 ## State derivation (`reconcile.py`)
@@ -211,7 +213,10 @@ host is built in. Everything environment-specific arrives through these generic 
    [--title T] [--branch B] [--session TOOL:ID]` (`--branch` is the PR's head branch; default
    the session's current branch). Also `agentboard status --text "phase/label" [--ttl MIN]`
    to set a free-form current-activity label shown on the row (replaces any skill-specific
-   status files). Session resolution when `--session` is omitted, in order: env vars that
+   status files), and `agentboard status --model ID [--context-tokens N]` (any of `--text`,
+   `--model`, `--context-tokens`) for any agent to report its session's model and context size,
+   with the hook/backfill rule: the model replaces the stored one, a context size (measured now)
+   is written only when not older than the stored `context_at`. Session resolution when `--session` is omitted, in order: env vars that
    identify the session if the agent sets any (verify empirically which, e.g. CLAUDE_SESSION_ID /
    CODEX_THREAD_ID; skip if none), else walk the caller's ancestor pids and match a recorded
    session pid, else most recently active session whose cwd equals/contains $PWD. Exit 0 with
@@ -219,8 +224,11 @@ host is built in. Everything environment-specific arrives through these generic 
    confused). A state of MERGED/CLOSED/DONE on links counts toward auto-done (see State
    derivation rule 7 for the branch rule).
 2. **Drop directory** — `$AGENTBOARD_HOME/inbox/*.json`, each `{"session": "tool:id" | null,
-   "cwd": "...", "links": [...], "status": "..."}`; ingested and deleted on next snapshot. For
-   tools that can't exec the CLI.
+   "cwd": "...", "links": [...], "status": "...", "model": "...", "context_tokens": N,
+   "context_at": "ISO"}` (all optional; model/context as for `status`, `context_at` defaulting
+   to the ingest time and clamped to it when later, and a stored `context_at` later than now
+   never blocks a new size); ingested and deleted on next snapshot. For tools that can't exec the
+   CLI. (Plan usage has its own, persistent drop directory, `usage/`; see the snapshot contract.)
 3. **Provider commands** — `$AGENTBOARD_HOME/config.json` `"providers": [{"name": "...",
    "command": ["..."]}]`. Every `refresh-links` runs each (timeout 30 s),
    passing the open sessions as JSON on stdin; the command prints `[{"session": "tool:id",
@@ -292,9 +300,31 @@ Idempotent. Never overwrite fields that came from hooks (origin=hook) except fil
   recently active first; never a done, ended, user-named or week-idle session; at most one
   attempt per session per hour; failures are logged and leave the title. `snapshot` never
   retitles. `agentboard title --text T` names a session (`cli`) and resets the baseline.
+- Model and context size (migration 8): the newest real assistant line in the tail (not a
+  sidechain line, not a synthetic API-error line whose model starts with `<`; tool_use-only
+  lines count) gives `model` and `context_tokens` = `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens`, with its timestamp as `context_at`. Any parent hook event that
+  sends a non-empty string `model` writes it (Claude Code: `SessionStart` only; Codex: every
+  event, per codex-rs `hooks/src/schema.rs`; `Subagent*` and subagent-tagged events never do),
+  and a parent `SessionStart` on resume/fork writes `context_tokens` with the event time;
+  a `source: compact` SessionStart without `context_tokens` sets `context_tokens` NULL with the
+  event time as `context_at`, so the pre-compact size is not shown until the next reply.
+  The freshest measurement wins on both row origins: a parsed model replaces the stored one,
+  a parsed context size only when its `context_at` is at least as new (or the stored one is
+  later than now, which no real measurement is), and neither is ever cleared by a parse that
+  found none.
 - Codex: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`: session_meta (id, cwd, source,
   timestamp), user messages, last agent message, task_complete/turn_aborted, git branch if in
-  session_meta.git.
+  session_meta.git. Model from the newest `turn_context` payload's `model`; context size from
+  the newest `token_count` event with usage: `info.last_token_usage.input_tokens` alone (it
+  already includes `cached_input_tokens`), with that line's timestamp as `context_at`. Plan
+  usage from that same newest `token_count` event's `rate_limits` (codex-rs
+  `RateLimitSnapshot`, null under API-key auth), only for the plan's own limit (`limit_id`
+  absent or `codex`): `primary`/`secondary` windows of `used_percent`, `window_minutes`
+  (labelled `5h`, `7d`, ...; 299 rounds to 5h) and `resets_at` (epoch; older releases sent
+  `resets_in_seconds`, taken relative to the event time). Written to
+  `$AGENTBOARD_HOME/usage/codex.json` (label `Codex`, `updated_at` the event time) unless that
+  file already holds newer numbers.
 - Only files with mtime within --days. Sessions imported by backfill get last_event='Stop'
   semantics (review/unconcluded) unless evidence they are mid-turn and alive.
 - Must handle very large files efficiently (stream lines; for last-message, read tail).
@@ -312,7 +342,7 @@ agentboard notes --dismiss ID... | --dismiss-all [--session TOOL:ID]
 agentboard notes --rebuild [--days N] [--reset] [--json]       replay recorded Stop events
 agentboard refresh-links                     links, PR states/responses, retitles (network)
 agentboard link --kind pr|ticket|url --ref R [--url U] [--state S] [--title T] [--branch B] [--session TOOL:ID]
-agentboard status --text T [--ttl MIN] [--session TOOL:ID]
+agentboard status [--text T] [--ttl MIN] [--model ID] [--context-tokens N] [--session TOOL:ID]
 agentboard title --text T [--session TOOL:ID]   name a session (a user's custom title is kept)
 agentboard install-hooks [--claude] [--codex] [--dry-run]
 agentboard uninstall-hooks [--claude] [--codex]
@@ -379,8 +409,15 @@ then select the tab/window and activate iTerm. Exit non-zero with message if not
                  "last_ts": "ISO", "count": 1, "source": "stop|cli|inbox|provider|backfill"}],
       "notes_count": 1,
       "turn_finished_at": "ISO|null", "turn_prompt_kind": "human|loop|cron|injected|null",
-      "background_tasks": 0, "turn_ends_background_wait": false
+      "background_tasks": 0, "turn_ends_background_wait": false,
+      "model": "string|null", "context_tokens": 308011, "context_at": "ISO|null"
     }
+  ],
+  "usage": [
+    {"source": "claude", "label": "Claude", "updated_at": "ISO|null",
+     "origin": "~/.claude/rate-limits.json",
+     "windows": [{"label": "5h", "used_percentage": 57, "resets_at": "ISO"},
+                 {"label": "7d", "used_percentage": 70, "resets_at": "ISO"}]}
   ]
 }
 ```
@@ -404,6 +441,31 @@ read as human). `background_tasks` is `sessions.background_tasks` from the last 
 prompt is injected and the newest parent Stop before it (by event id) listed background tasks:
 the `<task-notification>` turn that reports a background task back. Three grouped queries, as
 for `last_parent_prompt_times`.
+Added with migration 8: each session's `model`, `context_tokens` (absolute tokens; the
+context window size is not known) and `context_at` (null when unknown), and the top-level
+`usage`: a list of plan-usage sources, empty when there is none (the normal case for API-key,
+Bedrock/Vertex and most gateway setups). Each source has `source` (its name), `label` (display
+name), `updated_at` (when the numbers were measured, null when unknown), `origin` (the file it
+was read from, for tooltips) and an ordered `windows` list; each window has `label`,
+`used_percentage` (floored at 0, not capped: a spend limit runs past 100 once exceeded; rounded
+to one decimal), and optionally `resets_at` and the spend fields `used_usd`, `limit_usd`,
+`period`. Nothing names a plan or a window: labels come from the data. Sources (`usage.py`),
+all local files read on every call:
+- Claude Code's undocumented cache `~/.claude/rate-limits.json` (source `claude`), when it
+  exists and has a window: every top-level object with a numeric `used_percentage` is a window,
+  in file order, labelled from its key by rule (a leading count and time unit shorten,
+  `five_hour` -> `5h`, `seven_day_opus` -> `7d opus`; anything else reads as words,
+  `spend_limit` -> `spend limit`); `cached_at` becomes `updated_at`; epochs become ISO.
+- The drop directory `$AGENTBOARD_HOME/usage/<source>.json`, which any agent or tool may keep
+  (replace it atomically: write a temp file, then rename): `{"label": "...", "updated_at":
+  "ISO or epoch", "windows": [{"label": "5h", "used_percentage": 57, "resets_at": "ISO or
+  epoch", "used_usd": 1, "limit_usd": 2, "period": "..."}]}`; only `windows` is required, the
+  source name is the file name, `label` defaults to it and `updated_at` to the file's mtime.
+  Backfill writes `usage/codex.json` from Codex rollouts (see Backfill).
+Claude's cache comes first, then files by name, at most 8 sources of 8 windows. Two sources
+with the same name keep the one with the newer `updated_at`; a source whose `updated_at` is
+more than 7 days old is left out. Problems are logged at debug only; `snapshot` never touches
+the network.
 
 Notes (`notes.py`, added after the original spec): the hook classifies each parent Stop message
 inside its transaction (`needs_you` for a line starting with a `config.json` `note_markers`

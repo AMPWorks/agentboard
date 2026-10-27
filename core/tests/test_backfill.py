@@ -1104,6 +1104,456 @@ class BackfillSingleSessionTests(AgentBoardTestCase):
         self.assertEqual(row["cwd"], "/real/cwd")
 
 
+
+def _usage_line(model, ts, usage=None, text=None, **extra):
+    """A transcript assistant line with model and usage, as Claude Code writes
+    it (one line per content block, each carrying the response's usage)."""
+    content = ([{"type": "text", "text": text}] if text is not None
+               else [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}])
+    message = {"role": "assistant", "content": content}
+    if model is not None:
+        message["model"] = model
+    if usage is not None:
+        message["usage"] = usage
+    return {"type": "assistant", "timestamp": ts, "message": message, **extra}
+
+
+def _usage(input_tokens, cache_read=0, cache_creation=0, output=50):
+    return {"input_tokens": input_tokens, "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation, "output_tokens": output}
+
+
+def _synthetic_error_line(ts):
+    return _usage_line("<synthetic>", ts, _usage(0), text="API Error: overloaded",
+                       isApiErrorMessage=True)
+
+
+class ModelContextParseTests(AgentBoardTestCase):
+    def parse(self, entries):
+        path = self.tmp_path / "mc.jsonl"
+        write_jsonl(path, entries)
+        return backfill.parse_claude_transcript(path)
+
+    def test_newest_real_assistant_line_wins(self):
+        result = self.parse([
+            _user("start"),
+            _usage_line("claude-sonnet-4-5-20250929", "2026-01-01T00:01:00.000Z",
+                        _usage(10, 1000, 100), text="first"),
+            _usage_line("claude-opus-5-5", "2026-01-01T00:02:00.000Z",
+                        _usage(3, 300000, 8008), text="second"),
+        ])
+        self.assertEqual(result["model"], "claude-opus-5-5")
+        self.assertEqual(result["context_tokens"], 308011)
+        self.assertEqual(result["context_at"], "2026-01-01T00:02:00.000Z")
+
+    def test_sidechain_line_is_skipped(self):
+        result = self.parse([
+            _user("start"),
+            _usage_line("claude-opus-5-5", "2026-01-01T00:01:00.000Z", _usage(5, 500),
+                        text="main"),
+            _usage_line("claude-haiku-4-5", "2026-01-01T00:02:00.000Z", _usage(1),
+                        text="sub", isSidechain=True),
+        ])
+        self.assertEqual((result["model"], result["context_tokens"]), ("claude-opus-5-5", 505))
+
+    def test_tool_use_only_line_counts(self):
+        result = self.parse([
+            _user("start"),
+            _usage_line("claude-opus-5-5", "2026-01-01T00:01:00.000Z", _usage(5, 500),
+                        text="Let me look."),
+            _usage_line("claude-opus-5-5", "2026-01-01T00:02:00.000Z", _usage(7, 900)),
+        ])
+        self.assertEqual(result["context_tokens"], 907)
+        self.assertEqual(result["context_at"], "2026-01-01T00:02:00.000Z")
+        self.assertEqual(result["last_assistant"], "Let me look.")
+
+    def test_synthetic_api_error_line_yields_to_the_older_real_line(self):
+        result = self.parse([
+            _user("start"),
+            _usage_line("claude-opus-5-5", "2026-01-01T00:01:00.000Z", _usage(5, 500),
+                        text="working"),
+            _synthetic_error_line("2026-01-01T00:02:00.000Z"),
+        ])
+        self.assertEqual(result["model"], "claude-opus-5-5")
+        self.assertEqual(result["context_tokens"], 505)
+        self.assertEqual(result["context_at"], "2026-01-01T00:01:00.000Z")
+
+    def test_synthetic_then_custom_title_then_real_line(self):
+        # Read backwards: the synthetic line sets last_assistant, the ai-title
+        # and the user prompt complete what hunt mode waits for, and the
+        # custom title would trigger the early break; both are gated on the
+        # real assistant line having been examined.
+        result = self.parse([
+            _user("start"),
+            _usage_line("claude-opus-5-5", "2026-01-01T00:01:00.000Z", _usage(5, 500),
+                        text="real answer"),
+            {"type": "custom-title", "customTitle": "Named"},
+            _user("last", "2026-01-01T00:01:30.000Z"),
+            {"type": "ai-title", "aiTitle": "AI"},
+            _synthetic_error_line("2026-01-01T00:02:00.000Z"),
+        ])
+        self.assertEqual((result["title"], result["title_source"]), ("Named", "custom"))
+        self.assertEqual(result["model"], "claude-opus-5-5")
+        self.assertEqual(result["context_tokens"], 505)
+
+    def test_newest_real_line_without_usage_sets_model_only(self):
+        result = self.parse([
+            _user("start"),
+            _usage_line("claude-sonnet-4-5", "2026-01-01T00:01:00.000Z", _usage(5, 500),
+                        text="older"),
+            _usage_line("claude-opus-5-5", "2026-01-01T00:02:00.000Z", None, text="newer"),
+        ])
+        self.assertEqual(result["model"], "claude-opus-5-5")
+        self.assertIsNone(result["context_tokens"])
+        self.assertIsNone(result["context_at"])
+
+    def test_partial_and_malformed_usage(self):
+        result = self.parse([
+            _user("start"),
+            _usage_line("claude-opus-5-5", "2026-01-01T00:01:00.000Z",
+                        {"input_tokens": 12, "cache_read_input_tokens": "x",
+                         "cache_creation_input_tokens": True}, text="a"),
+        ])
+        self.assertEqual(result["context_tokens"], 12)
+        result = self.parse([
+            _user("start"),
+            _usage_line("claude-opus-5-5", "2026-01-01T00:01:00.000Z",
+                        {"output_tokens": 9}, text="a"),
+        ])
+        self.assertIsNone(result["context_tokens"])
+
+    def test_transcript_without_assistant_usage(self):
+        result = self.parse([_user("start"), _assistant("plain")])
+        self.assertIsNone(result["model"])
+        self.assertIsNone(result["context_tokens"])
+
+
+class ModelContextUpsertTests(AgentBoardTestCase):
+    def _fields(self, **overrides):
+        fields = {col: None for col in backfill.BACKFILL_COLUMNS}
+        fields.update(cwd="/tmp", interactive=1)
+        fields.update(overrides)
+        return fields
+
+    def _row(self):
+        return self.conn.execute("SELECT * FROM sessions WHERE session_id='s1'").fetchone()
+
+    def _insert(self, origin, model, tokens, at):
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, origin, model, context_tokens, context_at) "
+            "VALUES ('claude', 's1', ?, ?, ?, ?)", (origin, model, tokens, at))
+
+    def test_insert_writes_parsed_values(self):
+        backfill.upsert_backfill_session(self.conn, "claude", "s1", self._fields(
+            model="claude-opus-5-5", context_tokens=1200,
+            context_at="2026-01-01T00:02:00.000Z"))
+        row = self._row()
+        self.assertEqual((row["model"], row["context_tokens"], row["context_at"]),
+                         ("claude-opus-5-5", 1200, "2026-01-01T00:02:00.000Z"))
+
+    def test_newer_measurement_replaces_on_both_origins(self):
+        for origin in ("hook", "backfill"):
+            with self.subTest(origin=origin):
+                self.conn.execute("DELETE FROM sessions")
+                self._insert(origin, "claude-sonnet-4-5", 100, "2026-01-01T00:01:00.000000Z")
+                backfill.upsert_backfill_session(self.conn, "claude", "s1", self._fields(
+                    model="claude-opus-5-5", context_tokens=900,
+                    context_at="2026-01-01T00:05:00.000Z"))
+                row = self._row()
+                self.assertEqual((row["model"], row["context_tokens"], row["context_at"]),
+                                 ("claude-opus-5-5", 900, "2026-01-01T00:05:00.000Z"))
+
+    def test_older_measurement_never_replaces_on_both_origins(self):
+        # A hook-stored resume context (microseconds) newer than the
+        # transcript's newest assistant line (milliseconds) survives.
+        for origin in ("hook", "backfill"):
+            with self.subTest(origin=origin):
+                self.conn.execute("DELETE FROM sessions")
+                self._insert(origin, "claude-opus-5-5", 308011, "2026-01-01T00:05:00.000500Z")
+                backfill.upsert_backfill_session(self.conn, "claude", "s1", self._fields(
+                    model="claude-opus-5-5", context_tokens=1200,
+                    context_at="2026-01-01T00:05:00.000Z"))
+                row = self._row()
+                self.assertEqual((row["context_tokens"], row["context_at"]),
+                                 (308011, "2026-01-01T00:05:00.000500Z"))
+
+    def test_a_stored_future_time_never_freezes_the_context(self):
+        # No real measurement is in the future; keeping one would block
+        # every later size for good.
+        for origin in ("hook", "backfill"):
+            with self.subTest(origin=origin):
+                self.conn.execute("DELETE FROM sessions")
+                self._insert(origin, "claude-opus-5-5", 900, "2099-01-01T00:00:00Z")
+                backfill.upsert_backfill_session(self.conn, "claude", "s1", self._fields(
+                    model="claude-opus-5-5", context_tokens=1200,
+                    context_at="2026-01-01T00:05:00.000Z"))
+                row = self._row()
+                self.assertEqual((row["context_tokens"], row["context_at"]),
+                                 (1200, "2026-01-01T00:05:00.000Z"))
+
+    def test_equal_time_rewrites(self):
+        self._insert("hook", None, 5, "2026-01-01T00:05:00.000Z")
+        backfill.upsert_backfill_session(self.conn, "claude", "s1", self._fields(
+            context_tokens=7, context_at="2026-01-01T00:05:00.000000Z"))
+        self.assertEqual(self._row()["context_tokens"], 7)
+
+    def test_missing_parse_never_clears_on_both_origins(self):
+        for origin in ("hook", "backfill"):
+            with self.subTest(origin=origin):
+                self.conn.execute("DELETE FROM sessions")
+                self._insert(origin, "claude-opus-5-5", 308011, "2026-01-01T00:05:00.000Z")
+                backfill.upsert_backfill_session(self.conn, "claude", "s1", self._fields())
+                row = self._row()
+                self.assertEqual((row["model"], row["context_tokens"], row["context_at"]),
+                                 ("claude-opus-5-5", 308011, "2026-01-01T00:05:00.000Z"))
+
+    def test_backfill_origin_row_survives_a_reparse_without_usage(self):
+        path = self.tmp_path / "s1.jsonl"
+        write_jsonl(path, [_user("start"), _assistant("plain")])
+        self._insert("backfill", "claude-opus-5-5", 308011, "2026-01-01T00:05:00.000Z")
+        backfill.upsert_backfill_session(self.conn, "claude", "s1",
+                                         backfill.parse_claude_transcript(path))
+        row = self._row()
+        self.assertEqual((row["model"], row["context_tokens"], row["context_at"]),
+                         ("claude-opus-5-5", 308011, "2026-01-01T00:05:00.000Z"))
+        self.assertEqual(row["first_prompt"], "start")
+
+    def test_session_backfill_end_to_end(self):
+        path = self.tmp_path / "e2e.jsonl"
+        write_jsonl(path, [
+            _user("start"),
+            _usage_line("claude-opus-5-5", "2026-01-01T00:01:00.000Z", _usage(4, 400, 40),
+                        text="done"),
+        ])
+        # The hook recorded the session first, with the startup model.
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, origin, model, transcript_path) "
+            "VALUES ('claude', 'e2e', 'hook', 'claude-sonnet-4-5', ?)", (str(path),))
+        self.assertEqual(backfill.backfill_single_session(self.conn, "claude", "e2e"),
+                         "updated")
+        row = self.conn.execute("SELECT * FROM sessions WHERE session_id='e2e'").fetchone()
+        self.assertEqual((row["model"], row["context_tokens"], row["context_at"]),
+                         ("claude-opus-5-5", 444, "2026-01-01T00:01:00.000Z"))
+
+
+
+# Codex rollout lines as codex-rs writes them: RolloutLine is
+# {"timestamp", "type", "payload"} (RolloutItemWire, tag "type", snake_case);
+# TurnContextItem carries `model: String`; EventMsg::TokenCount is
+# {"type": "token_count", "info": TokenUsageInfo | null, "rate_limits": ...}
+# with TokenUsageInfo {total_token_usage, last_token_usage,
+# model_context_window} and TokenUsage {input_tokens, cached_input_tokens,
+# cache_write_input_tokens, output_tokens, reasoning_output_tokens,
+# total_tokens}, where input_tokens includes cached_input_tokens
+# (TokenUsage::non_cached_input subtracts it). Both are persisted
+# (codex-rs/rollout/src/policy.rs).
+def _codex_meta():
+    return {"type": "session_meta", "timestamp": "2026-01-01T00:00:00.000Z",
+            "payload": {"id": "cx-1", "cwd": "/tmp/proj", "source": "cli",
+                        "timestamp": "2026-01-01T00:00:00.000Z"}}
+
+
+def _codex_turn_context(model, ts):
+    return {"timestamp": ts, "type": "turn_context",
+            "payload": {"cwd": "/tmp/proj", "approval_policy": "on-request",
+                        "sandbox_policy": {"type": "workspace-write"}, "model": model,
+                        "effort": "medium", "summary": "auto"}}
+
+
+def _codex_msg(ptype, ts, **fields):
+    return {"timestamp": ts, "type": "event_msg", "payload": {"type": ptype, **fields}}
+
+
+def _codex_token_count(ts, input_tokens, cached, output=200):
+    usage = {"input_tokens": input_tokens, "cached_input_tokens": cached,
+             "cache_write_input_tokens": 0, "output_tokens": output,
+             "reasoning_output_tokens": 64, "total_tokens": input_tokens + output}
+    return _codex_msg("token_count", ts, info={
+        "total_token_usage": dict(usage, input_tokens=input_tokens * 3),
+        "last_token_usage": usage, "model_context_window": 272000,
+    }, rate_limits=None)
+
+
+def _codex_turn(model, start, input_tokens, cached, prompt="go", reply="done"):
+    return [
+        _codex_turn_context(model, f"2026-01-01T00:{start:02d}:00.000Z"),
+        _codex_msg("user_message", f"2026-01-01T00:{start:02d}:01.000Z", message=prompt),
+        _codex_msg("agent_message", f"2026-01-01T00:{start:02d}:30.000Z", message=reply),
+        _codex_token_count(f"2026-01-01T00:{start:02d}:31.000Z", input_tokens, cached),
+        _codex_msg("task_complete", f"2026-01-01T00:{start:02d}:32.000Z"),
+    ]
+
+
+class CodexModelContextTests(AgentBoardTestCase):
+    def parse(self, entries):
+        path = self.tmp_path / "rollout-cx.jsonl"
+        write_jsonl(path, entries)
+        return backfill.parse_codex_rollout(path)
+
+    def test_newest_turn_context_and_token_count_win(self):
+        result = self.parse([_codex_meta()]
+                            + _codex_turn("gpt-5", 1, 9000, 8000)
+                            + _codex_turn("gpt-5-codex", 2, 45000, 40000, prompt="more"))
+        self.assertEqual(result["model"], "gpt-5-codex")
+        self.assertEqual(result["context_tokens"], 45000, "input_tokens alone, never + cached")
+        self.assertEqual(result["context_at"], "2026-01-01T00:02:31.000Z")
+        self.assertEqual(result["last_prompt"], "more")
+
+    def test_token_count_without_info_is_skipped(self):
+        entries = [_codex_meta()] + _codex_turn("gpt-5", 1, 9000, 8000)
+        entries.append(_codex_msg("token_count", "2026-01-01T00:01:40.000Z", info=None,
+                                  rate_limits={"primary": {"used_percent": 10}}))
+        result = self.parse(entries)
+        self.assertEqual(result["context_tokens"], 9000)
+
+    def test_rollout_without_either_leaves_both_none(self):
+        result = self.parse([
+            _codex_meta(),
+            _codex_msg("user_message", "2026-01-01T00:00:01.000Z", message="go"),
+            _codex_msg("agent_message", "2026-01-01T00:00:30.000Z", message="done"),
+        ])
+        self.assertIsNone(result["model"])
+        self.assertIsNone(result["context_tokens"])
+        self.assertIsNone(result["context_at"])
+        self.assertEqual(result["last_assistant"], "done")
+
+    def test_usage_hunt_is_bounded(self):
+        filler = [_codex_msg("agent_reasoning", "2026-01-01T00:01:10.000Z",
+                             text="x" * 300) for _ in range(200)]
+        entries = ([_codex_meta(), _codex_turn_context("gpt-5", "2026-01-01T00:01:00.000Z")]
+                   + filler
+                   + [_codex_msg("user_message", "2026-01-01T00:01:01.000Z", message="go"),
+                      _codex_msg("agent_message", "2026-01-01T00:01:30.000Z", message="ok")])
+        with mock.patch.object(backfill, "CUSTOM_TITLE_SCAN_BYTES", 10_000):
+            result = self.parse(entries)
+        self.assertIsNone(result["model"], "past the budget the hunt gives up")
+        self.assertEqual(result["last_prompt"], "go")
+        result = self.parse(entries)
+        self.assertEqual(result["model"], "gpt-5")
+
+    def test_upsert_does_not_clear_existing_values(self):
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, origin, model, context_tokens, context_at) "
+            "VALUES ('codex', 'cx-1', 'hook', 'gpt-5', 1000, '2026-01-01T00:00:31.000Z')")
+        fields = self.parse([
+            _codex_meta(),
+            _codex_msg("user_message", "2026-01-01T00:00:01.000Z", message="go"),
+            _codex_msg("agent_message", "2026-01-01T00:00:30.000Z", message="done"),
+        ])
+        backfill.upsert_backfill_session(self.conn, "codex", "cx-1", fields)
+        row = self.conn.execute("SELECT * FROM sessions WHERE session_id='cx-1'").fetchone()
+        self.assertEqual((row["model"], row["context_tokens"]), ("gpt-5", 1000))
+
+
+
+# codex-rs protocol RateLimitSnapshot: limit_id ("codex" for the plan's own
+# limit), primary/secondary RateLimitWindow {used_percent, window_minutes,
+# resets_at (epoch s)}, credits, plan_type; null under API-key auth.
+def _codex_rate_limits(primary_pct, secondary_pct, limit_id="codex"):
+    return {
+        "limit_id": limit_id, "limit_name": None,
+        "primary": {"used_percent": primary_pct, "window_minutes": 300,
+                    "resets_at": 1767240000},
+        "secondary": {"used_percent": secondary_pct, "window_minutes": 10080,
+                      "resets_at": 1767600000},
+        "credits": {"has_credits": False, "unlimited": False, "balance": None},
+        "plan_type": "plus",
+    }
+
+
+def _codex_turn_with_limits(start, limits, ts_day="01"):
+    turn = _codex_turn("gpt-5-codex", start, 9000, 8000)
+    turn[3] = dict(turn[3], timestamp=f"2026-01-{ts_day}T00:{start:02d}:31.000Z",
+                   payload=dict(turn[3]["payload"], rate_limits=limits))
+    return turn
+
+
+class CodexPlanUsageTests(AgentBoardTestCase):
+    def rollout(self, name, entries):
+        path = self.tmp_path / name
+        write_jsonl(path, entries)
+        return path
+
+    def usage_file(self):
+        return self.agentboard_home / "usage" / "codex.json"
+
+    def test_newest_token_count_rate_limits_become_a_usage_source(self):
+        path = self.rollout("r.jsonl", [_codex_meta()]
+                            + _codex_turn_with_limits(1, _codex_rate_limits(10, 20))
+                            + _codex_turn_with_limits(2, _codex_rate_limits(12.5, 21)))
+        self.assertEqual(backfill.parse_codex_rollout(path)["plan_usage"], {
+            "label": "Codex",
+            "updated_at": "2026-01-01T00:02:31Z",
+            "windows": [
+                {"label": "5h", "used_percentage": 12.5, "resets_at": "2026-01-01T04:00:00Z"},
+                {"label": "7d", "used_percentage": 21.0, "resets_at": "2026-01-05T08:00:00Z"},
+            ],
+        })
+
+    def test_deeply_nested_lines_are_skipped_not_raised(self):
+        # json.loads raises RecursionError, not ValueError, on deep nesting.
+        nested = "[" * 20000 + "]" * 20000
+        plan_call = {"timestamp": "2026-01-01T00:01:35.000Z", "type": "response_item",
+                     "payload": {"type": "function_call", "name": "update_plan",
+                                 "arguments": nested}}
+        path = self.tmp_path / "r.jsonl"
+        lines = [json.dumps(e) for e in [_codex_meta()]
+                 + _codex_turn_with_limits(1, _codex_rate_limits(10, 20))]
+        lines += [nested, json.dumps(plan_call)]
+        lines += [json.dumps(e) for e in _codex_turn_with_limits(2, _codex_rate_limits(12.5, 21))]
+        lines.append(nested)
+        path.write_text("\n".join(lines) + "\n")
+        result = backfill.parse_codex_rollout(path)
+        self.assertEqual(result["model"], "gpt-5-codex")
+        self.assertEqual(result["context_tokens"], 9000)
+        self.assertEqual(result["plan_usage"]["windows"][0]["used_percentage"], 12.5)
+        self.assertIsNone(backfill._compute_codex_todos_open(path))
+
+    def test_out_of_range_event_time_gives_no_plan_usage(self):
+        turn = _codex_turn_with_limits(1, _codex_rate_limits(10, 20))
+        turn[3] = dict(turn[3], timestamp="9999-12-31T23:59:59-05:00")
+        path = self.rollout("r.jsonl", [_codex_meta()] + turn)
+        self.assertIsNone(backfill.parse_codex_rollout(path)["plan_usage"])
+
+    def test_api_key_rollout_has_no_plan_usage_and_writes_nothing(self):
+        path = self.rollout("r.jsonl", [_codex_meta()] + _codex_turn("gpt-5", 1, 9000, 8000))
+        self.assertIsNone(backfill.parse_codex_rollout(path)["plan_usage"])
+        backfill.backfill_single_session(self.conn, "codex", "cx-1", transcript_path=str(path))
+        self.assertFalse(self.usage_file().exists())
+
+    def test_other_limit_ids_are_ignored(self):
+        path = self.rollout("r.jsonl", [_codex_meta()] + _codex_turn_with_limits(
+            1, _codex_rate_limits(50, 60, limit_id="codex_other")))
+        self.assertIsNone(backfill.parse_codex_rollout(path)["plan_usage"])
+
+    def test_single_session_backfill_writes_and_never_goes_back_in_time(self):
+        newer = self.rollout("a.jsonl", [_codex_meta()] + _codex_turn_with_limits(
+            1, _codex_rate_limits(30, 40), ts_day="02"))
+        older = self.rollout("b.jsonl", [_codex_meta()] + _codex_turn_with_limits(
+            1, _codex_rate_limits(99, 99), ts_day="01"))
+        backfill.backfill_single_session(self.conn, "codex", "cx-1", transcript_path=str(newer))
+        backfill.backfill_single_session(self.conn, "codex", "cx-1", transcript_path=str(older))
+        data = json.loads(self.usage_file().read_text())
+        self.assertEqual(data["windows"][0]["used_percentage"], 30.0)
+        row = self.conn.execute("SELECT * FROM sessions WHERE session_id='cx-1'").fetchone()
+        self.assertIsNotNone(row, "plan_usage is not a column and does not break the upsert")
+
+    def test_full_backfill_writes_the_newest_across_rollouts(self):
+        base = self.fake_home / ".codex" / "sessions" / "2026" / "01" / "01"
+        base.mkdir(parents=True)
+        for name, pct, day in (("rollout-a.jsonl", 70, "02"), ("rollout-b.jsonl", 5, "01")):
+            meta = _codex_meta()
+            meta["payload"] = dict(meta["payload"], id=name)
+            write_jsonl(base / name, [meta] + _codex_turn_with_limits(
+                1, _codex_rate_limits(pct, pct), ts_day=day))
+        with mock.patch.object(backfill.usage_mod, "record_source",
+                               wraps=backfill.usage_mod.record_source) as record:
+            stats = backfill.run_backfill(self.conn, days=100000)
+        self.assertEqual(stats["codex"], 2)
+        self.assertEqual(record.call_count, 1)
+        data = json.loads(self.usage_file().read_text())
+        self.assertEqual(data["windows"][0]["used_percentage"], 70.0)
+
 if __name__ == "__main__":
     import unittest
 

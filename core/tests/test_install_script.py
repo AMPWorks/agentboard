@@ -1640,7 +1640,7 @@ class RmGoesThroughTheSingleGuardAuditTests(unittest.TestCase):
         the directory is a real directory, is neither "/" nor $HOME, and
         contains nothing else.
       - `rm -f "$entry"` (_purge_known_glob) -- only an entry matching
-        the exact glob (inbox/*.json or reparse-locks/*.marker)
+        the exact glob (inbox/*.json, reparse-locks/*.marker or usage/*.json)
         AgentBoard itself ever creates in that one named dir; the dir
         itself is only ever rmdir'd (never rm -rf), and only once left
         empty.
@@ -2300,6 +2300,8 @@ class PurgeDataSafetyTests(unittest.TestCase):
         (data_home / "inbox" / "x.json").write_text("{}")
         (data_home / "reparse-locks").mkdir()
         (data_home / "reparse-locks" / "claude-s1.marker").write_text("")
+        (data_home / "usage").mkdir()
+        (data_home / "usage" / "codex.json").write_text("{}")
 
         env = self._env(tmp, data_home)
         result = subprocess.run(

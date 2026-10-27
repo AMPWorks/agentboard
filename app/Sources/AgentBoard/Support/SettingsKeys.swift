@@ -24,5 +24,10 @@ enum SettingsKeys {
         AgentBoardCLI.useFixtureDefaultsKey,
         AgentBoardCLI.fixturePathDefaultsKey,
         CLIRunner.verboseLoggingKey,
+        SettingsKeys.showPlanUsage,
     ]
+
+    /// Show the plan-usage lines (one per usage source) in the popover
+    /// footer and the dashboard sidebar (default on).
+    static let showPlanUsage = "showPlanUsage"
 }

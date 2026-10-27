@@ -9,8 +9,9 @@ from pathlib import Path
 from . import db
 from . import diag
 from . import notes
+from . import usage as usage_mod
 from .hook import EXIT_COMMANDS, clean_prompt_text, is_untrusted_daemon_pid, normalize_branch
-from .reconcile import is_pid_alive
+from .reconcile import is_pid_alive, parse_ts
 
 HEAD_SCAN_MAX_LINES = 500
 HEAD_SCAN_MAX_BYTES = 2 * 1024 * 1024
@@ -311,6 +312,44 @@ def _compute_claude_todos_open(path: Path):
     return _scan_claude_todos(path)[0]
 
 
+CONTEXT_USAGE_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _real_assistant_message(entry):
+    """The `message` of a transcript assistant line that is a real API
+    response from this session, else None. Sidechain lines belong to a
+    subagent; an API-error line (after a StopFailure) is synthetic, with
+    model "<synthetic>" and all-zero usage, and must not zero the context.
+    A line with no model at all (older transcripts) still counts: it is the
+    newest real response, it just names no model."""
+    if entry.get("isSidechain") is True or entry.get("isApiErrorMessage") is True:
+        return None
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return None
+    model = message.get("model")
+    if isinstance(model, str) and model.startswith("<"):
+        return None
+    return message
+
+
+def _context_tokens(usage):
+    """The context size one API response used: its uncached input plus
+    cache reads plus cache writes (what the status line calls
+    current_usage). Missing or non-int keys count 0; None when none of the
+    three is a usable int."""
+    if not isinstance(usage, dict):
+        return None
+    total = 0
+    found = False
+    for key in CONTEXT_USAGE_KEYS:
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            total += value
+            found = True
+    return total if found else None
+
+
 def parse_claude_transcript(path: Path, todos_state=None) -> dict:
     """Extract session fields from one ~/.claude/projects/*/*.jsonl file.
 
@@ -335,6 +374,9 @@ def parse_claude_transcript(path: Path, todos_state=None) -> dict:
         "userType": None,
         "todos_open": None,
         "title_source": None,
+        "model": None,
+        "context_tokens": None,
+        "context_at": None,
     }
 
     for raw in iter_head_lines(path):
@@ -369,6 +411,10 @@ def parse_claude_transcript(path: Path, todos_state=None) -> dict:
     other_source = None
     scanned = 0
     hunt_started = None
+    # Set once the newest real assistant line has been examined, whether or
+    # not its usage parsed: that line alone gives the model and context, and
+    # an older line's usage never stands in for it.
+    usage_found = False
     for raw in iter_tail_lines(path):
         scanned += len(raw) + 1
         raw = raw.strip()
@@ -383,6 +429,7 @@ def parse_claude_transcript(path: Path, todos_state=None) -> dict:
             and result["last_assistant"] is not None
             and result["updated_at"] is not None
             and other_title is not None
+            and usage_found
         ):
             if hunt_started is None:
                 hunt_started = scanned
@@ -419,6 +466,19 @@ def parse_claude_transcript(path: Path, todos_state=None) -> dict:
                 if last_substantive_type is None:
                     last_substantive_type = "user"
         elif entry_type == "assistant":
+            # Checked before the text: a tool_use-only line (no text) is
+            # usually the newest one, and its usage is just as valid.
+            message = None if usage_found else _real_assistant_message(entry)
+            if message is not None:
+                usage_found = True
+                model = message.get("model")
+                if isinstance(model, str) and model.strip():
+                    result["model"] = model.strip()
+                tokens = _context_tokens(message.get("usage"))
+                timestamp = entry.get("timestamp")
+                if tokens is not None and isinstance(timestamp, str) and timestamp:
+                    result["context_tokens"] = tokens
+                    result["context_at"] = timestamp
             text = _claude_assistant_text(entry.get("message", {}).get("content"))
             if text and result["last_assistant"] is None:
                 result["last_assistant"] = text
@@ -430,6 +490,7 @@ def parse_claude_transcript(path: Path, todos_state=None) -> dict:
             and result["last_assistant"] is not None
             and custom_title is not None
             and result["updated_at"] is not None
+            and usage_found
         ):
             break
 
@@ -510,7 +571,7 @@ def _compute_codex_todos_open(path: Path):
                 continue
             try:
                 entry = json.loads(raw)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             if entry.get("type") != "response_item":
                 continue
@@ -521,7 +582,7 @@ def _compute_codex_todos_open(path: Path):
             if isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
             if isinstance(arguments, dict):
                 plan = arguments.get("plan")
@@ -534,6 +595,28 @@ def _compute_codex_todos_open(path: Path):
         1 for step in last_plan
         if isinstance(step, dict) and step.get("status") != "completed"
     )
+
+
+# Markers of the two rollout lines the model/context scan still wants once
+# everything else is known (see parse_codex_rollout).
+CODEX_USAGE_MARKERS = ('"turn_context"', '"token_count"')
+
+
+def _codex_context_tokens(payload):
+    """Context size from a Codex `token_count` event payload: the last
+    response's `input_tokens` alone (in OpenAI usage it already includes
+    `cached_input_tokens`, so the two are never summed). None when the
+    event has no usage (`info` is null on a rate-limits-only event)."""
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    last = info.get("last_token_usage")
+    if not isinstance(last, dict):
+        return None
+    value = last.get("input_tokens")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def parse_codex_rollout(path: Path) -> dict:
@@ -552,6 +635,12 @@ def parse_codex_rollout(path: Path) -> dict:
         "interactive": 1,
         "source": None,
         "todos_open": None,
+        "model": None,
+        "context_tokens": None,
+        "context_at": None,
+        # Not a column: the plan usage of the newest token_count event that
+        # carries it, as a generic usage source (usage.codex_source).
+        "plan_usage": None,
     }
 
     for raw in iter_head_lines(path, max_lines=5):
@@ -560,7 +649,7 @@ def parse_codex_rollout(path: Path) -> dict:
             continue
         try:
             entry = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if entry.get("type") == "session_meta":
             payload = entry.get("payload", {})
@@ -573,22 +662,61 @@ def parse_codex_rollout(path: Path) -> dict:
             break
 
     last_substantive_type = None
+    # The newest turn_context names the model and the newest token_count
+    # with usage gives the context size. A turn_context precedes its turn's
+    # prompt, so once the prompt and reply are known the scan goes on for
+    # at most CUSTOM_TITLE_SCAN_BYTES more, parsing only those two lines.
+    model_seen = False
+    context_seen = False
+    scanned = 0
+    usage_hunt_started = None
     for raw in iter_tail_lines(path):
+        scanned += len(raw) + 1
         raw = raw.strip()
         if not raw:
             continue
+        if usage_hunt_started is not None:
+            if scanned - usage_hunt_started > CUSTOM_TITLE_SCAN_BYTES:
+                break
+            if not any(marker in raw for marker in CODEX_USAGE_MARKERS):
+                continue
         try:
             entry = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
 
         if result["updated_at"] is None and entry.get("timestamp"):
             result["updated_at"] = entry["timestamp"]
 
-        if entry.get("type") != "event_msg":
+        entry_type = entry.get("type")
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
             continue
-        payload = entry.get("payload", {})
+        if entry_type == "turn_context":
+            if not model_seen:
+                model = payload.get("model")
+                if isinstance(model, str) and model.strip():
+                    result["model"] = model.strip()
+                    model_seen = True
+            if model_seen and context_seen and usage_hunt_started is not None:
+                break
+            continue
+        if entry_type != "event_msg":
+            continue
         ptype = payload.get("type")
+
+        if ptype == "token_count" and result["plan_usage"] is None:
+            # Opportunistic: taken from whichever token_count lines the scan
+            # parses anyway (the newest one first); it never extends the scan.
+            result["plan_usage"] = usage_mod.codex_source(
+                payload.get("rate_limits"), entry.get("timestamp"))
+        if ptype == "token_count" and not context_seen:
+            tokens = _codex_context_tokens(payload)
+            timestamp = entry.get("timestamp")
+            if tokens is not None and isinstance(timestamp, str) and timestamp:
+                result["context_tokens"] = tokens
+                result["context_at"] = timestamp
+                context_seen = True
 
         if ptype == "user_message" and result["last_prompt"] is None:
             cleaned = clean_prompt_text(payload.get("message"))
@@ -617,11 +745,14 @@ def parse_codex_rollout(path: Path) -> dict:
                 last_substantive_type = ptype
 
         if (
-            result["last_prompt"] is not None
+            usage_hunt_started is None
+            and result["last_prompt"] is not None
             and result["last_assistant"] is not None
             and result["updated_at"] is not None
         ):
-            break
+            if model_seen and context_seen:
+                break
+            usage_hunt_started = scanned
 
     if result["first_prompt"] is None:
         for raw in iter_head_lines(path, max_lines=HEAD_SCAN_MAX_LINES):
@@ -630,7 +761,7 @@ def parse_codex_rollout(path: Path) -> dict:
                 continue
             try:
                 entry = json.loads(raw)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             if entry.get("type") != "event_msg":
                 continue
@@ -684,7 +815,15 @@ BACKFILL_COLUMNS = [
     "cwd", "branch", "title", "first_prompt", "last_prompt", "last_assistant",
     "started_at", "updated_at", "last_event", "last_event_at",
     "transcript_path", "interactive", "todos_open",
+    "model", "context_tokens", "context_at",
 ]
+
+# The model and context size are measured, not reconstructed: the freshest
+# measurement wins, whichever row origin, and a parse that found none never
+# clears a stored one (see _freshest_wins_sets). A hook-stored resume
+# context (newer than the transcript's newest assistant line until the next
+# Stop) survives a backfill.
+FRESHEST_WINS_COLUMNS = {"model", "context_tokens", "context_at"}
 
 # todos_open is always backfill-authoritative, even on a hook-origin row:
 # reconstructing it correctly (TaskUpdate/TaskStop are deltas against
@@ -802,6 +941,44 @@ def title_update(current_title, current_source, new_title, new_source):
     return None
 
 
+def _is_fresher_or_equal(parsed_at, stored_at, now=None) -> bool:
+    """True when the parsed measurement time is at least as new as the
+    stored one (or the stored one is missing, unreadable, or in the future:
+    no real measurement is, and keeping it would freeze the value). Compared
+    as datetimes: the hook writes microseconds, transcripts milliseconds."""
+    new = parse_ts(parsed_at)
+    if new is None:
+        return False
+    old = parse_ts(stored_at)
+    if old is None:
+        return True
+    if new.tzinfo is None:
+        new = new.replace(tzinfo=timezone.utc)
+    if old.tzinfo is None:
+        old = old.replace(tzinfo=timezone.utc)
+    return new >= old or old > (now or datetime.now(timezone.utc))
+
+
+def _freshest_wins_sets(row, values):
+    """(sets, params) for FRESHEST_WINS_COLUMNS on an existing row: the
+    parsed model when there is one, and the parsed context size with its
+    time together when that time is at least as new as the stored one.
+    Never writes None."""
+    sets, params = [], []
+    if values.get("model") is not None and values["model"] != row["model"]:
+        sets.append("model=?")
+        params.append(values["model"])
+    parsed_at = values.get("context_at")
+    if (
+        parsed_at is not None and values.get("context_tokens") is not None
+        and _is_fresher_or_equal(parsed_at, row["context_at"])
+        and (values["context_tokens"], parsed_at) != (row["context_tokens"], row["context_at"])
+    ):
+        sets += ["context_tokens=?", "context_at=?"]
+        params += [values["context_tokens"], parsed_at]
+    return sets, params
+
+
 def upsert_backfill_session(conn, tool, session_id, fields: dict):
     row = conn.execute(
         "SELECT * FROM sessions WHERE tool=? AND session_id=?", (tool, session_id)
@@ -834,6 +1011,8 @@ def upsert_backfill_session(conn, tool, session_id, fields: dict):
         for col in BACKFILL_COLUMNS:
             if col == "title" or (col == "todos_open" and not write_todos):
                 continue
+            if col in FRESHEST_WINS_COLUMNS:
+                continue
             current = row[col]
             new_value = values[col]
             if col in ALWAYS_OVERWRITE_COLUMNS:
@@ -853,6 +1032,9 @@ def upsert_backfill_session(conn, tool, session_id, fields: dict):
             if row[col] != fields.get(col):
                 sets.append(f"{col}=?")
                 params.append(fields.get(col))
+        fresh_sets, fresh_params = _freshest_wins_sets(row, values)
+        sets += fresh_sets
+        params += fresh_params
         if not sets:
             return "unchanged"
         params += [tool, session_id]
@@ -863,9 +1045,13 @@ def upsert_backfill_session(conn, tool, session_id, fields: dict):
         return "filled"
 
     columns = [col for col in BACKFILL_COLUMNS
-               if col != "title" and (col != "todos_open" or write_todos)]
+               if col != "title" and (col != "todos_open" or write_todos)
+               and col not in FRESHEST_WINS_COLUMNS]
     sets = [f"{col}=?" for col in columns + scan_columns]
     params = [values[col] for col in columns] + [fields.get(col) for col in scan_columns]
+    fresh_sets, fresh_params = _freshest_wins_sets(row, values)
+    sets += fresh_sets
+    params += fresh_params
     if title is not None:
         sets += ["title=?", "title_source=?"]
         params += list(title)
@@ -909,6 +1095,19 @@ def correct_daemon_pid_rows(conn) -> int:
     return corrected
 
 
+def record_codex_plan_usage(source) -> bool:
+    """Keep Codex's plan usage in the generic usage drop directory
+    (`$AGENTBOARD_HOME/usage/codex.json`), unless the file already holds
+    numbers measured later. Never raises."""
+    if not source:
+        return False
+    try:
+        return usage_mod.record_source(db.home_dir(), usage_mod.CODEX_SOURCE, source)
+    except Exception as exc:  # never fail a backfill over the gauge
+        diag.debug("backfill", "plan_usage_failed", exc=type(exc).__name__)
+        return False
+
+
 def backfill_single_session(conn, tool, session_id, transcript_path=None):
     """Re-parse exactly one session's transcript and upsert it.
 
@@ -940,6 +1139,7 @@ def backfill_single_session(conn, tool, session_id, transcript_path=None):
             fields["todos_scan_base"] = base_offset
         elif tool == "codex":
             fields = parse_codex_rollout(path)
+            record_codex_plan_usage(fields.get("plan_usage"))
         else:
             return "unknown-tool"
     except Exception as exc:
@@ -1005,6 +1205,7 @@ def run_backfill(conn, days=30):
         if _upsert_in_own_transaction(conn, "claude", session_id, fields, stats, path):
             stats["claude"] += 1
 
+    newest_plan_usage = None
     for path in iter_codex_rollouts(days):
         try:
             fields = parse_codex_rollout(path)
@@ -1013,6 +1214,12 @@ def run_backfill(conn, days=30):
             diag.warn("backfill", "parse_error", tool="codex", file=path,
                       exc=type(exc).__name__, msg=str(exc))
             continue
+        plan_usage = fields.get("plan_usage")
+        if plan_usage and (
+            newest_plan_usage is None
+            or _is_fresher_or_equal(plan_usage["updated_at"], newest_plan_usage["updated_at"])
+        ):
+            newest_plan_usage = plan_usage
         session_id = fields.get("session_id")
         if not session_id:
             stats["errors"] += 1
@@ -1021,6 +1228,8 @@ def run_backfill(conn, days=30):
             continue
         if _upsert_in_own_transaction(conn, "codex", session_id, fields, stats, path):
             stats["codex"] += 1
+    # Rollouts come in no particular order: one write, of the newest.
+    record_codex_plan_usage(newest_plan_usage)
 
     diag.info("backfill", "done", days=days, ms=diag.ms_since(started), **stats)
     return stats

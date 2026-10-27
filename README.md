@@ -177,8 +177,9 @@ The schema (see `core/agentboard/db.py`) has these tables:
 
 - `events` — an append-only log of every hook event ever received, per `(tool, session_id)`.
 - `sessions` — one row per session: cwd, branch, title, prompts, last activity, liveness
-  bookkeeping (pid, terminal info), and a free-form `status_text`/`status_until` set via
-  `agentboard status`.
+  bookkeeping (pid, terminal info), a free-form `status_text`/`status_until` set via
+  `agentboard status`, and the model it last ran with its context size (`model`,
+  `context_tokens`, `context_at`; see Plan usage and context below).
 - `triage` — the user's own done/snoozed/open decision for a session.
 - `links` — PRs, tickets, or arbitrary URLs associated with a session, from whatever source
   reported them (see Links below).
@@ -209,7 +210,8 @@ second app instance or a manual run cannot double it up. Each run:
 `0` for either window means never. `agentboard prune --dry-run` prints what a run would delete.
 
 Next to the database live `agentboard.log` and `agentboard.log.1`, the diagnostic log (see
-Diagnostics below), and `hook-errors.log`, the hook's own failure log.
+Diagnostics below), `hook-errors.log`, the hook's own failure log, and the `usage/` folder of
+plan-usage files (see Plan usage and context below).
 
 ## Hooks
 
@@ -355,6 +357,78 @@ tooltip saying what it does.
 The guide mirrors this README (`app/Sources/AgentBoard/Help/HelpContent.swift`); tests check that
 every `config.json` key, Settings key and CLI subcommand and option appears in it.
 
+### Plan usage and context
+
+**Plan usage.** The popover footer (above its buttons) and the dashboard sidebar (under the color
+key) show one line per usage source that has numbers, led by the source's name, such as
+`Claude · 5h 57% · 7d 70% · resets in 1h 55m` or `Codex · 5h 12% · 7d 31%`: the used percentage
+of each limit window, in the source's order, and when the soonest one resets. A line turns orange
+at 80% and red at 95% on any window. Hover it for each window's reset time, the file the numbers
+came from and how old they are; once they are over an hour old the line says so
+(`Claude as of 3h ago · ...`), because a source is only as fresh as its last report on this Mac
+(use on another app or machine is missing until then). A window whose reset time has passed is
+left out until newer numbers arrive; a spend window with dollars shows as `spend limit $314 of
+$500`. Nothing about a plan, a billing model or a window name is built in: windows are labelled
+from the data. **Settings → Show plan usage** (on by default) hides the lines.
+
+Sources, all local files that every `snapshot` reads again (it never touches the network):
+
+- **Claude Code's cache** `~/.claude/rate-limits.json`. It is undocumented (the same data the
+  status line receives as `rate_limits`, which Claude Code has only on plans with usage limits,
+  or behind a gateway that sets a spend limit), so it is read as a best-effort cache: every field
+  validated, windows labelled from its keys by rule (`five_hour` → `5h`, `seven_day_opus` →
+  `7d opus`, `spend_limit` → `spend limit`).
+- **Codex.** When a Codex turn ends (and at the launch backfill), AgentBoard reads the
+  `rate_limits` of the rollout's newest `token_count` event (the plan's primary and secondary
+  windows, labelled from their length: `5h`, `7d`) and keeps them in
+  `$AGENTBOARD_HOME/usage/codex.json`, never replacing newer numbers.
+- **Any other agent or tool** keeps `$AGENTBOARD_HOME/usage/<source>.json` (the file name is the
+  source's name) and replaces it whenever its numbers change, atomically (write a temporary file
+  in the same folder, then rename it):
+
+  ```json
+  {"label": "My agent", "updated_at": "2026-10-26T12:00:00Z",
+   "windows": [{"label": "5h", "used_percentage": 57, "resets_at": "2026-10-26T15:00:00Z"},
+               {"label": "monthly", "used_percentage": 63, "used_usd": 314, "limit_usd": 500,
+                "period": "monthly"}]}
+  ```
+
+  Only `windows` is required (each with a `label` and a numeric `used_percentage`); `label`
+  defaults to the file name, `updated_at` (ISO 8601 or epoch seconds) to the file's modification
+  time, and `resets_at` takes either form too.
+
+Claude's cache is listed first, then the files by name, at most 8 sources of 8 windows each. Two
+sources with the same name keep the one updated most recently, and a source not updated for 7
+days is hidden. When there is no source at all, which is the normal case with an API key,
+Bedrock or Vertex, most gateways, or no Claude, there is no line, no banner and no log line above
+debug; a malformed file is skipped the same way.
+
+**Model and context.** Each session row shows a small tag such as `Opus 5.5 · 308k` or
+`gpt-5-codex · 45k` at the right end of the row, after any PR buttons: the model it last ran and its current context size in
+tokens (what its latest request sent, cached tokens included). Any model id works: a Claude id is
+shortened by rule (`claude-opus-5-5` → `Opus 5.5`; Bedrock and Vertex wrappers such as
+`us.anthropic.` and `-v1:0` or `@20250805` are dropped), any other id is shown as it is, and an id
+that runs long is cut in the middle. A session whose agent reported only a size shows
+`Context 51k`. The
+tooltip and the dashboard detail's **Model** and **Context** rows give the full id, the exact
+count and how old it is. The context window's size is not known, so there is no percentage. Where
+the values come from:
+
+- `SessionStart` hooks send the model (Claude Code omits it after `/clear` and on recovery) and,
+  on a resume or fork (Claude Code 2.1.251 and later), the context size. A `/compact` that sends
+  no size drops the old one, so the tag shows only the model until the next reply.
+- After every `Stop` (and at the launch backfill) the transcript's newest real reply refreshes both,
+  so a `/model` switch or the post-compact size shows up by the next turn's end. Subagent lines and
+  synthetic API-error lines are skipped.
+- Codex: every Codex hook event names the model, so a `/model` switch shows at once; the
+  rollout's newest `turn_context` gives the model too and its newest `token_count` event the
+  context size (`last_token_usage.input_tokens`, which already includes cached input).
+- Any other agent: `agentboard status --model ID --context-tokens N`, or `model`,
+  `context_tokens` and `context_at` in an inbox drop file (see Links & integrations).
+
+The freshest measurement wins, so a resumed session's context from its `SessionStart` stays until
+a newer reply replaces it, and a re-parse that finds nothing never clears a stored value.
+
 ## Menu bar icon
 
 The menu bar icon takes the color of the most urgent session, so you can tell whether an agent
@@ -488,13 +562,17 @@ these generic mechanisms, all handled in `core/agentboard/links.py`:
    ```
    agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state OPEN|MERGED|CLOSED|DONE] [--title T] [--branch B] [--session TOOL:ID]
    agentboard status --text "phase/label" [--ttl MIN] [--session TOOL:ID]
+   agentboard status --model MODEL_ID [--context-tokens N] [--session TOOL:ID]
    agentboard title --text "what this session is doing" [--session TOOL:ID]
    ```
 
    A PR reported this way counts as the session's own work (see below). `--branch` records the
    PR's head branch (default: the session's current branch); a link keeps its branch when the
    session later moves on. A status text is shown as the row's title while it lasts, with the
-   session's own title under it. `agentboard title` names the session until the work moves on
+   session's own title under it. `--model` (any model id) and `--context-tokens` (the session's
+   context size now) fill the row's model · context tag for an agent AgentBoard cannot read
+   itself; give any of `--text`, `--model` and `--context-tokens`, and a context size never
+   replaces a newer measurement (see Plan usage and context). `agentboard title` names the session until the work moves on
    far enough for a generated retitle; a title you set yourself in Claude Code (`/rename`) is
    never replaced.
 
@@ -507,8 +585,10 @@ these generic mechanisms, all handled in `core/agentboard/links.py`:
 
 2. **Drop directory** — for tools that can't exec the CLI, drop a file in
    `$AGENTBOARD_HOME/inbox/*.json` shaped like
-   `{"session": "tool:id" | null, "cwd": "...", "links": [...], "status": "..."}`. It's ingested
-   (using the same session resolution) and deleted the next time `agentboard snapshot` runs.
+   `{"session": "tool:id" | null, "cwd": "...", "links": [...], "status": "...", "model": "...",
+   "context_tokens": 51200, "context_at": "ISO 8601"}` (every field optional; `context_at`
+   defaults to when the file is read, and a time later than that is clamped to it). It's ingested (using the same session resolution) and
+   deleted the next time `agentboard snapshot` runs.
 
 3. **Provider commands** — list external integrations in `$AGENTBOARD_HOME/config.json`:
 
@@ -521,7 +601,11 @@ these generic mechanisms, all handled in `core/agentboard/links.py`:
    team-specific integration plugs in without any code in AgentBoard itself; see
    `examples/providers/` for a fully generic example (reads git trailers).
 
-4. **Built-in generic detectors**, both optional and silently skipped if unavailable:
+4. **Plan usage files** — any agent or tool keeps `$AGENTBOARD_HOME/usage/<source>.json` with its
+   plan-usage windows; each source gets its own line in the popover footer. The shape is in Plan
+   usage and context above.
+
+5. **Built-in generic detectors**, both optional and silently skipped if unavailable:
    - A GitHub PR for the session's current branch, via `gh pr list` — only if `gh` is installed,
      and only during `refresh-links` (the one command allowed to touch the network). Results are
      cached in the `links` table with the PR's head branch, creation and merge/close times; an
@@ -734,6 +818,13 @@ for the next run, and a transcript that shrank or was rewritten restarts the sca
 beginning. Transcripts are parsed with no database transaction open; each session is then written
 in its own short transaction, so hooks never wait on a long backfill.
 
+The model and context size (see Plan usage and context) are read from the same tail scan and follow
+their own rule on hook and backfill rows alike: a parsed model replaces the stored one, a parsed
+context size replaces it only when it was measured at least as recently, and neither is cleared
+(the one exception is a `/compact` `SessionStart` without a size, which marks the size unknown).
+A Codex rollout's tail scan also picks up the plan's rate limits from the newest `token_count`
+event it parses, which the backfill keeps in `usage/codex.json` (the newest across all rollouts).
+
 ## Configuration (config.json)
 
 Everything the CLI can be told lives in one optional JSON object, `config.json` in the data
@@ -784,7 +875,7 @@ agentboard snapshot [--json] [--all]
 agentboard paths [--json]
 agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
 agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state ...] [--title T] [--branch B] [--session TOOL:ID]
-agentboard status --text TEXT [--ttl MIN] [--session TOOL:ID]
+agentboard status [--text TEXT] [--ttl MIN] [--model ID] [--context-tokens N] [--session TOOL:ID]
 agentboard title --text TEXT [--session TOOL:ID]
 agentboard note --kind needs_you|update|error --text T [--session TOOL:ID]
 agentboard notes [--session TOOL:ID] [--kind K ...] [--all] [--json]

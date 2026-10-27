@@ -418,10 +418,27 @@ def _extract_waiting_reason(event: str, payload: dict):
 def _extract_extra(payload: dict) -> dict:
     extra = {}
     for key in ("source", "model", "turn_id", "reason", "error_message", "error",
-                "error_details"):
+                "error_details", "context_tokens"):
         if key in payload:
             extra[key] = payload[key]
     return extra
+
+
+def _session_start_usage(payload: dict):
+    """(model, context_tokens) from a hook payload, each None when absent
+    or malformed. Claude Code sends `model` only on SessionStart (not after
+    /clear or on recovery) and `context_tokens` only on a resume/fork
+    SessionStart; Codex sends `model` on every hook event (codex-rs
+    hooks/src/schema.rs), so a `/model` switch shows up at once."""
+    model = payload.get("model")
+    if not isinstance(model, str) or not model.strip():
+        model = None
+    else:
+        model = model.strip()
+    tokens = payload.get("context_tokens")
+    if isinstance(tokens, bool) or not isinstance(tokens, int) or not 0 <= tokens < 2 ** 63:
+        tokens = None
+    return model, tokens
 
 
 def _background_info(payload: dict):
@@ -1018,6 +1035,33 @@ def process_payload(conn, tool: str, payload: dict) -> None:
             # SubagentStop of a workflow/teammate task changes neither
             # until the next parent Stop rewrites both.
             _drop_background_subagent(conn, tool, session_id, row)
+
+        if not is_subagent_tagged and not event.startswith("Subagent"):
+            # Any parent event that names the model (every Codex event,
+            # Claude's SessionStart) records it; one without keeps the
+            # stored model. The transcript re-parse also refreshes it at
+            # every Stop.
+            event_model, _ = _session_start_usage(payload)
+            if event_model is not None:
+                conn.execute(
+                    "UPDATE sessions SET model=? WHERE tool=? AND session_id=? "
+                    "AND model IS NOT ?",
+                    (event_model, tool, session_id, event_model),
+                )
+
+        if event == "SessionStart" and not is_subagent_tagged:
+            # On a resume/fork, the context size the first request re-sends.
+            _, start_tokens = _session_start_usage(payload)
+            # After a compact without a size, the pre-compact size is several
+            # times too large: store it as unknown as of now. The transcript's
+            # newest assistant line predates the compact, so the freshest-wins
+            # upsert keeps the NULL until the next real reply measures it.
+            if start_tokens is not None or payload.get("source") == "compact":
+                conn.execute(
+                    "UPDATE sessions SET context_tokens=?, context_at=? "
+                    "WHERE tool=? AND session_id=?",
+                    (start_tokens, now, tool, session_id),
+                )
 
         if (
             event == "SessionEnd" and not is_subagent_tagged

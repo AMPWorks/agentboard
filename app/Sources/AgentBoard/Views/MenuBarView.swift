@@ -227,17 +227,21 @@ struct MenuBarView: View {
     }
 
     private var footer: some View {
-        HStack {
-            Button("Open Dashboard") {
-                DashboardWindowController.show()
+        VStack(alignment: .leading, spacing: 4) {
+            // Plan usage, one line per source, above the button row (full at 380 pt).
+            UsageLineView(usage: store.snapshot.usage)
+            HStack {
+                Button("Open Dashboard") {
+                    DashboardWindowController.show()
+                }
+                .help("Open the dashboard window with every session (⌃⌥⌘A)")
+                Spacer()
+                Button("Refresh") {
+                    Task { await store.refresh() }
+                }
+                .help("Reload every session's state now")
+                GearMenu(store: store, closesHostWindow: true)
             }
-            .help("Open the dashboard window with every session (⌃⌥⌘A)")
-            Spacer()
-            Button("Refresh") {
-                Task { await store.refresh() }
-            }
-            .help("Reload every session's state now")
-            GearMenu(store: store, closesHostWindow: true)
         }
         .padding(8)
         .buttonStyle(.plain)

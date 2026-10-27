@@ -170,6 +170,9 @@ struct DashboardView: View {
             Divider()
             SessionColorLegendView()
                 .padding(8)
+            // Plan usage under the color key (nothing when no source has numbers).
+            UsageLineView(usage: store.snapshot.usage, lineLimit: 3,
+                          insets: EdgeInsets(top: 0, leading: 8, bottom: 8, trailing: 8))
         }
         .navigationSplitViewColumnWidth(min: 160, ideal: 180)
     }
