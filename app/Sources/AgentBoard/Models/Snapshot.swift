@@ -250,6 +250,18 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     var notes: [Note] = []
     /// Open notes, uncapped.
     var notesCount: Int = 0
+    /// The newest parent Stop's time while nothing has happened since (no
+    /// newer prompt, not ended, no background tasks listed): one value per
+    /// finished turn. Nil while running, waiting, ended, or from older CLIs.
+    var turnFinishedAt: String?
+    /// What started the latest turn: `human`, `loop`, `cron`, `injected`,
+    /// or nil (legacy rows, read as human; older CLIs).
+    var turnPromptKind: String?
+    /// Background tasks the last parent Stop listed (nil when unknown).
+    var backgroundTasks: Int?
+    /// The latest turn was injected right after a Stop that listed
+    /// background tasks: it reports a background task's result back.
+    var turnEndsBackgroundWait: Bool = false
 
     var id: String { key }
 
@@ -274,6 +286,10 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         case doneReason = "done_reason"
         case notes
         case notesCount = "notes_count"
+        case turnFinishedAt = "turn_finished_at"
+        case turnPromptKind = "turn_prompt_kind"
+        case backgroundTasks = "background_tasks"
+        case turnEndsBackgroundWait = "turn_ends_background_wait"
     }
 
     /// The CLI emits `null` for cwd/project/resume_command when a session's
@@ -312,6 +328,11 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         doneReason = try c.decodeIfPresent(String.self, forKey: .doneReason)
         notes = try c.decodeIfPresent([Note].self, forKey: .notes) ?? []
         notesCount = try c.decodeIfPresent(Int.self, forKey: .notesCount) ?? notes.count
+        turnFinishedAt = try c.decodeIfPresent(String.self, forKey: .turnFinishedAt)
+        turnPromptKind = try c.decodeIfPresent(String.self, forKey: .turnPromptKind)
+        backgroundTasks = try c.decodeIfPresent(Int.self, forKey: .backgroundTasks)
+        turnEndsBackgroundWait = try c.decodeIfPresent(Bool.self, forKey: .turnEndsBackgroundWait)
+            ?? false
     }
 
     static func == (lhs: Session, rhs: Session) -> Bool {
@@ -319,12 +340,14 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
             && lhs.notesCount == rhs.notesCount && lhs.notes == rhs.notes
             && lhs.title == rhs.title && lhs.statusText == rhs.statusText
             && lhs.waitingReason == rhs.waitingReason && lhs.links == rhs.links
+            && lhs.turnFinishedAt == rhs.turnFinishedAt
     }
     func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
     var updatedDate: Date? { ISO8601DateParsing.date(from: updatedAt) }
     var startedDate: Date? { ISO8601DateParsing.date(from: startedAt) }
     var endedDate: Date? { endedAt.flatMap(ISO8601DateParsing.date(from:)) }
+    var turnFinishedDate: Date? { turnFinishedAt.flatMap(ISO8601DateParsing.date(from:)) }
 
     var toolBadge: String { tool == "codex" ? "X" : "C" }
 

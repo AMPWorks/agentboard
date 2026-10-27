@@ -9,10 +9,14 @@ enum SettingsKeys {
     static let appearance = "appearance"
     /// Post a notification when a session newly needs you (default off).
     static let notifyOnNeedsYou = "notifyOnNeedsYou"
+    /// Post a notification when an attended session finishes its turn
+    /// (default off).
+    static let notifyOnTurnFinished = "notifyOnTurnFinished"
 
     static let all: [String] = [
         SettingsKeys.appearance,
         SettingsKeys.notifyOnNeedsYou,
+        SettingsKeys.notifyOnTurnFinished,
         MenuBarIconSettings.coloredKey,
         MenuBarIconSettings.flashKey,
         MenuBarIconSettings.flashStopKey,

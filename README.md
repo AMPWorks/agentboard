@@ -296,6 +296,19 @@ process is gone. Other statuses (e.g. `shell`) carry no signal.
 By default the snapshot excludes sessions marked `interactive: false` (non-interactive `claude -p`
 / SDK runs, Codex `exec` runs) and `done` sessions older than 7 days; `--all` includes everything.
 
+Each session in the snapshot also carries four turn fields, which the app's turn-finish
+notifications read (see Notifications):
+
+- `turn_finished_at`: the time of the session's newest `Stop` while nothing has happened since
+  (no newer prompt, not ended, no background tasks still listed by that Stop or the session),
+  else null. An idle reminder, a compaction or a background agent finishing never changes it,
+  so one finished turn keeps one value.
+- `turn_prompt_kind`: what started the latest turn: `human`, `loop`, `cron`, `injected` (a task
+  notification or another agent's message), or null for rows recorded before prompt kinds.
+- `background_tasks`: how many background tasks the last `Stop` listed (null when unknown).
+- `turn_ends_background_wait`: true when the latest turn was injected right after a `Stop` that
+  listed background tasks, i.e. the turn that reports a background task's result back.
+
 `agentboard paths --json` reports the resolved data/db/core directories (`{"home": ..., "db":
 ..., "core": ...}`), honoring `AGENTBOARD_HOME` exactly the way the rest of the CLI does. The app
 calls this once at launch so its directory watcher watches the same place the CLI actually
@@ -378,6 +391,36 @@ Settings → Menu bar icon:
 The colors are resolved for the system's light/dark setting, which is what the menu bar follows,
 not AgentBoard's own Appearance setting. The icon reacts within the 15 s background poll when
 nothing is open (usually sooner, via the data directory watcher).
+
+## Notifications
+
+Settings → Notifications has two toggles, both off by default. macOS asks for permission the
+first time you turn one on.
+
+- **Notify when a session needs you** (`notifyOnNeedsYou`): one notification when a session
+  newly enters `needs_you`, with the waiting reason as its text.
+- **Notify when a session finishes a turn** (`notifyOnTurnFinished`): one notification when an
+  attended, interactive session finishes its turn and lands in Review, titled with the project
+  (the session title as subtitle) and showing the first line of the reply.
+
+A finished turn is the snapshot's `turn_finished_at` (see State): the session's newest `Stop`
+with no newer prompt, not ended, and no background tasks listed. Each turn notifies at most once,
+however long the session sits idle afterwards or flickers between Running and Review. These
+never notify: a loop session idling between ticks (it is Running), a turn whose `Stop` still
+lists background tasks (the injected turn that reports them back notifies instead), a turn
+started by another agent's message, sessions already in Review when AgentBoard launches (or
+older sessions a backfill or **Show hidden** brings in), and the session selected in the
+dashboard while the dashboard window is key. A turn that ends in `needs_you` (a needs_you update)
+is left to the needs-you toggle: the turn toggle stays silent for it, also when the update later
+resolves into Review. Turning the toggle on never replays old turns.
+
+A newer turn of the same session replaces its delivered notification instead of stacking, and
+your next prompt in that session removes it, as does the session ending (quitting it, or
+`SessionEnd`); this cleanup still runs after you turn the toggle off. Notifications are grouped per session in
+Notification Center. Clicking either kind brings the session's terminal tab to the front (iTerm2
+and Terminal, via `agentboard focus`); when the session has no focusable terminal, the dashboard
+opens with it selected. A click on an earlier notification while AgentBoard is not running
+launches it and does the same once the first snapshot loads.
 
 ## Search
 

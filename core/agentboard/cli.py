@@ -181,8 +181,54 @@ def _cron_prompts(session):
     return tuple(item for item in value if isinstance(item, str)) if isinstance(value, list) else ()
 
 
+def _turn_maps(conn, newest_prompts):
+    """The per-session maps the turn fields read: newest parent Stop (ts,
+    its own background count; one grouped query), newest parent prompt
+    kind, and whether an injected newest prompt follows a Stop that still
+    listed background tasks. The last two reuse `newest_prompts`
+    (links.newest_parent_prompts), so the newest-prompt scan runs once."""
+    return {
+        "stops": links.last_parent_stop_times(conn),
+        "prompt_kinds": links.last_parent_prompt_kinds(conn, newest_prompts),
+        "background_waits": links.background_wait_before_newest_prompt(conn, newest_prompts),
+    }
+
+
+def _turn_fields(session, key, last_turn_start_at, turn_maps):
+    """turn_finished_at / turn_prompt_kind / background_tasks /
+    turn_ends_background_wait for one session (see SPEC.md).
+
+    turn_finished_at is the ts of the newest parent Stop while nothing has
+    happened since that matters: no newer parent prompt of any kind, the
+    session has not ended, and neither the session nor that Stop event
+    still lists background tasks. It ignores last_event, so an idle_prompt
+    Notification, a kept marker event or a registry flap never changes
+    it: the Stop's ts is a stable identity for "this finished turn"."""
+    stop_ts, stop_background = turn_maps["stops"].get(key, (None, None))
+    finished_at = stop_ts
+    if finished_at is not None:
+        stop_when = links._ts(stop_ts)
+        start_when = links._ts(last_turn_start_at) if last_turn_start_at else None
+        if (
+            session.get("ended_at")
+            or stop_when is None
+            or (start_when is not None and stop_when <= start_when)
+            or reconcile.background_wait_reason(session) is not None
+            or (stop_background is not None and stop_background > 0)
+        ):
+            finished_at = None
+    count = session.get("background_tasks")
+    return {
+        "turn_finished_at": finished_at,
+        "turn_prompt_kind": turn_maps["prompt_kinds"].get(key),
+        "background_tasks": count if isinstance(count, int) else None,
+        "turn_ends_background_wait": bool(turn_maps["background_waits"].get(key, False)),
+    }
+
+
 def _build_session_entry(conn, session, triage_by_key, claude_registry, config, now,
-                         notes_by_key=None, prompt_times=None, turn_start_times=None):
+                         notes_by_key=None, prompt_times=None, turn_start_times=None,
+                         turn_maps=None):
     session = dict(session)
     tool = session["tool"]
     session_id = session["session_id"]
@@ -246,6 +292,9 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
 
     cwd = session.get("cwd")
     title = session.get("title") or _first_line(session.get("first_prompt")) or session_id
+    turn = _turn_fields(session, (tool, session_id), last_turn_start_at,
+                        turn_maps if turn_maps is not None
+                        else _turn_maps(conn, links.newest_parent_prompts(conn)))
 
     return {
         "key": f"{tool}:{session_id}",
@@ -304,6 +353,7 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
             for note in _listed_notes(session_notes)
         ],
         "notes_count": len(session_notes),
+        **turn,
     }
 
 
@@ -323,11 +373,13 @@ def build_snapshot(conn, include_all=False, now=None):
     notes_by_key = _open_notes_by_session(conn)
     # One grouped query, not one per session on every 3 s poll.
     prompt_times = links.last_parent_prompt_times(conn)
-    turn_start_times = links.last_parent_prompt_times_any(conn)
+    newest_prompts = links.newest_parent_prompts(conn)
+    turn_start_times = links.last_parent_prompt_times_any(conn, newest_prompts)
+    turn_maps = _turn_maps(conn, newest_prompts)
 
     entries = [
         _build_session_entry(conn, session, triage_by_key, claude_registry, config, now,
-                             notes_by_key, prompt_times, turn_start_times)
+                             notes_by_key, prompt_times, turn_start_times, turn_maps)
         for session in sessions
     ]
 

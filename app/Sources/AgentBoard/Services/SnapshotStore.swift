@@ -27,6 +27,10 @@ final class SnapshotStore: ObservableObject {
     /// dashboard to show one note; the session detail scrolls to it,
     /// highlights it and clears it.
     @Published var pendingNote: NoteFocus?
+    /// The session selected in the dashboard while it is open, so a
+    /// finished turn the user is looking at does not notify. Written by
+    /// `DashboardView`, cleared when it disappears.
+    @Published var dashboardSelection: String?
     /// The popover's filter text. Held here, not in the view, so it
     /// survives closing and reopening the popover; kept in memory only
     /// (cleared on relaunch). The menu bar icon never reads it.
@@ -277,7 +281,10 @@ final class SnapshotStore: ObservableObject {
         await perform("snooze \(hours)h", session) { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "snooze", hours: hours) }
     }
 
-    func focus(_ session: Session) async {
+    /// Returns false when `agentboard focus` failed (the tab was closed,
+    /// the terminal quit), so a notification click can open the dashboard.
+    @discardableResult
+    func focus(_ session: Session) async -> Bool {
         await perform("focus", session) { try await cli.focus(tool: session.tool, sessionId: session.sessionId) }
     }
 
@@ -341,16 +348,20 @@ final class SnapshotStore: ObservableObject {
 
     /// Runs a user action against the CLI and logs it by name, so `log
     /// show` ties a row click to the CLIRunner invocation that follows it.
-    private func perform(_ name: String, _ session: Session, _ action: () async throws -> Void) async {
+    /// Returns whether the action succeeded.
+    @discardableResult
+    private func perform(_ name: String, _ session: Session, _ action: () async throws -> Void) async -> Bool {
         let key = session.key
         log.notice("action \(name, privacy: .public) key=\(key, privacy: .public)")
         do {
             try await action()
             lastActionError = nil
             await refresh()
+            return true
         } catch {
             recordActionError(Self.actionTitle(name), error)
             log.error("action \(name, privacy: .public) key=\(key, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 }
