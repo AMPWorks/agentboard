@@ -5,6 +5,7 @@ struct SettingsView: View {
     @ObservedObject var store: SnapshotStore
     @AppStorage(SettingsKeys.appearance) private var appearance: String = Appearance.system.rawValue
     @AppStorage(SettingsKeys.notifyOnNeedsYou) private var notifyOnNeedsYou: Bool = false
+    @AppStorage(SettingsKeys.notifyOnTurnFinished) private var notifyOnTurnFinished: Bool = false
     @AppStorage(MenuBarIconSettings.coloredKey) private var menuBarIconColored: Bool = true
     @AppStorage(MenuBarIconSettings.flashKey) private var menuBarIconFlash: Bool = true
     @AppStorage(MenuBarIconSettings.flashStopKey) private var menuBarIconFlashStop: String = FlashStopPolicy.onOpen.rawValue
@@ -56,7 +57,15 @@ struct SettingsView: View {
                     .onChange(of: notifyOnNeedsYou) { _, newValue in
                         if newValue { NotificationManager.shared.requestAuthorizationIfNeeded() }
                     }
-                    .help("Post a macOS notification when a session newly needs you")
+                    .help("Post a macOS notification when a session newly needs you; click it to jump to that terminal")
+                Toggle("Notify when a session finishes a turn", isOn: $notifyOnTurnFinished)
+                    .onChange(of: notifyOnTurnFinished) { _, newValue in
+                        if newValue { NotificationManager.shared.requestAuthorizationIfNeeded() }
+                    }
+                    .help("Post a macOS notification when a session you are working with finishes its turn; click it to jump to that terminal")
+                Text("Clicking a notification focuses the session's terminal. Loop sessions idling between ticks and turns still waiting on background tasks never notify. A turn that ends needing you notifies only through the needs-you toggle.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } header: {
                 header("Notifications", topic: .settings)
             }

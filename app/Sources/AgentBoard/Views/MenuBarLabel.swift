@@ -7,6 +7,10 @@ struct MenuBarLabel: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
     @AppStorage(SettingsKeys.notifyOnNeedsYou) private var notifyOnNeedsYou: Bool = false
+    @AppStorage(SettingsKeys.notifyOnTurnFinished) private var notifyOnTurnFinished: Bool = false
+    /// Runs on every snapshot even with the toggle off, so turning it on
+    /// later never replays old turns.
+    @State private var turns = TurnFinishDetector()
     @AppStorage(MenuBarIconSettings.coloredKey) private var colored: Bool = true
     @AppStorage(MenuBarIconSettings.flashKey) private var flash: Bool = true
     @AppStorage(MenuBarIconSettings.flashStopKey) private var flashStop: String = FlashStopPolicy.onOpen.rawValue
@@ -57,12 +61,32 @@ struct MenuBarLabel: View {
             WindowOpener.shared.open = { openWindow(id: DashboardWindowController.windowID) }
             WindowOpener.shared.dismiss = { dismissWindow(id: DashboardWindowController.windowID) }
             WindowOpener.shared.openHelp = { openWindow(id: HelpWindowController.windowID) }
+            let store = self.store
+            NotificationManager.shared.onOpenSession = { key in
+                // Not ready until the first snapshot: the click waits in
+                // pendingOpenKey and the snapshot handler below opens it.
+                guard store.lastUpdated != nil else { return false }
+                Self.openSession(key, store: store)
+                return true
+            }
+            if notifyOnNeedsYou || notifyOnTurnFinished {
+                NotificationManager.shared.requestAuthorizationIfNeeded()
+            }
             applySettings()
             store.start()
         }
         .onChange(of: store.snapshot) { _, newValue in
+            let notifications = NotificationManager.shared
             let entered = attention.note(snapshot: newValue)
-            NotificationManager.shared.notify(newlyNeedingYou: entered, in: newValue, enabled: notifyOnNeedsYou)
+            notifications.notify(newlyNeedingYou: entered, in: newValue, enabled: notifyOnNeedsYou)
+            notifications.notify(
+                turns: turns.note(newValue), enabled: notifyOnTurnFinished,
+                context: .init(dashboardIsKey: attention.dashboardIsKey,
+                               dashboardSelection: store.dashboardSelection)
+            )
+            if let key = notifications.takePendingOpenKey() {
+                Self.openSession(key, store: store)
+            }
         }
         .onChange(of: colored) { applySettings() }
         .onChange(of: flash) { applySettings() }
@@ -78,6 +102,25 @@ struct MenuBarLabel: View {
         } else {
             Image(systemName: MenuBarIconRenderer.symbolName)
                 .symbolVariant(urgentCount > 0 ? .fill : .none)
+        }
+    }
+
+    /// A clicked notification: focus the session's terminal when it has
+    /// one, otherwise open the dashboard with the session selected (it
+    /// selects a key a later snapshot brings in, too). A focus that fails
+    /// at runtime (the tab was closed, the terminal quit) falls back to
+    /// the dashboard too, so the click never looks dead.
+    private static func openSession(_ key: String, store: SnapshotStore) {
+        let showInDashboard = {
+            store.requestSelection(key)
+            DashboardWindowController.show()
+        }
+        if let session = store.snapshot.sessions.first(where: { $0.key == key }), session.isFocusable {
+            Task {
+                if await !store.focus(session) { showInDashboard() }
+            }
+        } else {
+            showInDashboard()
         }
     }
 

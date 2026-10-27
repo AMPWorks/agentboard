@@ -74,6 +74,7 @@ enum HelpContent {
                 "**The headline of an open update**: an `update` note newer than your last prompt and under a day old (a loop session reporting a milestone).",
                 "**Your turn: <first line of its last message>**: an attended session stopped and is waiting for your next prompt, within 24 hours of the end of that turn. An interrupted turn reads **Interrupted: your turn**.",
             ]),
+            .paragraph("With **Notify when a session finishes a turn** on (Settings → Notifications), each finished turn that lands in Review posts one macOS notification; clicking it focuses that session's terminal. A turn that ends in Needs you notifies only through **Notify when a session needs you**."),
             .paragraph("A background agent finishing after a turn, and a compaction (including a `/compact` typed at an idle prompt) or resuming a live session, never change a session's state. For a live Claude session AgentBoard also reads Claude Code's own `~/.claude/sessions/<pid>.json` status when it is newer than the last hook event: **idle** turns a stale activity event into a finished turn, **busy** makes a finished one Running. Other statuses carry no signal."),
             .heading("Sessions that finish on their own"),
             .paragraph("A session can reach Done by itself. Its row then shows a small **auto** badge whose tooltip gives the reason:"),
@@ -296,7 +297,8 @@ enum HelpContent {
             ]),
             .heading("Notifications"),
             .keyValue([
-                HelpRow(key: "Notify when a session needs you", value: "Off by default. Posts a macOS notification when a session newly needs you; macOS asks for permission the first time you turn it on. Key `notifyOnNeedsYou`."),
+                HelpRow(key: "Notify when a session needs you", value: "Off by default. Posts a macOS notification when a session newly needs you; macOS asks for permission the first time you turn it on. Clicking it brings the session's terminal to the front (or opens the dashboard with the session selected when its terminal can't be focused). Key `notifyOnNeedsYou`."),
+                HelpRow(key: "Notify when a session finishes a turn", value: "Off by default. Posts one macOS notification when a session you are working with finishes its turn and lands in Review: titled with the project, showing the first line of the reply. Clicking it focuses the session's terminal like the needs-you notification. A newer turn of the same session replaces the delivered notification, and replying removes it. Never for a loop session idling between ticks, a turn still waiting on background tasks (the turn that reports them back notifies instead), a message another agent sent the session, sessions already in Review when AgentBoard starts, or the session selected in the dashboard while the dashboard is in front. A turn that ends needing you (a needs_you update) is left to **Notify when a session needs you**, not this toggle. Key `notifyOnTurnFinished`."),
             ]),
             .heading("General"),
             .keyValue([

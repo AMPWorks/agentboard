@@ -843,11 +843,95 @@ def last_parent_prompt_times(conn, *, any_kind=False) -> dict:
     }
 
 
-def last_parent_prompt_times_any(conn) -> dict:
+def newest_parent_prompts(conn) -> dict:
+    """{(tool, session_id): (id, ts, prompt_kind)} of each session's newest
+    parent prompt of any kind, injected ones included, in one grouped scan
+    of `events`. The snapshot derives the newest-prompt ts, its kind and
+    the background-wait lookup from this one map. A session with no parent
+    prompt is absent."""
+    return {
+        (row[0], row[1]): (row[2], row[3], row[4])
+        for row in conn.execute(
+            "SELECT e.tool, e.session_id, e.id, e.ts, e.prompt_kind FROM events e JOIN ("
+            "  SELECT MAX(id) AS id FROM events WHERE event='UserPromptSubmit' "
+            "  AND agent_id IS NULL GROUP BY tool, session_id"
+            ") newest ON e.id = newest.id"
+        )
+    }
+
+
+def last_parent_prompt_times_any(conn, newest=None) -> dict:
     """{(tool, session_id): ts} of each session's newest parent prompt of any
     kind, injected ones included: when its latest turn started, which
-    bounds how old a registry "idle" may be (reconcile.registry_signal)."""
-    return last_parent_prompt_times(conn, any_kind=True)
+    bounds how old a registry "idle" may be (reconcile.registry_signal).
+    `newest` is a newest_parent_prompts map already loaded."""
+    if newest is None:
+        newest = newest_parent_prompts(conn)
+    return {key: value[1] for key, value in newest.items()}
+
+
+def _extra_background_tasks(extra):
+    """The background_tasks count a parent Stop's `extra` JSON recorded
+    (hook.py writes it at Stop time), or None when absent or malformed."""
+    try:
+        value = json.loads(extra) if extra else None
+    except (TypeError, ValueError):
+        return None
+    count = value.get("background_tasks") if isinstance(value, dict) else None
+    return count if isinstance(count, int) and not isinstance(count, bool) else None
+
+
+def last_parent_stop_times(conn) -> dict:
+    """{(tool, session_id): (ts, background_tasks)} of each session's newest
+    parent Stop, background_tasks being that Stop event's own count (None
+    when it listed no array). The event value never changes afterwards,
+    unlike sessions.background_tasks, which a background SubagentStop
+    lowers. A session with no parent Stop is absent."""
+    return {
+        (row[0], row[1]): (row[2], _extra_background_tasks(row[3]))
+        for row in conn.execute(
+            "SELECT e.tool, e.session_id, e.ts, e.extra FROM events e JOIN ("
+            "  SELECT MAX(id) AS id FROM events WHERE event='Stop' "
+            "  AND agent_id IS NULL GROUP BY tool, session_id"
+            ") newest ON e.id = newest.id"
+        )
+    }
+
+
+def last_parent_prompt_kinds(conn, newest=None) -> dict:
+    """{(tool, session_id): prompt_kind} of each session's newest parent
+    prompt of any kind (`human`, `loop`, `cron`, `injected`, or None for a
+    row written before prompt kinds were recorded). A session with no
+    parent prompt is absent. `newest` is a newest_parent_prompts map
+    already loaded."""
+    if newest is None:
+        newest = newest_parent_prompts(conn)
+    return {key: value[2] for key, value in newest.items()}
+
+
+def background_wait_before_newest_prompt(conn, newest=None) -> dict:
+    """{(tool, session_id): bool}: True when the session's newest parent
+    prompt is injected and the newest parent Stop before it (by event id)
+    still listed background tasks, i.e. the injected turn is the one that
+    reports a background task back (a `<task-notification>`). Only
+    sessions whose newest prompt is injected are listed; any other
+    session reads as False. `newest` is a newest_parent_prompts map
+    already loaded; the lookup then touches only the injected prompts'
+    sessions, through the per-session index, never a full scan."""
+    if newest is None:
+        newest = newest_parent_prompts(conn)
+    result = {}
+    for key, (prompt_id, _ts, kind) in newest.items():
+        if kind != "injected":
+            continue
+        row = conn.execute(
+            "SELECT extra FROM events WHERE tool=? AND session_id=? AND event='Stop' "
+            "AND agent_id IS NULL AND id < ? ORDER BY id DESC LIMIT 1",
+            (key[0], key[1], prompt_id),
+        ).fetchone()
+        count = _extra_background_tasks(row[0]) if row else None
+        result[key] = count is not None and count > 0
+    return result
 
 
 TURN_START_EVENTS = ("UserPromptSubmit",)

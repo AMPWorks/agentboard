@@ -377,7 +377,9 @@ then select the tab/window and activate iTerm. Exit non-zero with message if not
       "triage": {"status": "open|done|snoozed", "until": "ISO|null", "note": "string|null"},
       "notes": [{"id": 1, "kind": "needs_you|update|error", "text": "...", "ts": "ISO",
                  "last_ts": "ISO", "count": 1, "source": "stop|cli|inbox|provider|backfill"}],
-      "notes_count": 1
+      "notes_count": 1,
+      "turn_finished_at": "ISO|null", "turn_prompt_kind": "human|loop|cron|injected|null",
+      "background_tasks": 0, "turn_ends_background_wait": false
     }
   ]
 }
@@ -390,6 +392,18 @@ capped at 20 plus any older open `needs_you` notes (never capped out); `notes_co
 the sessions this snapshot emits. Older CLIs omit all three; the app defaults them to empty/0.
 Links' `branch`/`owned`/`awaits_you` and `title_source` were added with migration 6; the app
 decodes them as optionals.
+Turn fields (added for turn-finish notifications): `turn_finished_at` is the ts of the
+session's newest parent `Stop` event when that Stop is newer than its newest parent prompt of
+any kind, `ended_at` is null, the session is not waiting on background tasks
+(`reconcile.background_wait_reason`), and that Stop event's own `extra.background_tasks` is not
+above 0; null otherwise. It never reads `last_event`, so an `idle_prompt` Notification, a kept
+marker event or a registry flap leaves it unchanged: it identifies one finished turn.
+`turn_prompt_kind` is `events.prompt_kind` of the newest parent prompt (null for legacy rows,
+read as human). `background_tasks` is `sessions.background_tasks` from the last parent Stop
+(null when unknown, e.g. Codex). `turn_ends_background_wait` is true when the newest parent
+prompt is injected and the newest parent Stop before it (by event id) listed background tasks:
+the `<task-notification>` turn that reports a background task back. Three grouped queries, as
+for `last_parent_prompt_times`.
 
 Notes (`notes.py`, added after the original spec): the hook classifies each parent Stop message
 inside its transaction (`needs_you` for a line starting with a `config.json` `note_markers`
@@ -445,6 +459,14 @@ migration; inbox drops and provider rows accept an optional `"notes": [{"kind", 
 - Actions shell out to the CLI (`mark`, `focus`, `resume`, `resume --print` for copy).
 - Notifications: post a UserNotification when a session transitions into needs_you (optional,
   off by default toggle in a small Settings view) — existing notify.py already notifies.
+- (Added later.) Turn-finish notifications (`notifyOnTurnFinished`, off by default): one per
+  attended Review turn, keyed by `turn_finished_at` (`TurnFinishDetector`: primed at launch,
+  each turn considered once, loop/cron turns and injected ones that do not end a background
+  wait stay silent), identifier `turn:<key>` so a newer turn replaces it, removed when a
+  non-injected prompt answers it, skipped for the session selected while the dashboard is key.
+  Both kinds carry `userInfo` `sessionKey`/`kind`, thread per session and category `session`;
+  the app is the `UNUserNotificationCenter` delegate, and a click focuses the session (or opens
+  the dashboard with it selected). Skipped entirely without an app bundle (fixture binary).
 - Launch at login toggle via `SMAppService.mainApp`.
 - Never block main thread on Process; decode with Codable; tolerate unknown fields/states.
 - Appearance: Settings picker "System / Dark / Light", default **System** (UserDefaults key

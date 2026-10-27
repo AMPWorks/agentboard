@@ -69,8 +69,13 @@ struct DashboardView: View {
             }
         }
         .searchable(text: $searchText, prompt: "Search title, prompts, repo, branch, PR…")
-        .onAppear { consumePendingSelection() }
+        .onAppear {
+            consumePendingSelection()
+            store.dashboardSelection = selectedSessionKey
+        }
+        .onDisappear { store.dashboardSelection = nil }
         .onChange(of: store.pendingSelection) { _, _ in consumePendingSelection() }
+        .onChange(of: selectedSessionKey) { _, newValue in store.dashboardSelection = newValue }
         .toolbar {
             ToolbarItemGroup {
                 Picker("Tool", selection: $toolFilter) {

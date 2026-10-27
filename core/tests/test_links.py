@@ -1180,3 +1180,89 @@ if __name__ == "__main__":
     import unittest
 
     unittest.main()
+
+
+class TurnHelperTests(AgentBoardTestCase):
+    def _event(self, minutes, event, session_id="s1", tool="claude", agent_id=None,
+               extra=None, kind=None):
+        self.conn.execute(
+            "INSERT INTO events(ts, tool, session_id, event, agent_id, extra, prompt_kind) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (iso(NOW - timedelta(minutes=minutes)), tool, session_id, event, agent_id,
+             json.dumps(extra) if extra is not None else None, kind),
+        )
+
+    def test_last_parent_stop_times(self):
+        self._event(50, "UserPromptSubmit")
+        self._event(40, "Stop", extra={"background_tasks": 3})
+        self._event(30, "Stop", extra={"background_tasks": 1, "session_crons": 0})
+        self._event(20, "Stop", agent_id="sub-1", extra={"background_tasks": 9})  # subagent
+        self._event(10, "Stop", tool="codex", extra={"model": "gpt"})
+        self._event(5, "UserPromptSubmit", session_id="s2")  # no Stop: absent
+        self.assertEqual(links.last_parent_stop_times(self.conn), {
+            ("claude", "s1"): (iso(NOW - timedelta(minutes=30)), 1),
+            ("codex", "s1"): (iso(NOW - timedelta(minutes=10)), None),
+        })
+
+    def test_malformed_extra_reads_as_none(self):
+        self.conn.execute(
+            "INSERT INTO events(ts, tool, session_id, event, extra) "
+            "VALUES (?, 'claude', 's1', 'Stop', 'not json')", (iso(NOW),))
+        self.assertEqual(links.last_parent_stop_times(self.conn),
+                         {("claude", "s1"): (iso(NOW), None)})
+
+    def test_last_parent_prompt_kinds(self):
+        self._event(50, "UserPromptSubmit", kind="human")
+        self._event(40, "UserPromptSubmit", kind="injected")
+        self._event(30, "UserPromptSubmit", agent_id="sub-1", kind="human")  # subagent
+        self._event(20, "UserPromptSubmit", session_id="s2", kind="human")
+        self._event(10, "UserPromptSubmit", session_id="s2")  # legacy row
+        self._event(5, "Stop", session_id="s3")  # no prompt: absent
+        self.assertEqual(links.last_parent_prompt_kinds(self.conn), {
+            ("claude", "s1"): "injected",
+            ("claude", "s2"): None,
+        })
+
+    def test_background_wait_before_newest_prompt(self):
+        # s1: Stop(bg=1), SubagentStop, injected report-back.
+        self._event(50, "UserPromptSubmit", kind="human")
+        self._event(45, "Stop", extra={"background_tasks": 1})
+        self._event(44, "SubagentStop", agent_id="bg-1")
+        self._event(40, "UserPromptSubmit", kind="injected")
+        self._event(39, "Stop", extra={"background_tasks": 0})
+        # s2: a peer message after a clean Stop.
+        self._event(50, "UserPromptSubmit", session_id="s2", kind="human")
+        self._event(45, "Stop", session_id="s2", extra={"background_tasks": 0})
+        self._event(40, "UserPromptSubmit", session_id="s2", kind="injected")
+        # s3: a human prompt after a background Stop.
+        self._event(50, "UserPromptSubmit", session_id="s3", kind="human")
+        self._event(45, "Stop", session_id="s3", extra={"background_tasks": 2})
+        self._event(40, "UserPromptSubmit", session_id="s3", kind="human")
+        # s4: injected with no Stop before it.
+        self._event(40, "UserPromptSubmit", session_id="s4", kind="injected")
+        waits = links.background_wait_before_newest_prompt(self.conn)
+        self.assertTrue(waits[("claude", "s1")])
+        self.assertFalse(waits[("claude", "s2")])
+        self.assertNotIn(("claude", "s3"), waits)
+        self.assertFalse(waits[("claude", "s4")])
+        # The same answer from a newest_parent_prompts map loaded once.
+        newest = links.newest_parent_prompts(self.conn)
+        self.assertEqual(links.background_wait_before_newest_prompt(self.conn, newest), waits)
+
+    def test_newest_parent_prompts_feeds_the_derived_maps(self):
+        self._event(50, "UserPromptSubmit", kind="human")
+        self._event(40, "UserPromptSubmit", kind="injected")
+        self._event(30, "UserPromptSubmit", agent_id="sub-1", kind="human")  # subagent
+        self._event(20, "UserPromptSubmit", session_id="s2")  # legacy row
+        self._event(5, "Stop", session_id="s3")  # no prompt: absent
+        newest = links.newest_parent_prompts(self.conn)
+        self.assertEqual(set(newest), {("claude", "s1"), ("claude", "s2")})
+        prompt_id, ts, kind = newest[("claude", "s1")]
+        self.assertEqual((ts, kind), (iso(NOW - timedelta(minutes=40)), "injected"))
+        self.assertEqual(prompt_id, self.conn.execute(
+            "SELECT id FROM events WHERE agent_id IS NULL AND session_id='s1' "
+            "ORDER BY id DESC LIMIT 1").fetchone()[0])
+        self.assertEqual(links.last_parent_prompt_times_any(self.conn, newest),
+                         links.last_parent_prompt_times_any(self.conn))
+        self.assertEqual(links.last_parent_prompt_kinds(self.conn, newest),
+                         {("claude", "s1"): "injected", ("claude", "s2"): None})

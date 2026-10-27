@@ -33,9 +33,17 @@ struct AgentBoardApp: App {
     }
 }
 
-/// Owns process-level setup that SwiftUI's App has no hook for: the global
-/// hotkey and the appearance applied before any window is shown.
+/// Owns process-level setup that SwiftUI's App has no hook for: the
+/// notification delegate, the global hotkey and the appearance applied
+/// before any window is shown.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The notification delegate must be in place before launch finishes,
+    /// so a notification click that launches the app reaches it.
+    @MainActor
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NotificationManager.shared.configure()
+    }
+
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Without this, macOS treats a backgrounded LSUIElement app as idle

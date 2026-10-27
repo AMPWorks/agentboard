@@ -3727,6 +3727,167 @@ class PruneTests(AgentBoardTestCase):
             self.assertNotIn("vacuumed", out)
 
 
+class SnapshotTurnFieldsTests(AgentBoardTestCase):
+    """turn_finished_at / turn_prompt_kind / background_tasks /
+    turn_ends_background_wait, driven through the real hook."""
+
+    def _hook(self, event, tool="claude", session_id="s1", **payload):
+        with mock.patch("agentboard.hook.subprocess.run") as run, \
+             mock.patch("agentboard.hook.subprocess.Popen"):
+            run.return_value = mock.Mock(returncode=0, stdout="")
+            hook.process_payload(self.conn, tool, {
+                "cwd": "/tmp/proj", "session_id": session_id, "hook_event_name": event,
+                **payload,
+            })
+
+    def prompt(self, text="go", **kw):
+        self._hook("UserPromptSubmit", prompt=text, **kw)
+
+    def injected(self, **kw):
+        self.prompt("<task-notification>task done</task-notification>", **kw)
+
+    def stop(self, reply="Done.", background=None, **kw):
+        payload = {"last_assistant_message": reply}
+        if background is not None:
+            payload["background_tasks"] = [
+                {"type": "subagent", "status": "running"} for _ in range(background)
+            ]
+        self._hook("Stop", **payload, **kw)
+        return self._newest_ts("Stop", kw.get("tool", "claude"), kw.get("session_id", "s1"))
+
+    def _newest_ts(self, event, tool="claude", session_id="s1"):
+        return self.conn.execute(
+            "SELECT ts FROM events WHERE tool=? AND session_id=? AND event=? "
+            "AND agent_id IS NULL ORDER BY id DESC LIMIT 1",
+            (tool, session_id, event),
+        ).fetchone()[0]
+
+    def entry(self, key="claude:s1"):
+        snapshot = cli.build_snapshot(self.conn, include_all=True)
+        return next(e for e in snapshot["sessions"] if e["key"] == key)
+
+    def test_stop_after_a_prompt_sets_the_stop_ts(self):
+        self.prompt()
+        stop_ts = self.stop(background=0)
+        entry = self.entry()
+        self.assertEqual(entry["turn_finished_at"], stop_ts)
+        self.assertEqual(entry["turn_prompt_kind"], "human")
+        self.assertEqual(entry["background_tasks"], 0)
+        self.assertFalse(entry["turn_ends_background_wait"])
+
+    def test_a_new_prompt_nulls_it(self):
+        self.prompt()
+        self.stop()
+        self.prompt("and another thing")
+        self.assertIsNone(self.entry()["turn_finished_at"])
+
+    def test_a_stop_listing_background_tasks_gives_null(self):
+        self.prompt()
+        self.stop(background=2)
+        entry = self.entry()
+        self.assertIsNone(entry["turn_finished_at"])
+        self.assertEqual(entry["background_tasks"], 2)
+
+    def test_background_subagent_stop_keeps_it_null_then_the_report_back_sets_it(self):
+        self.prompt()
+        self.stop(background=1)
+        self._hook("SubagentStop", agent_id="bg-1")
+        entry = self.entry()
+        # The session column dropped to 0, but the Stop event still lists one.
+        self.assertEqual(entry["background_tasks"], 0)
+        self.assertIsNone(entry["turn_finished_at"])
+        self.injected()
+        final = self.stop("Here is what the task found.", background=0)
+        entry = self.entry()
+        self.assertEqual(entry["turn_finished_at"], final)
+        self.assertEqual(entry["turn_prompt_kind"], "injected")
+        self.assertTrue(entry["turn_ends_background_wait"])
+
+    def test_later_markers_leave_the_ts_unchanged(self):
+        self.prompt()
+        stop_ts = self.stop(background=0)
+        self._hook("Notification", notification_type="idle_prompt",
+                   message="Claude is waiting for your input")
+        self._hook("SubagentStop", agent_id="bg-1")
+        self._hook("PreCompact", trigger="manual")
+        self.assertEqual(self.entry()["turn_finished_at"], stop_ts)
+
+    def test_session_end_nulls_it(self):
+        self.prompt()
+        self.stop()
+        self._hook("SessionEnd", reason="prompt_input_exit")
+        self.assertIsNone(self.entry()["turn_finished_at"])
+
+    def test_codex_stop_works_the_same(self):
+        self.prompt(tool="codex")
+        stop_ts = self.stop(tool="codex")
+        entry = self.entry("codex:s1")
+        self.assertEqual(entry["turn_finished_at"], stop_ts)
+        self.assertIsNone(entry["background_tasks"])
+
+    def test_ends_background_wait_after_a_chain_of_reports(self):
+        self.prompt()
+        self.stop(background=2)
+        self.injected()
+        self.stop(background=1)
+        self.assertIsNone(self.entry()["turn_finished_at"])
+        self.injected()
+        final = self.stop(background=0)
+        entry = self.entry()
+        self.assertEqual(entry["turn_finished_at"], final)
+        self.assertTrue(entry["turn_ends_background_wait"])
+
+    def test_an_injected_peer_message_after_a_clean_stop_does_not_end_a_wait(self):
+        self.prompt()
+        self.stop(background=0)
+        self.prompt("<agent-message from=peer>hello</agent-message>")
+        stop_ts = self.stop("Hi back.", background=0)
+        entry = self.entry()
+        self.assertEqual(entry["turn_finished_at"], stop_ts)
+        self.assertEqual(entry["turn_prompt_kind"], "injected")
+        self.assertFalse(entry["turn_ends_background_wait"])
+
+    def test_a_human_prompt_does_not_end_a_wait(self):
+        self.prompt()
+        self.stop(background=1)
+        self.prompt("never mind, carry on")
+        self.stop(background=0)
+        entry = self.entry()
+        self.assertEqual(entry["turn_prompt_kind"], "human")
+        self.assertFalse(entry["turn_ends_background_wait"])
+
+    def test_no_stop_yet_gives_null_and_no_prompt_gives_null_kind(self):
+        insert_session(self.conn, session_id="legacy", last_event="Stop")
+        entry = self.entry("claude:legacy")
+        self.assertIsNone(entry["turn_finished_at"])
+        self.assertIsNone(entry["turn_prompt_kind"])
+        self.assertIsNone(entry["background_tasks"])
+        self.assertFalse(entry["turn_ends_background_wait"])
+
+    def test_the_newest_prompt_scan_runs_once_per_snapshot(self):
+        # Two sessions, one waiting on a background report-back, so every
+        # turn field has something to look up.
+        self.prompt()
+        self.stop(background=1)
+        self.injected()
+        self.prompt(session_id="s2")
+        self.stop(session_id="s2")
+        statements = []
+        self.conn.set_trace_callback(statements.append)
+        try:
+            cli.build_snapshot(self.conn, include_all=True)
+        finally:
+            self.conn.set_trace_callback(None)
+        # The grouped newest-prompt scans of any kind (the non-injected
+        # one behind note release filters on prompt_kind and is separate).
+        grouped_any_prompt = [
+            sql for sql in statements
+            if "event='UserPromptSubmit'" in sql and "GROUP BY" in sql
+            and "<> 'injected'" not in sql
+        ]
+        self.assertEqual(len(grouped_any_prompt), 1, grouped_any_prompt)
+
+
 if __name__ == "__main__":
     import unittest
 
