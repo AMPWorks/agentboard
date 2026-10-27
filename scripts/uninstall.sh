@@ -35,7 +35,7 @@ AGENTBOARD_BUNDLE_ID="io.github.agentboard"
 AGENTBOARD_DATA_FILES=(agentboard.db agentboard.db-wal agentboard.db-shm
   hook-errors.log install-manifest.json config.json
   agentboard.log agentboard.log.1)
-AGENTBOARD_DATA_DIRS=(inbox reparse-locks)
+AGENTBOARD_DATA_DIRS=(inbox reparse-locks usage)
 
 NO_HOOKS=0
 NO_APP=0
@@ -283,8 +283,9 @@ _purge_target_is_safe() {
 # of AGENTBOARD_DATA_DIRS), then rmdir's $1 if that leaves it empty --
 # never rm -rf, since AgentBoard isn't the only thing that may have put
 # files there: links.py's ingest_inbox only ever writes/reads inbox/*.json
-# drop files, and hook.py's _reparse_marker_path only ever writes
-# reparse-locks/<tool>-<session_id>.marker. Anything else in $1 (a user's
+# drop files, hook.py's _reparse_marker_path only ever writes
+# reparse-locks/<tool>-<session_id>.marker, and usage.py only ever
+# reads/writes usage/<source>.json plan-usage files. Anything else in $1 (a user's
 # own file, say) is left alone, with a warning, and so is $1 itself.
 _purge_known_glob() {
   local dir="$1" pattern="$2" entry
@@ -310,8 +311,8 @@ _purge_known_glob() {
 # AGENTBOARD_HOME at -- it could be their home directory, a project, or
 # anything else. Removes only the specific files AgentBoard itself creates
 # directly inside it (AGENTBOARD_DATA_FILES above) individually, and only
-# the specific file shapes it creates inside inbox/ and reparse-locks/
-# (_purge_known_glob above) -- never rm -rf either of those two dirs
+# the specific file shapes it creates inside inbox/, reparse-locks/ and
+# usage/ (_purge_known_glob above) -- never rm -rf any of those dirs
 # wholesale, since a user could have dropped an unrelated file into one.
 # Finally rmdir's the top-level directory -- never rm -rf -- and only if
 # that leaves it empty.
@@ -325,6 +326,7 @@ safe_purge_data_home() {
   done
   _purge_known_glob "$dir/inbox" "*.json"
   _purge_known_glob "$dir/reparse-locks" "*.marker"
+  _purge_known_glob "$dir/usage" "*.json"
 
   if rmdir "$dir" 2>/dev/null; then
     return 0

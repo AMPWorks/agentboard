@@ -88,6 +88,18 @@ struct SessionRowView: View {
                         .lineLimit(1)
                     Spacer(minLength: 4)
                     PRLinkButtons(session: session, onOverflow: showDetail)
+                    // Model and context: always the rightmost item. The branch
+                    // truncates before it does; SessionModelTag caps the model
+                    // part, so this stays short.
+                    if let tag = SessionModelTag.text(session) {
+                        Text(tag)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .layoutPriority(1)
+                            .help(SessionModelTag.help(session))
+                    }
                 }
                 if let reason = session.waitingReason, !reason.isEmpty {
                     Text(reason)

@@ -262,6 +262,12 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     /// The latest turn was injected right after a Stop that listed
     /// background tasks: it reports a background task's result back.
     var turnEndsBackgroundWait: Bool = false
+    /// The model the session last ran (full id, e.g. `claude-opus-5-5`),
+    /// its context size in tokens, and when that size was measured. Missing
+    /// from older CLIs and unknown until a SessionStart or Stop reports them.
+    var model: String?
+    var contextTokens: Int?
+    var contextAt: String?
 
     var id: String { key }
 
@@ -290,6 +296,9 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         case turnPromptKind = "turn_prompt_kind"
         case backgroundTasks = "background_tasks"
         case turnEndsBackgroundWait = "turn_ends_background_wait"
+        case model
+        case contextTokens = "context_tokens"
+        case contextAt = "context_at"
     }
 
     /// The CLI emits `null` for cwd/project/resume_command when a session's
@@ -333,6 +342,10 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         backgroundTasks = try c.decodeIfPresent(Int.self, forKey: .backgroundTasks)
         turnEndsBackgroundWait = try c.decodeIfPresent(Bool.self, forKey: .turnEndsBackgroundWait)
             ?? false
+        // Optional extras: a malformed value drops the field, not the row.
+        model = (try? c.decodeIfPresent(String.self, forKey: .model)) ?? nil
+        contextTokens = (try? c.decodeIfPresent(Int.self, forKey: .contextTokens)) ?? nil
+        contextAt = (try? c.decodeIfPresent(String.self, forKey: .contextAt)) ?? nil
     }
 
     static func == (lhs: Session, rhs: Session) -> Bool {
@@ -341,6 +354,9 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
             && lhs.title == rhs.title && lhs.statusText == rhs.statusText
             && lhs.waitingReason == rhs.waitingReason && lhs.links == rhs.links
             && lhs.turnFinishedAt == rhs.turnFinishedAt
+            // The post-Stop re-parse updates these without touching updatedAt.
+            && lhs.model == rhs.model && lhs.contextTokens == rhs.contextTokens
+            && lhs.contextAt == rhs.contextAt
     }
     func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
@@ -348,6 +364,7 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     var startedDate: Date? { ISO8601DateParsing.date(from: startedAt) }
     var endedDate: Date? { endedAt.flatMap(ISO8601DateParsing.date(from:)) }
     var turnFinishedDate: Date? { turnFinishedAt.flatMap(ISO8601DateParsing.date(from:)) }
+    var contextDate: Date? { contextAt.flatMap(ISO8601DateParsing.date(from:)) }
 
     var toolBadge: String { tool == "codex" ? "X" : "C" }
 
@@ -368,13 +385,144 @@ struct Snapshot: Codable, Sendable, Equatable {
     var generatedAt: String
     var counts: Counts
     var sessions: [Session]
+    /// Plan-usage sources (Claude's local cache, `usage/*.json` drop files,
+    /// Codex rollouts); empty when there is none or the CLI is older.
+    var usage: [UsageSource] = []
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
-        case counts, sessions
+        case counts, sessions, usage
     }
 
     static let empty = Snapshot(generatedAt: "", counts: Counts(), sessions: [])
+}
+
+extension Snapshot {
+    /// Declared in an extension so the memberwise init stays. `usage` is
+    /// decoded leniently, source by source: it comes from files other tools
+    /// write, and a surprise in one must never drop the others or fail the
+    /// whole snapshot and blank the board.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        generatedAt = try c.decode(String.self, forKey: .generatedAt)
+        counts = try c.decode(Counts.self, forKey: .counts)
+        sessions = try c.decode([Session].self, forKey: .sessions)
+        usage = (try? c.decodeIfPresent(LenientList<UsageSource>.self, forKey: .usage))?.items ?? []
+    }
+}
+
+/// A JSON array decoded element by element, dropping any element that
+/// fails instead of failing the array.
+struct LenientList<Element: Decodable>: Decodable {
+    var items: [Element]
+
+    /// Accepts any value, so a failed element can be stepped over.
+    private struct Skip: Decodable {
+        init(from decoder: Decoder) throws {}
+    }
+
+    init(from decoder: Decoder) throws {
+        var c = try decoder.unkeyedContainer()
+        var items: [Element] = []
+        while !c.isAtEnd {
+            let index = c.currentIndex
+            if (try? c.decodeNil()) == true { continue }
+            if let item = try? c.decode(Element.self) {
+                items.append(item)
+            } else {
+                _ = try? c.decode(Skip.self)
+            }
+            // Never spin on an element the decoder refuses to step over.
+            if c.currentIndex == index { break }
+        }
+        self.items = items
+    }
+}
+
+/// One plan-usage window, labelled by its source (`5h`, `7d`, `spend
+/// limit`, `monthly`, ...); nothing here knows a window's name.
+struct UsageWindow: Codable, Sendable, Equatable {
+    var label: String
+    var usedPercentage: Double
+    var resetsAt: String?
+    var usedUsd: Double?
+    var limitUsd: Double?
+    var period: String?
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case usedPercentage = "used_percentage"
+        case resetsAt = "resets_at"
+        case usedUsd = "used_usd"
+        case limitUsd = "limit_usd"
+        case period
+    }
+
+    init(label: String, usedPercentage: Double, resetsAt: String? = nil, usedUsd: Double? = nil,
+         limitUsd: Double? = nil, period: String? = nil) {
+        self.label = label
+        self.usedPercentage = usedPercentage
+        self.resetsAt = resetsAt
+        self.usedUsd = usedUsd
+        self.limitUsd = limitUsd
+        self.period = period
+    }
+
+    /// `label` and `used_percentage` are required (a window without them
+    /// fails and is dropped by `UsageSource`); every other field degrades
+    /// to nil.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        label = try c.decode(String.self, forKey: .label)
+        usedPercentage = try c.decode(Double.self, forKey: .usedPercentage)
+        resetsAt = (try? c.decodeIfPresent(String.self, forKey: .resetsAt)) ?? nil
+        usedUsd = (try? c.decodeIfPresent(Double.self, forKey: .usedUsd)) ?? nil
+        limitUsd = (try? c.decodeIfPresent(Double.self, forKey: .limitUsd)) ?? nil
+        period = (try? c.decodeIfPresent(String.self, forKey: .period)) ?? nil
+    }
+
+    var resetsDate: Date? { resetsAt.flatMap(ISO8601DateParsing.date(from:)) }
+}
+
+/// One entry of the snapshot's `usage` list (see SPEC.md): a source such as
+/// Claude's local cache, Codex, or any tool's `usage/<source>.json`.
+struct UsageSource: Codable, Sendable, Equatable {
+    var source: String
+    var label: String
+    var updatedAt: String?
+    /// Where the numbers were read from, for the tooltip.
+    var origin: String?
+    var windows: [UsageWindow]
+
+    enum CodingKeys: String, CodingKey {
+        case source, label
+        case updatedAt = "updated_at"
+        case origin, windows
+    }
+
+    init(source: String, label: String? = nil, updatedAt: String? = nil, origin: String? = nil,
+         windows: [UsageWindow]) {
+        self.source = source
+        self.label = label ?? source
+        self.updatedAt = updatedAt
+        self.origin = origin
+        self.windows = windows
+    }
+
+    /// `source` is required; `label` falls back to it; windows decode one
+    /// by one, dropping any that fails.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        source = try c.decode(String.self, forKey: .source)
+        let label = (try? c.decodeIfPresent(String.self, forKey: .label)) ?? nil
+        self.label = (label?.isEmpty == false ? label : nil) ?? source
+        updatedAt = (try? c.decodeIfPresent(String.self, forKey: .updatedAt)) ?? nil
+        origin = (try? c.decodeIfPresent(String.self, forKey: .origin)) ?? nil
+        windows = (try? c.decodeIfPresent(LenientList<UsageWindow>.self, forKey: .windows))?
+            .items ?? []
+    }
+
+    var updatedDate: Date? { updatedAt.flatMap(ISO8601DateParsing.date(from:)) }
 }
 
 /// Parses the ISO8601 timestamps the CLI emits, tolerating fractional seconds.

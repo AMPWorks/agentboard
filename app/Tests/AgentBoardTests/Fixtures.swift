@@ -33,7 +33,11 @@ enum Fixtures {
         snapshot([session(key, state, alive: alive, extra: extra)]).sessions[0]
     }
 
-    static func snapshot(_ sessions: [[String: Any]], counts: [String: Int]? = nil) -> Snapshot {
+    /// `usage` is the snapshot's top-level `usage` JSON value, if any
+    /// (normally a list of source objects).
+    static func snapshot(
+        _ sessions: [[String: Any]], counts: [String: Int]? = nil, usage: Any? = nil
+    ) -> Snapshot {
         // `Counts` decodes every key, so start from all-zero.
         var all: [String: Int] = [:]
         for key in ["needs_you", "interrupted", "running", "review", "unconcluded", "snoozed", "done"] {
@@ -47,11 +51,12 @@ enum Fixtures {
                 if all[state] != nil { all[state]! += 1 }
             }
         }
-        let json: [String: Any] = [
+        var json: [String: Any] = [
             "generated_at": "2026-10-15T00:00:00Z",
             "counts": all,
             "sessions": sessions,
         ]
+        if let usage { json["usage"] = usage }
         let data = try! JSONSerialization.data(withJSONObject: json)
         return try! JSONDecoder().decode(Snapshot.self, from: data)
     }

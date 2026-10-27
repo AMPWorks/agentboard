@@ -22,6 +22,7 @@ from . import links
 from . import notes as notes_mod
 from . import reconcile
 from . import titles
+from . import usage as usage_mod
 
 STATES = ["needs_you", "interrupted", "running", "review", "unconcluded", "snoozed", "done"]
 
@@ -322,6 +323,9 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
         "can_focus": _can_focus(session),
         "resume_command": _resume_command(tool, cwd, session_id),
         "status_text": _session_status_text(session, now),
+        "model": session.get("model"),
+        "context_tokens": session.get("context_tokens"),
+        "context_at": session.get("context_at"),
         "links": [
             {
                 "kind": link["kind"],
@@ -425,7 +429,22 @@ def build_snapshot(conn, include_all=False, now=None):
         "generated_at": _now_iso(now),
         "counts": counts,
         "sessions": entries,
+        # Plan usage sources (local files only); empty when there is none.
+        "usage": _usage_sources(home, now),
     }
+
+
+def _usage_sources(home, now):
+    """The snapshot's usage list. The gauge is optional and its files come
+    from other tools, so no failure in reading them may take down the
+    snapshot the whole board depends on: anything unexpected yields []."""
+    try:
+        return usage_mod.read_usage_sources(
+            home, Path.home() / ".claude" / "rate-limits.json", now=now
+        )
+    except Exception as exc:
+        diag.debug("usage", "sources_failed", exc=type(exc).__name__)
+        return []
 
 
 def cmd_snapshot(args):
@@ -441,7 +460,7 @@ def cmd_snapshot(args):
     return 0
 
 
-def _print_snapshot_table(snapshot):
+def _print_snapshot_table(snapshot, now=None):
     header = f"{'STATE':<12} {'TOOL':<7} {'PROJECT':<24} {'BRANCH':<24} {'TITLE'}"
     print(header)
     for entry in snapshot["sessions"]:
@@ -450,6 +469,33 @@ def _print_snapshot_table(snapshot):
             f"{(entry['project'] or ''):<24} {(entry['branch'] or ''):<24} "
             f"{entry['title']}"
         )
+    line = _usage_table_line(snapshot.get("usage"), now=now)
+    if line:
+        print(line)
+
+
+def _usage_table_line(usage, now=None):
+    """`usage: Claude 5h 57% · 7d 70%; Codex 5h 12%` for the table output,
+    or None. Like the app's line (UsageLine): each source by its label, its
+    windows in the source's order, and a window whose resets_at has passed
+    left out, since its percentage belongs to a window that already reset."""
+    if not isinstance(usage, list):
+        return None
+    now = now or datetime.now(timezone.utc)
+    groups = []
+    for source in usage:
+        parts = []
+        for window in source.get("windows") or []:
+            resets_at = reconcile.parse_ts(window.get("resets_at"))
+            if resets_at is not None and resets_at <= now:
+                continue
+            parts.append(f"{window['label']} {window['used_percentage']:g}%")
+        if parts:
+            groups.append(f"{source.get('label') or source.get('source')} "
+                          + " \u00b7 ".join(parts))
+    if not groups:
+        return None
+    return "usage: " + "; ".join(groups)
 
 
 # -- mark ---------------------------------------------------------------------
@@ -556,6 +602,16 @@ def cmd_link(args):
 
 
 def cmd_status(args):
+    if args.text is None and args.model is None and args.context_tokens is None:
+        _report("error", "status",
+                "agentboard status: give --text, --model or --context-tokens")
+        return 2
+    if args.model is not None and not args.model.strip():
+        _report("error", "status", "agentboard status: --model must not be empty")
+        return 2
+    if args.ttl is not None and args.text is None:
+        _report("error", "status", "agentboard status: --ttl applies to --text; give both")
+        return 2
     conn = db.connect()
     try:
         resolved = links.resolve_session(conn, explicit=args.session)
@@ -568,11 +624,14 @@ def cmd_status(args):
         if args.ttl is not None:
             until = _now_iso(datetime.now(timezone.utc) + timedelta(minutes=args.ttl))
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute(
-            "UPDATE sessions SET status_text=?, status_until=? "
-            "WHERE tool=? AND session_id=?",
-            (args.text, until, tool, session_id),
-        )
+        if args.text is not None:
+            conn.execute(
+                "UPDATE sessions SET status_text=?, status_until=? "
+                "WHERE tool=? AND session_id=?",
+                (args.text, until, tool, session_id),
+            )
+        links.record_model_context(conn, tool, session_id, model=args.model,
+                                   context_tokens=args.context_tokens, now_iso=_now_iso())
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -2734,6 +2793,16 @@ def cmd_logs(args, run=subprocess.run, now=None):
 
 # -- argparse wiring --------------------------------------------------------------
 
+def _non_negative_int(value):
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    if not 0 <= number < 2 ** 63:
+        raise argparse.ArgumentTypeError(f"must be 0 or more and below 2**63: {value!r}")
+    return number
+
+
 def build_parser():
     # allow_abbrev=False on the parser and every subparser (add_parser does
     # not inherit it): an abbreviated flag (`--not` for `--note`) would
@@ -2781,9 +2850,13 @@ def build_parser():
     p.add_argument("--session", default=None, help="TOOL:ID, auto-resolved if omitted")
     p.set_defaults(func=cmd_link)
 
-    p = sub.add_parser("status")
-    p.add_argument("--text", required=True)
-    p.add_argument("--ttl", type=float, default=None, help="minutes until this status expires")
+    p = sub.add_parser("status", help="set a session's status text, model or context size")
+    p.add_argument("--text", default=None, help="current-activity label shown as the row's title")
+    p.add_argument("--ttl", type=float, default=None, help="minutes until the --text status expires (needs --text)")
+    p.add_argument("--model", default=None,
+                   help="the model the session runs (any id; shown on its row)")
+    p.add_argument("--context-tokens", dest="context_tokens", type=_non_negative_int,
+                   default=None, help="the session's current context size in tokens")
     p.add_argument("--session", default=None, help="TOOL:ID, auto-resolved if omitted")
     p.set_defaults(func=cmd_status)
 

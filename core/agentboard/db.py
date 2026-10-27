@@ -6,7 +6,7 @@ from pathlib import Path
 
 DB_FILENAME = "agentboard.db"
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _MIGRATIONS = {
     1: """
@@ -148,6 +148,15 @@ _MIGRATIONS = {
        AND (ltrim(text, ' ' || char(9, 10, 11, 12, 13)) GLOB '<task-notification>*'
             OR ltrim(text, ' ' || char(9, 10, 11, 12, 13)) GLOB '<agent-message*'
             OR ltrim(text, ' ' || char(9, 10, 11, 12, 13)) GLOB '<cross-session-message*');
+    """,
+    # Usage visibility: a session records the model it last ran and its
+    # context size in tokens, with when that size was measured (the
+    # transcript line's or the hook event's time), so the app can say how
+    # old the number is.
+    8: """
+    ALTER TABLE sessions ADD COLUMN model TEXT;
+    ALTER TABLE sessions ADD COLUMN context_tokens INTEGER;
+    ALTER TABLE sessions ADD COLUMN context_at TEXT;
     """,
 }
 

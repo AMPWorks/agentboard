@@ -1106,6 +1106,178 @@ def _fake_ps_chain(hops):
     return fake_run
 
 
+class SessionStartUsageTests(AgentBoardTestCase):
+    """A parent SessionStart stores the model and, on resume/fork, the
+    context size; any other parent event that names a model stores it."""
+
+    def _send(self, event, tool="claude", ts="2026-10-24T05:00:00.000000Z", **fields):
+        payload = {"session_id": "s1", "cwd": "/tmp", "hook_event_name": event, **fields}
+        with mock.patch("agentboard.hook.subprocess.run") as run, \
+             mock.patch("agentboard.hook.subprocess.Popen"), \
+             mock.patch("agentboard.hook._now_iso", return_value=ts):
+            run.return_value = mock.Mock(returncode=0, stdout="")
+            hook.process_payload(self.conn, tool, payload)
+
+    def _row(self, tool="claude"):
+        return self.conn.execute(
+            "SELECT * FROM sessions WHERE tool=? AND session_id='s1'", (tool,)
+        ).fetchone()
+
+    def test_startup_with_model_stores_it(self):
+        self._send("SessionStart", source="startup", model="claude-opus-5-5")
+        row = self._row()
+        self.assertEqual(row["model"], "claude-opus-5-5")
+        self.assertIsNone(row["context_tokens"])
+        self.assertIsNone(row["context_at"])
+
+    def test_resume_without_model_keeps_the_stored_model(self):
+        self._send("SessionStart", source="startup", model="claude-opus-5-5")
+        self._send("Stop", ts="2026-10-24T05:01:00.000000Z", last_assistant_message="done")
+        self._send("SessionStart", ts="2026-10-24T05:02:00.000000Z", source="resume")
+        self.assertEqual(self._row()["model"], "claude-opus-5-5")
+
+    def test_later_model_replaces_the_stored_one(self):
+        self._send("SessionStart", source="startup", model="claude-opus-5-5")
+        self._send("SessionStart", ts="2026-10-24T05:02:00.000000Z", source="compact",
+                   model="claude-fable-5-1")
+        self.assertEqual(self._row()["model"], "claude-fable-5-1")
+
+    def test_resume_with_context_tokens_stores_size_and_time(self):
+        self._send("SessionStart", source="startup", model="claude-opus-5-5")
+        late = "2026-10-24T06:00:00.123456Z"
+        self._send("SessionStart", ts=late, source="resume", context_tokens=308011)
+        row = self._row()
+        self.assertEqual(row["context_tokens"], 308011)
+        self.assertEqual(row["context_at"], late)
+        self.assertEqual(row["model"], "claude-opus-5-5")
+        extra = json.loads(self.conn.execute(
+            "SELECT extra FROM events ORDER BY id DESC LIMIT 1").fetchone()[0])
+        self.assertEqual(extra["context_tokens"], 308011)
+
+    def test_compact_without_size_clears_context_until_the_next_reply(self):
+        from agentboard import backfill
+        self._send("SessionStart", source="resume", context_tokens=308011,
+                   ts="2026-10-24T05:00:00.000000Z")
+        compact_at = "2026-10-24T05:10:00.123456Z"
+        self._send("SessionStart", ts=compact_at, source="compact", model="claude-opus-5-5")
+        row = self._row()
+        self.assertIsNone(row["context_tokens"])
+        self.assertEqual(row["context_at"], compact_at)
+        self.assertEqual(row["model"], "claude-opus-5-5")
+
+        # The re-parse sees only the pre-compact assistant line: it keeps NULL.
+        path = self.tmp_path / "s1.jsonl"
+        usage = {"input_tokens": 8, "cache_read_input_tokens": 300000,
+                 "cache_creation_input_tokens": 8003, "output_tokens": 50}
+        lines = [
+            {"type": "user", "timestamp": "2026-10-24T05:00:30.000Z",
+             "message": {"role": "user", "content": "go"}},
+            {"type": "assistant", "timestamp": "2026-10-24T05:09:00.000Z",
+             "message": {"role": "assistant", "model": "claude-opus-5-5", "usage": usage,
+                         "content": [{"type": "text", "text": "done"}]}},
+        ]
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+        backfill.backfill_single_session(self.conn, "claude", "s1", transcript_path=str(path))
+        row = self._row()
+        self.assertIsNone(row["context_tokens"])
+        self.assertEqual(row["context_at"], compact_at)
+
+        # The first reply after the compact measures it again.
+        lines.append({"type": "assistant", "timestamp": "2026-10-24T05:11:00.000Z",
+                      "message": {"role": "assistant", "model": "claude-opus-5-5",
+                                  "usage": dict(usage, cache_read_input_tokens=40000),
+                                  "content": [{"type": "text", "text": "after"}]}})
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+        backfill.backfill_single_session(self.conn, "claude", "s1", transcript_path=str(path))
+        row = self._row()
+        self.assertEqual(row["context_tokens"], 48011)
+        self.assertEqual(row["context_at"], "2026-10-24T05:11:00.000Z")
+
+    def test_compact_with_size_stores_it(self):
+        self._send("SessionStart", source="resume", context_tokens=308011)
+        self._send("SessionStart", ts="2026-10-24T05:10:00.000000Z", source="compact",
+                   context_tokens=40000)
+        self.assertEqual(self._row()["context_tokens"], 40000)
+
+    def test_non_compact_session_start_without_size_keeps_context(self):
+        self._send("SessionStart", source="resume", context_tokens=308011)
+        self._send("SessionStart", ts="2026-10-24T05:10:00.000000Z", source="startup",
+                   model="claude-opus-5-5")
+        self.assertEqual(self._row()["context_tokens"], 308011)
+
+    def test_subagent_session_start_writes_neither(self):
+        self._send("SessionStart", source="startup", model="claude-opus-5-5")
+        self._send("SessionStart", ts="2026-10-24T05:02:00.000000Z", agent_id="sub-1",
+                   model="claude-haiku-4-5", context_tokens=1000)
+        row = self._row()
+        self.assertEqual(row["model"], "claude-opus-5-5")
+        self.assertIsNone(row["context_tokens"])
+
+    def test_malformed_values_are_ignored(self):
+        for bad in ("308011", 12.5, True, -1, None, [1]):
+            with self.subTest(context_tokens=bad):
+                self.conn.execute("DELETE FROM sessions")
+                self._send("SessionStart", source="resume", context_tokens=bad)
+                row = self._row()
+                self.assertIsNone(row["context_tokens"])
+                self.assertIsNone(row["context_at"])
+        for bad in ("", "   ", 5, None, {"id": "x"}):
+            with self.subTest(model=bad):
+                self.conn.execute("DELETE FROM sessions")
+                self._send("SessionStart", source="startup", model=bad)
+                self.assertIsNone(self._row()["model"])
+
+    def test_zero_context_tokens_is_valid(self):
+        self._send("SessionStart", source="fork", context_tokens=0)
+        self.assertEqual(self._row()["context_tokens"], 0)
+
+    def test_other_events_never_write_context(self):
+        self._send("UserPromptSubmit", prompt="go", context_tokens=5)
+        self._send("Stop", ts="2026-10-24T05:01:00.000000Z", last_assistant_message="done",
+                   context_tokens=5)
+        row = self._row()
+        self.assertIsNone(row["model"])
+        self.assertIsNone(row["context_tokens"])
+
+    def test_any_parent_event_that_names_a_model_records_it(self):
+        # Codex sends `model` on every hook event (codex-rs hooks/src/schema.rs:
+        # SessionStart, UserPromptSubmit, Stop, PreToolUse, ...), so a /model
+        # switch shows up at the next event; the rule is tool-agnostic.
+        self._send("SessionStart", tool="codex", source="startup", model="gpt-5")
+        self._send("UserPromptSubmit", tool="codex", ts="2026-10-24T05:01:00.000000Z",
+                   prompt="go", model="gpt-5-codex", turn_id="t1")
+        self.assertEqual(self._row("codex")["model"], "gpt-5-codex")
+        self._send("Stop", tool="codex", ts="2026-10-24T05:02:00.000000Z",
+                   last_assistant_message="done", model="gpt-5.1-codex", turn_id="t1")
+        self.assertEqual(self._row("codex")["model"], "gpt-5.1-codex")
+        self._send("Stop", tool="codex", ts="2026-10-24T05:03:00.000000Z",
+                   last_assistant_message="again", turn_id="t2")
+        self.assertEqual(self._row("codex")["model"], "gpt-5.1-codex")
+
+    def test_subagent_events_never_write_the_model(self):
+        self._send("SessionStart", source="startup", model="claude-opus-5-5")
+        self._send("SubagentStart", ts="2026-10-24T05:01:00.000000Z", agent_id="a1",
+                   agent_type="Explore", model="claude-haiku-4-5")
+        self._send("PreToolUse", ts="2026-10-24T05:02:00.000000Z", agent_id="a1",
+                   tool_name="Read", tool_input={}, model="claude-haiku-4-5")
+        self._send("SubagentStop", ts="2026-10-24T05:03:00.000000Z", agent_id="a1",
+                   model="claude-haiku-4-5")
+        self.assertEqual(self._row()["model"], "claude-opus-5-5")
+
+    def test_codex_session_start_with_and_without_model(self):
+        self._send("SessionStart", tool="codex", source="startup", model="gpt-5-codex")
+        self.assertEqual(self._row("codex")["model"], "gpt-5-codex")
+        self._send("SessionStart", tool="codex", ts="2026-10-24T05:02:00.000000Z",
+                   source="resume")
+        row = self._row("codex")
+        self.assertEqual(row["model"], "gpt-5-codex")
+        self.assertIsNone(row["context_tokens"])
+
+    def test_codex_session_start_without_model_leaves_it_null(self):
+        self._send("SessionStart", tool="codex", source="startup")
+        self.assertIsNone(self._row("codex")["model"])
+
+
 class HookNotesTests(AgentBoardTestCase):
     MILESTONE = (
         "Opened PR #31 for the fade task and pushed the follow-up commit. " * 8

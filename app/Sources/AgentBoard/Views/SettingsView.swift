@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage(AgentBoardCLI.useFixtureDefaultsKey) private var useFixture: Bool = false
     @AppStorage(AgentBoardCLI.fixturePathDefaultsKey) private var fixturePath: String = ""
     @AppStorage(CLIRunner.verboseLoggingKey) private var verboseLogging: Bool = false
+    @AppStorage(SettingsKeys.showPlanUsage) private var showPlanUsage: Bool = true
     @State private var launchAtLogin: Bool = false
 
     var body: some View {
@@ -76,6 +77,8 @@ struct SettingsView: View {
                         LaunchAtLogin.setEnabled(newValue)
                     }
                     .help("Start AgentBoard automatically when you log in to this Mac")
+                Toggle("Show plan usage", isOn: $showPlanUsage)
+                    .help("Show each plan-usage source (how much of each limit window is used, and when it resets) in the popover footer and the dashboard sidebar, whenever a source has numbers")
             } header: {
                 header("General", topic: .settings)
             }

@@ -347,12 +347,91 @@ class InboxTests(AgentBoardTestCase):
         ).fetchone()
         self.assertEqual(session_row["status_text"], "working on it")
 
+    def _session(self, **cols):
+        cols = {"tool": "claude", "session_id": "s1", "cwd": "/tmp/proj", "origin": "hook",
+                "updated_at": "2026-01-01T00:00:00.000000Z", **cols}
+        self.conn.execute(
+            f"INSERT INTO sessions({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+            list(cols.values()))
+
+    def _drop(self, data):
+        inbox = links.inbox_dir(self.agentboard_home)
+        inbox.mkdir(parents=True, exist_ok=True)
+        (inbox / "m.json").write_text(json.dumps({"session": "claude:s1", **data}))
+        return links.ingest_inbox(self.conn, self.agentboard_home, "2026-01-01T00:10:00.000000Z")
+
+    def _model_context(self):
+        row = self.conn.execute(
+            "SELECT model, context_tokens, context_at, status_text FROM sessions "
+            "WHERE session_id='s1'").fetchone()
+        return tuple(row)
+
+    def test_inbox_drop_reports_model_and_context(self):
+        self._session()
+        self.assertEqual(self._drop({"model": "acme-large-2", "context_tokens": 51200}), 1)
+        self.assertEqual(self._model_context(),
+                         ("acme-large-2", 51200, "2026-01-01T00:10:00.000000Z", None))
+
+    def test_inbox_context_size_beyond_sqlite_integer_is_ignored(self):
+        self._session()
+        self.assertEqual(
+            self._drop({"model": "acme-large-2", "context_tokens": 2 ** 63}), 1)
+        model, tokens, _, _ = self._model_context()
+        self.assertEqual((model, tokens), ("acme-large-2", None))
+
+    def test_inbox_context_follows_the_freshest_wins_rule(self):
+        self._session(model="m1", context_tokens=900, context_at="2026-01-01T00:05:00.000Z")
+        self._drop({"context_tokens": 100, "context_at": "2026-01-01T00:04:00Z"})
+        self.assertEqual(self._model_context()[1:3], (900, "2026-01-01T00:05:00.000Z"))
+        self._drop({"context_tokens": 100, "context_at": "2026-01-01T00:06:00Z"})
+        self.assertEqual(self._model_context()[1:3], (100, "2026-01-01T00:06:00Z"))
+        # A bad context_at means "now" (the ingest time).
+        self._drop({"context_tokens": 7, "context_at": "soon"})
+        self.assertEqual(self._model_context()[1:3], (7, "2026-01-01T00:10:00.000000Z"))
+
+    def test_inbox_future_context_at_is_stored_as_the_ingest_time(self):
+        self._session()
+        self._drop({"context_tokens": 51200, "context_at": "2099-01-01T00:00:00Z"})
+        self.assertEqual(self._model_context()[1:3], (51200, "2026-01-01T00:10:00.000000Z"))
+        # So a later measurement still gets in.
+        links.record_model_context(self.conn, "claude", "s1", context_tokens=7000,
+                                   now_iso="2026-01-01T00:11:00.000000Z")
+        self.assertEqual(self._model_context()[1:3], (7000, "2026-01-01T00:11:00.000000Z"))
+
+    def test_a_stored_future_context_at_is_replaced(self):
+        self._session(context_tokens=900, context_at="2099-01-01T00:00:00Z")
+        self._drop({"context_tokens": 100, "context_at": "2026-01-01T00:04:00Z"})
+        self.assertEqual(self._model_context()[1:3], (100, "2026-01-01T00:04:00Z"))
+
+    def test_inbox_ignores_invalid_model_and_context(self):
+        self._session(model="m1", context_tokens=900, context_at="2026-01-01T00:05:00.000Z")
+        for bad in ({"model": ""}, {"model": 5}, {"model": "  "}, {"context_tokens": -1},
+                    {"context_tokens": True}, {"context_tokens": "12"},
+                    {"context_tokens": 1.5}):
+            with self.subTest(bad=bad):
+                self.assertEqual(self._drop(bad), 1)
+                self.assertEqual(self._model_context()[:3],
+                                 ("m1", 900, "2026-01-01T00:05:00.000Z"))
+
     def test_ingest_inbox_deletes_unparseable_file(self):
         inbox = links.inbox_dir(self.agentboard_home)
         inbox.mkdir(parents=True)
         (inbox / "bad.json").write_text("not json")
         links.ingest_inbox(self.conn, self.agentboard_home, "2026-01-01T00:00:00.000000Z")
         self.assertEqual(list(inbox.glob("*.json")), [])
+
+    def test_ingest_inbox_consumes_a_deeply_nested_file(self):
+        # json.loads raises RecursionError on it; the drop is consumed like
+        # any unparseable one instead of crashing every snapshot.
+        self._session()
+        inbox = links.inbox_dir(self.agentboard_home)
+        inbox.mkdir(parents=True)
+        (inbox / "a-deep.json").write_text("[" * 20000 + "]" * 20000)
+        (inbox / "b-ok.json").write_text(json.dumps({"session": "claude:s1", "status": "ok"}))
+        count = links.ingest_inbox(self.conn, self.agentboard_home, "2026-01-01T00:00:00.000000Z")
+        self.assertEqual(count, 1)
+        self.assertEqual(list(inbox.glob("*.json")), [])
+        self.assertEqual(self._model_context()[3], "ok")
 
     def test_ingest_inbox_skips_malformed_shapes_without_raising(self):
         # Valid JSON that isn't the documented shape -- a top-level list, a

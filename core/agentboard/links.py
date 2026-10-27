@@ -540,6 +540,62 @@ def record_external_notes(conn, tool, session_id, raw_notes, source, now_iso) ->
     return recorded
 
 
+MODEL_MAX_CHARS = 200
+# sqlite INTEGER is signed 64-bit; a larger size would raise OverflowError.
+CONTEXT_TOKENS_LIMIT = 2 ** 63
+
+
+def record_model_context(conn, tool, session_id, model=None, context_tokens=None,
+                         context_at=None, now_iso=None) -> bool:
+    """Record a session's model and/or context size reported from outside
+    (`agentboard status --model/--context-tokens`, an inbox drop's `model`,
+    `context_tokens` and optional `context_at`), with the rule the hook and
+    backfill use: a model replaces the stored one; a context size (with its
+    measurement time, default now) is written only when that time is at
+    least as new as the stored `context_at`. A time later than now (a
+    skewed clock, a bogus drop) is clamped to now, and a stored one later
+    than now is replaced by any new size, so no future time can freeze the
+    context. Invalid values are ignored. True when anything was given and
+    valid."""
+    if isinstance(model, str) and model.strip():
+        model = model.strip()[:MODEL_MAX_CHARS]
+    else:
+        model = None
+    if isinstance(context_tokens, bool) or not isinstance(context_tokens, int) \
+            or not 0 <= context_tokens < CONTEXT_TOKENS_LIMIT:
+        context_tokens = None
+    if model is not None:
+        conn.execute(
+            "UPDATE sessions SET model=? WHERE tool=? AND session_id=?",
+            (model, tool, session_id),
+        )
+    if context_tokens is not None:
+        now_iso = now_iso or _now_utc_iso()
+        now = _ts(now_iso)
+        measured = _ts(context_at)
+        at = now_iso
+        if measured is not None and (now is None or measured <= now):
+            at = context_at
+        row = conn.execute(
+            "SELECT context_at FROM sessions WHERE tool=? AND session_id=?",
+            (tool, session_id),
+        ).fetchone()
+        stored = _ts(row["context_at"]) if row is not None else None
+        new_at = _ts(at)
+        if stored is None or (new_at is not None and new_at >= stored) \
+                or (now is not None and stored > now):
+            conn.execute(
+                "UPDATE sessions SET context_tokens=?, context_at=? "
+                "WHERE tool=? AND session_id=?",
+                (context_tokens, at, tool, session_id),
+            )
+    return model is not None or context_tokens is not None
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 # -- session resolution -----------------------------------------------------------
 
 def resolve_session_from_env(conn):
@@ -643,7 +699,7 @@ def ingest_inbox(conn, home: Path, now_iso: str) -> int:
     for path in sorted(directory.glob("*.json")):
         try:
             data = json.loads(path.read_text())
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             diag.warn("links", "inbox_drop", file=path.name, reason="unreadable", error=str(exc))
             path.unlink(missing_ok=True)
             continue
@@ -675,6 +731,9 @@ def ingest_inbox(conn, home: Path, now_iso: str) -> int:
                         "WHERE tool=? AND session_id=?",
                         (status_text, tool, session_id),
                     )
+                record_model_context(conn, tool, session_id, model=data.get("model"),
+                                     context_tokens=data.get("context_tokens"),
+                                     context_at=data.get("context_at"), now_iso=now_iso)
                 count += 1
                 diag.debug("links", "inbox", file=path.name, session=f"{tool}:{session_id}")
             else:

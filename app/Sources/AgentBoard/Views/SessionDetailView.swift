@@ -136,6 +136,14 @@ struct SessionDetailView: View {
                 metadataRow(label: "Ended", value: RelativeTime.string(from: endedAt))
             }
             metadataRow(label: "Alive", value: session.alive ? "Yes" : "No")
+            if let model = session.model, !model.isEmpty {
+                metadataRow(label: "Model", value: model)
+                    .help("Shown on the row as \(ModelName.short(model)); reported by the agent's hooks, read from its transcript, or set with agentboard status --model")
+            }
+            if let context = SessionModelTag.contextDescription(session) {
+                metadataRow(label: "Context", value: context)
+                    .help("Tokens the session's latest request sent to the model, cached ones included; refreshed when a turn finishes or the agent reports it")
+            }
         }
         .font(.caption)
     }
