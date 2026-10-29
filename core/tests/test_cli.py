@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -1445,7 +1446,7 @@ class InstallHooksTests(AgentBoardTestCase):
         )
         self.settings_path.write_text(json.dumps(data, indent=2))
 
-        _, _, changed = cli.install_claude_hooks(self.settings_path, new_command, False)
+        _, _, changed, _ = cli.install_claude_hooks(self.settings_path, new_command, False)
         self.assertTrue(changed)
 
         after = self._settings()
@@ -1478,7 +1479,7 @@ class InstallHooksTests(AgentBoardTestCase):
         )
         self.settings_path.write_text(json.dumps(data, indent=2))
 
-        _, _, changed = cli.install_claude_hooks(self.settings_path, new_command, False)
+        _, _, changed, _ = cli.install_claude_hooks(self.settings_path, new_command, False)
         self.assertTrue(changed)
 
         after = self._settings()
@@ -1521,7 +1522,7 @@ class InstallHooksTests(AgentBoardTestCase):
         )
         self.settings_path.write_text(json.dumps(data, indent=2))
 
-        _, _, changed = cli.install_claude_hooks(self.settings_path, new_command, False)
+        _, _, changed, _ = cli.install_claude_hooks(self.settings_path, new_command, False)
         self.assertTrue(changed)
 
         after = self._settings()
@@ -1576,7 +1577,7 @@ class InstallHooksTests(AgentBoardTestCase):
         text_after_migration = self.settings_path.read_text()
         mtime_after_migration = self.settings_path.stat().st_mtime_ns
 
-        _, _, changed = cli.install_claude_hooks(self.settings_path, new_command, False)
+        _, _, changed, _ = cli.install_claude_hooks(self.settings_path, new_command, False)
 
         self.assertFalse(changed)
         self.assertEqual(
@@ -1652,7 +1653,7 @@ class InstallHooksTests(AgentBoardTestCase):
         )
         self.hooks_path.write_text(json.dumps(data, indent=2))
 
-        _, _, changed = cli.install_codex_hooks(self.hooks_path, new_command, False)
+        _, _, changed, _ = cli.install_codex_hooks(self.hooks_path, new_command, False)
         self.assertTrue(changed)
 
         after = self._hooks()
@@ -1675,6 +1676,180 @@ class InstallHooksTests(AgentBoardTestCase):
         before = self.settings_path.read_text()
         cli.cmd_uninstall_hooks(cli.build_parser().parse_args(["uninstall-hooks", "--claude", "--dry-run"]))
         self.assertEqual(self.settings_path.read_text(), before)
+
+    # -- async hooks ---------------------------------------------------------
+
+    _BIN = "/opt/agentboard/bin/agentboard"
+
+    def _install(self, tool, *extra, legacy=False):
+        """Run install-hooks for one tool; returns its stdout. legacy=True
+        writes the pre-async entries ({type, command, timeout}) the way
+        earlier versions did."""
+        argv = ["install-hooks", f"--{tool}", "--bin-path", self._BIN, *extra]
+        out = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            if legacy:
+                stack.enter_context(mock.patch.object(cli, "CLAUDE_ASYNC_EVENTS", frozenset()))
+                stack.enter_context(mock.patch.object(cli, "CODEX_ASYNC_EVENTS", frozenset()))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            self.assertEqual(cli.cmd_install_hooks(cli.build_parser().parse_args(argv)), 0)
+        return out.getvalue()
+
+    def _ours(self, data, tool):
+        """{event: [our entries]} in a parsed settings/hooks file."""
+        command = f"{self._BIN} hook --tool {tool}"
+        return {
+            event: [h for g in groups for h in g["hooks"] if cli._is_agentboard_hook_entry(h, command)]
+            for event, groups in data["hooks"].items()
+        }
+
+    def _assert_async_exactly(self, data, tool, events, async_events):
+        ours = self._ours(data, tool)
+        for event in events:
+            self.assertEqual(len(ours.get(event, [])), 1, f"{event} must have exactly one entry")
+            entry = ours[event][0]
+            self.assertEqual(entry["command"], f"{self._BIN} hook --tool {tool}")
+            if event in async_events:
+                self.assertEqual(list(entry), ["type", "command", "timeout", "async"])
+                self.assertIs(entry["async"], True)
+            else:
+                self.assertNotIn("async", entry, event)
+
+    def _backups(self, path):
+        return sorted(path.parent.glob(f"{path.name}.agentboard-bak-*"))
+
+    def test_claude_fresh_install_marks_exactly_the_async_events(self):
+        self._install("claude")
+        self._assert_async_exactly(
+            self._settings(), "claude", cli.CLAUDE_EVENTS, cli.CLAUDE_ASYNC_EVENTS)
+        self.assertEqual(
+            set(cli.CLAUDE_ASYNC_EVENTS),
+            {"PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop"})
+
+    def test_claude_migration_rewrites_sync_entries_in_place(self):
+        # An old-format entry sharing a group with a foreign async hook,
+        # the way a hand-maintained settings.json can hold it.
+        command = f"{self._BIN} hook --tool claude"
+        foreign = {"type": "command", "command": "~/bin/set-tab-color.sh", "async": True}
+        data = self._settings()
+        data["hooks"]["PreToolUse"][0]["hooks"].extend(
+            [{"type": "command", "command": command, "timeout": 5}, foreign])
+        self.settings_path.write_text(json.dumps(data, indent=2))
+        self._install("claude", legacy=True)
+        first_backup = cli._original_backup_path(self.settings_path)
+        self.assertIsNotNone(first_backup)
+        legacy = self._settings()
+        self._assert_async_exactly(legacy, "claude", cli.CLAUDE_EVENTS, frozenset())
+
+        self._install("claude")
+        after = self._settings()
+        self._assert_async_exactly(after, "claude", cli.CLAUDE_EVENTS, cli.CLAUDE_ASYNC_EVENTS)
+        for event in cli.CLAUDE_EVENTS:
+            self.assertEqual(len(after["hooks"][event]), len(legacy["hooks"][event]), event)
+        shared = after["hooks"]["PreToolUse"][0]["hooks"]
+        self.assertIn(foreign, shared)
+        self.assertEqual(shared[-1], foreign)
+        self.assertEqual(
+            shared[-2], {"type": "command", "command": command, "timeout": 5, "async": True})
+        self.assertEqual(len(self._backups(self.settings_path)), 2)
+        self.assertEqual(cli._original_backup_path(self.settings_path), first_backup)
+
+        # A second run changes nothing and makes no new backup.
+        text = self.settings_path.read_text()
+        mtime = self.settings_path.stat().st_mtime_ns
+        self.assertIn("already installed", self._install("claude"))
+        self.assertEqual(self.settings_path.read_text(), text)
+        self.assertEqual(self.settings_path.stat().st_mtime_ns, mtime)
+        self.assertEqual(len(self._backups(self.settings_path)), 2)
+
+    def test_hand_marked_async_stop_entry_is_normalized(self):
+        self._install("claude")
+        data = self._settings()
+        for group in data["hooks"]["Stop"]:
+            for entry in group["hooks"]:
+                if cli._is_agentboard_hook_entry(entry, f"{self._BIN} hook --tool claude"):
+                    entry["async"] = True
+        self.settings_path.write_text(json.dumps(data, indent=2))
+        self._install("claude")
+        self._assert_async_exactly(
+            self._settings(), "claude", cli.CLAUDE_EVENTS, cli.CLAUDE_ASYNC_EVENTS)
+
+    def test_claude_uninstall_after_migration_restores_original_bytes(self):
+        original = self.settings_path.read_bytes()
+        self._install("claude", legacy=True)
+        self._install("claude")
+        cli.cmd_uninstall_hooks(cli.build_parser().parse_args(["uninstall-hooks", "--claude"]))
+        self.assertEqual(self.settings_path.read_bytes(), original)
+
+    def test_codex_fresh_install_marks_exactly_the_async_events(self):
+        fixture = json.loads((FIXTURES / "codex_hooks.json").read_text())
+        out = self._install("codex")
+        data = self._hooks()
+        self._assert_async_exactly(data, "codex", cli.CODEX_EVENTS, cli.CODEX_ASYNC_EVENTS)
+        self.assertEqual(
+            set(cli.CODEX_ASYNC_EVENTS),
+            {"PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop"})
+        for event, groups in fixture["hooks"].items():
+            for group in groups:
+                for entry in group["hooks"]:
+                    self.assertIn(entry, [h for g in data["hooks"][event] for h in g["hooks"]])
+        self.assertNotIn("trust them again", out)
+        self.assertIn("Run /hooks in Codex to trust the new hooks.", out)
+
+    def test_codex_migration_warns_to_retrust_the_rewritten_hooks(self):
+        self._install("codex", legacy=True)
+        legacy_text = self.hooks_path.read_text()
+        command = f"{self._BIN} hook --tool codex"
+
+        preview = self._install("codex", "--dry-run")
+        self.assertEqual(self.hooks_path.read_text(), legacy_text, "a dry run writes nothing")
+        self.assertIn(
+            "would update 4 existing AgentBoard hooks in "
+            f"{self.hooks_path} (PreToolUse, PostToolUse, SubagentStart, SubagentStop "
+            "now run in the background)", preview)
+        self.assertIn("trust them again in /hooks", preview)
+
+        log = self.agentboard_home / "agentboard.log"
+        log.unlink(missing_ok=True)
+        out = self._install("codex")
+        self._assert_async_exactly(self._hooks(), "codex", cli.CODEX_EVENTS, cli.CODEX_ASYNC_EVENTS)
+        for event in cli.CODEX_ASYNC_EVENTS:
+            self.assertEqual(self._ours(self._hooks(), "codex")[event][0]["command"], command)
+        warning = out.index(
+            "warning: updated 4 existing AgentBoard hooks in "
+            f"{self.hooks_path} (PreToolUse, PostToolUse, SubagentStart, SubagentStop "
+            "now run in the background)")
+        self.assertIn("AgentBoard shows no Codex tool activity until you do", out)
+        self.assertLess(warning, out.index("Run /hooks in Codex to trust the new hooks."))
+        self.assertIn("retrust_needed=4", log.read_text())
+
+        # Later installs change nothing, so Codex needs no further re-trust.
+        text = self.hooks_path.read_text()
+        again = self._install("codex")
+        self.assertEqual(self.hooks_path.read_text(), text)
+        self.assertNotIn("trust them again", again)
+        self.assertIn("Codex hooks already installed", again)
+
+    def test_codex_uninstall_after_migration_restores_original_bytes(self):
+        original = self.hooks_path.read_bytes()
+        self._install("codex", legacy=True)
+        self._install("codex")
+        cli.cmd_uninstall_hooks(cli.build_parser().parse_args(["uninstall-hooks", "--codex"]))
+        self.assertEqual(self.hooks_path.read_bytes(), original)
+
+    def test_async_event_sets_leave_turn_boundaries_synchronous(self):
+        self.assertLessEqual(cli.CLAUDE_ASYNC_EVENTS, set(cli.CLAUDE_EVENTS))
+        self.assertTrue(cli.CLAUDE_ASYNC_EVENTS.isdisjoint({
+            "UserPromptSubmit", "Stop", "StopFailure", "SessionStart", "SessionEnd",
+            "PermissionRequest", "Notification", "Elicitation",
+        }))
+        self.assertLessEqual(cli.CODEX_ASYNC_EVENTS, set(cli.CODEX_EVENTS))
+        self.assertTrue(cli.CODEX_ASYNC_EVENTS.isdisjoint({
+            "SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "Interrupt",
+            "PermissionRequest", "PreCompact", "PostCompact",
+        }))
+        self.assertIs(cli.CLAUDE_ASYNC_EVENTS, hook.ASYNC_EVENTS["claude"])
+        self.assertIs(cli.CODEX_ASYNC_EVENTS, hook.ASYNC_EVENTS["codex"])
 
     def test_installed_hook_command_survives_shell_quoting_from_a_home_with_a_space(self):
         # Claude/Codex both run the hook command through a shell, so a
@@ -1784,6 +1959,37 @@ class InstallHooksTests(AgentBoardTestCase):
             "running the shim must not write __pycache__ next to the package",
         )
         self.assertFalse((core_dir / "bin" / "__pycache__").exists())
+
+    def test_shim_stamps_the_event_with_its_start_time(self):
+        # The event's ts is the hook process's start (taken in the shim
+        # before any import), so async hooks that commit late keep the time
+        # they fired. The payload is written well after the spawn, so a stamp
+        # taken after the stdin read (the old _now_iso() default) would land
+        # after `wrote` and fail.
+        insert_session(self.conn, session_id="stamp-e2e", last_event="PostToolUse",
+                       pid=os.getpid(), tty="ttys001")
+        env = _python3_stub_env(self.tmp_path / "stub-bin")
+        env["HOME"] = str(self.fake_home)
+        env["AGENTBOARD_HOME"] = str(self.agentboard_home)
+        env.pop(hook.HOOK_SKIP_ENV, None)
+        shim = Path(cli.__file__).resolve().parent.parent / "bin" / "agentboard"
+        payload = json.dumps({"session_id": "stamp-e2e", "cwd": "/tmp/proj",
+                              "hook_event_name": "PreToolUse", "tool_name": "Bash"})
+        before = datetime.now(timezone.utc)
+        proc = subprocess.Popen([str(shim), "hook", "--tool", "claude"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=env, text=True)
+        time.sleep(1.0)
+        wrote = datetime.now(timezone.utc)
+        out, err = proc.communicate(payload, timeout=30)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(out, "")
+        ts = self.conn.execute(
+            "SELECT ts FROM events WHERE session_id='stamp-e2e' AND event='PreToolUse'"
+        ).fetchone()[0]
+        stamped = datetime.fromisoformat(ts)
+        self.assertLessEqual(before, stamped)
+        self.assertLess(stamped, wrote)
 
 
 class MalformedHookConfigTests(AgentBoardTestCase):
