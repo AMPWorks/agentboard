@@ -136,6 +136,8 @@ struct SessionDetailView: View {
                 metadataRow(label: "Ended", value: RelativeTime.string(from: endedAt))
             }
             metadataRow(label: "Alive", value: session.alive ? "Yes" : "No")
+            metadataRow(label: "Permissions", value: PermissionMode.detail(session.permissionMode))
+                .help(PermissionMode.help(session.permissionMode))
             if let model = session.model, !model.isEmpty {
                 metadataRow(label: "Model", value: model)
                     .help("Shown on the row as \(ModelName.short(model)); reported by the agent's hooks, read from its transcript, or set with agentboard status --model")

@@ -81,6 +81,7 @@ class SnapshotTests(AgentBoardTestCase):
             "started_at", "updated_at", "ended_at", "alive", "interactive",
             "can_focus", "resume_command", "status_text", "links", "triage",
             "notes", "notes_count", "model", "context_tokens", "context_at",
+            "permission_mode",
         ):
             self.assertIn(key, entry)
         self.assertEqual(entry["key"], "claude:s1")
@@ -100,6 +101,14 @@ class SnapshotTests(AgentBoardTestCase):
         self.assertEqual(
             (entries["s2"]["model"], entries["s2"]["context_tokens"],
              entries["s2"]["context_at"]), (None, None, None))
+
+    def test_session_permission_mode_field(self):
+        insert_session(self.conn, session_id="s1", permission_mode="plan")
+        insert_session(self.conn, session_id="s2")
+        entries = {e["session_id"]: e
+                   for e in cli.build_snapshot(self.conn, include_all=True)["sessions"]}
+        self.assertEqual(entries["s1"]["permission_mode"], "plan")
+        self.assertIsNone(entries["s2"]["permission_mode"])
 
     def test_usage_is_empty_without_any_source(self):
         insert_session(self.conn, session_id="s1")
@@ -3793,9 +3802,10 @@ class PruneTests(AgentBoardTestCase):
         insert_session(self.conn, session_id="s1", updated_at=self._iso(days=0))
         old, recent = self._iso(days=10), self._iso(days=1)
         compacted = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart",
-                     "SubagentStop", "PreCompact", "PostCompact"]
+                     "SubagentStop", "PreCompact", "PostCompact", "CwdChanged",
+                     "ElicitationResult", "PermissionDenied"]
         kept = ["SessionStart", "UserPromptSubmit", "Notification", "PermissionRequest",
-                "Stop", "StopFailure", "SessionEnd"]
+                "Stop", "StopFailure", "SessionEnd", "Elicitation", "PostModelSwitch"]
         for event in compacted + kept:
             _insert_event(self.conn, event, ts=old)
             _insert_event(self.conn, event, ts=recent)
@@ -4068,6 +4078,35 @@ class SnapshotTurnFieldsTests(AgentBoardTestCase):
         self.assertIsNone(entry["turn_prompt_kind"])
         self.assertIsNone(entry["background_tasks"])
         self.assertFalse(entry["turn_ends_background_wait"])
+
+    def test_idle_compact_keeps_the_state_but_not_turn_finished_at(self):
+        # An idle /compact: the local-only UserPromptSubmit (prompt-less),
+        # the compaction pair and SessionStart(compact). The hook keeps the
+        # Stop and its last_event_at, so the state still reads Review "Your
+        # turn" at the Stop's time.
+        self.prompt()
+        stop_ts = self.stop(background=0)
+        self.prompt("<command-name>/compact</command-name>\n"
+                    "<command-message>compact</command-message>\n"
+                    "<command-args></command-args>")
+        self._hook("PreCompact", trigger="manual")
+        self._hook("PostCompact", trigger="manual")
+        self._hook("SessionStart", source="compact")
+        row = self.conn.execute(
+            "SELECT last_event, last_event_at FROM sessions WHERE session_id='s1'"
+        ).fetchone()
+        self.assertEqual(row[0], "Stop")
+        self.assertEqual(row[1], stop_ts)
+        entry = self.entry()
+        self.assertEqual(entry["state"], "review")
+        self.assertEqual(entry["waiting_reason"], "Your turn: Done.")
+        # Pins today's value, which disagrees with the state above:
+        # links.last_parent_prompt_at(any_kind=True) still counts the
+        # prompt-less /compact as a newer turn start, so the notify fields
+        # read "not finished". The todo "Local-only slash commands should
+        # not count as new work" fixes this; that change should turn this
+        # assertion into assertEqual(entry["turn_finished_at"], stop_ts).
+        self.assertIsNone(entry["turn_finished_at"])
 
     def test_the_newest_prompt_scan_runs_once_per_snapshot(self):
         # Two sessions, one waiting on a background report-back, so every

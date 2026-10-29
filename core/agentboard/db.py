@@ -6,7 +6,7 @@ from pathlib import Path
 
 DB_FILENAME = "agentboard.db"
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _MIGRATIONS = {
     1: """
@@ -157,6 +157,9 @@ _MIGRATIONS = {
     ALTER TABLE sessions ADD COLUMN model TEXT;
     ALTER TABLE sessions ADD COLUMN context_tokens INTEGER;
     ALTER TABLE sessions ADD COLUMN context_at TEXT;
+    """,
+    9: """
+    ALTER TABLE sessions ADD COLUMN permission_mode TEXT;
     """,
 }
 

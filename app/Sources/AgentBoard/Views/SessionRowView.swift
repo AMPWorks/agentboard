@@ -67,6 +67,18 @@ struct SessionRowView: View {
                             .foregroundStyle(.secondary)
                             .help("Finished on its own: \(session.doneReason ?? "done")")
                     }
+                    // The permission mode, when it is not the default and
+                    // the session has not ended or been done.
+                    if let modeTag = PermissionMode.rowTag(for: session) {
+                        Text(modeTag)
+                            .font(.caption2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.secondary.opacity(0.2), in: Capsule())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help(PermissionMode.help(session.permissionMode))
+                    }
                     Spacer()
                     Text(RelativeTime.string(from: session.updatedAt))
                         .font(.caption2)

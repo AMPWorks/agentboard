@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentboard import reconcile
+from agentboard import hook, reconcile
 from tests.helpers import AgentBoardTestCase
 
 NOW = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
@@ -1056,6 +1056,45 @@ class BackgroundTaskStateTests(AgentBoardTestCase):
         state = reconcile.compute_state(self.session(), None, [], now=NOW, alive=True,
                                         unattended=True)
         self.assertEqual(state[1], "Waiting on 3 background tasks: subagent, shell")
+
+
+class NewerHookEventStateTests(AgentBoardTestCase):
+    """States for the newer Claude Code events (hook.py classifies them)."""
+
+    def _state(self, notification_type=None, **overrides):
+        return reconcile.compute_state(
+            base_session(**overrides), None, [], now=NOW, alive=True,
+            notification_type=notification_type,
+        )
+
+    def test_tool_shaped_events_are_running_when_alive(self):
+        for event in ("CwdChanged", "ElicitationResult", "PermissionDenied"):
+            with self.subTest(event):
+                self.assertEqual(self._state(last_event=event)[0], "running")
+
+    def test_elicitation_is_needs_you_with_the_stored_reason(self):
+        self.assertEqual(
+            self._state(last_event="Elicitation", waiting_reason="srv: Pick one")[:2],
+            ("needs_you", "srv: Pick one"))
+
+    def test_elicitation_url_dialog_is_needs_you(self):
+        self.assertEqual(
+            self._state("elicitation_url_dialog", last_event="Notification",
+                        waiting_reason="Open the link")[:2],
+            ("needs_you", "Open the link"))
+
+    def test_elicitation_complete_never_becomes_last_event(self):
+        self.assertNotIn("elicitation_complete", hook.RELEVANT_NOTIFICATION_TYPES)
+        self.assertNotIn("elicitation_response", hook.RELEVANT_NOTIFICATION_TYPES)
+        self.assertEqual(self._state(last_event="Stop", last_assistant="done")[0], "review")
+
+    def test_trailing_elicitation_leaves_the_turn_pending(self):
+        for i, event in enumerate(["UserPromptSubmit", "Stop", "Elicitation", "SessionEnd"]):
+            self.conn.execute(
+                "INSERT INTO events(ts, tool, session_id, event, agent_id) "
+                "VALUES (?,?,?,?,NULL)",
+                (f"2026-01-01T00:00:{i:02d}.000000Z", "claude", "s1", event))
+        self.assertFalse(reconcile.last_turn_finished(self.conn, "claude", "s1"))
 
 
 if __name__ == "__main__":

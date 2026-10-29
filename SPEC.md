@@ -48,7 +48,9 @@ Registered for every event in both tools. Requirements:
   `$AGENTBOARD_HOME/hook-errors.log`, capped ~1 MB).
 - Fast: target < 50 ms. No network. The branch is re-read on SessionStart / UserPromptSubmit and
   (added later) on parent Stop / SessionEnd, so a branch created mid-turn is seen once the
-  session goes idle or exits, and whenever the session has no branch yet. It is read from the
+  session goes idle or exits, and whenever the session has no branch yet. A parent CwdChanged
+  re-reads it too and stores it as read, NULL included (a `cd` out of every repository or into
+  a detached HEAD clears it rather than keeping the old one). It is read from the
   repository's HEAD file (following a worktree's `gitdir:` file); only when that is missing or
   in a form AgentBoard doesn't parse does it shell out to git (`git -C cwd branch
   --show-current`, 1 s timeout), since one git call costs most of the 50 ms budget. While
@@ -63,16 +65,36 @@ Claude events: SessionStart(source, model), UserPromptSubmit(prompt), PreToolUse
 PostToolUseFailure(tool_name), PermissionRequest(tool_name), Notification(notification_type,
 message), Stop(last_assistant_message, background_tasks, session_crons), StopFailure(error,
 error_details, last_assistant_message; read as "<error>: <first line>"), SubagentStart/
-SubagentStop(agent_id), SessionEnd(reason). Common: session_id, transcript_path, cwd,
-hook_event_name. Events carrying `agent_id` come from subagents: record them but they only
+SubagentStop(agent_id), SessionEnd(reason), PreCompact/PostCompact(trigger; never
+`compact_summary` or `custom_instructions`), CwdChanged(old_cwd, new_cwd; `cwd` is the new
+directory), Elicitation(mcp_server_name, message, mode; never `url`, `requested_schema`),
+ElicitationResult(mcp_server_name, action, mode; never `content`), PermissionDenied(tool_name,
+reason as text, mcp_server; auto mode only, activity: Claude carries on, and repeated denials
+come back as a PermissionRequest), PostModelSwitch(from_model, to_model, source,
+context_tokens; state-neutral, see below). Common: session_id, transcript_path, cwd, hook_event_name, permission_mode (default, plan, acceptEdits, auto, dontAsk,
+bypassPermissions: every parent event that carries a non-empty string stores it on the
+session, on the INSERT and as `COALESCE(?, permission_mode)`; a subagent's is skipped since a
+subagent can run under its own mode; backfill never writes it). Events carrying `agent_id` come from subagents: record them but they only
 ever count as "running" activity, never Stop/review for the parent. (Added later:) a tagged
 SubagentStart/SubagentStop after the parent's turn ended (last_event Stop, Interrupt, a
 relevant Notification, PermissionRequest, StopFailure or a needs_you tool) keeps that
 last_event, and a kept finished turn keeps its `last_event_at`. A `SessionStart` with
 `source` `compact`, or `resume` while the session has not ended, keeps the session's
 `last_event`/`waiting_reason` (the event row is still recorded), and so does a parent
-`PreCompact`/`PostCompact` after the turn ended (a `/compact` at an idle prompt); mid-turn
-they are activity as before. A parent Stop stores the
+`PreCompact`/`PostCompact` or `CwdChanged` after the turn ended (a `/compact` or a `!cd` at
+an idle prompt; the kept-after-turn events); mid-turn they are activity as before. A parent
+UserPromptSubmit of a local-only command (`hook.is_local_only_prompt`: a bare exit/quit, or a
+`<command-name>` in LOCAL_ONLY_COMMANDS such as `/compact` or `/model`, except `/plan` with
+non-empty args, which starts a turn) after the turn ended keeps the finished turn the same
+way; mid-turn it is activity as before. "Ended" covers every finished-turn event, so a
+`/model` typed after a StopFailure keeps the row needs_you with the error until a real prompt
+arrives (deliberate: nothing has been retried yet, so the failure still needs the user). A PostModelSwitch is state-neutral: it never
+becomes last_event (after a finished turn the turn and its `last_event_at` are kept; mid-turn
+the activity event is kept and `last_event_at` advances; as a session's first event it inserts
+the row with last_event NULL, which the registry rule reads). A parent one writes
+`sessions.model = to_model` and, when `context_tokens` is a non-bool int >= 0,
+`context_tokens`/`context_at` (the same validation as SessionStart's `model`/`context_tokens`).
+A parent Stop stores the
 count and `type` labels of its `background_tasks` still in flight (status not terminal) and
 the count and prompts of its `session_crons`; a tagged SubagentStop after the turn removes one
 `subagent` entry.
@@ -101,6 +123,7 @@ sessions(tool TEXT, session_id TEXT, cwd TEXT, branch TEXT, title TEXT,
          session_crons INTEGER, cron_prompts TEXT /*json list*/ /*from the last parent Stop*/,
          todos_scan_offset INTEGER, todos_scan_state TEXT /*json; incremental todo scan*/,
          model TEXT, context_tokens INTEGER, context_at TEXT /*when the size was measured*/,
+         permission_mode TEXT /*the newest parent event's permission_mode*/,
          PRIMARY KEY(tool, session_id))
 triage(tool, session_id, status TEXT /*done|snoozed|open*/, until TEXT, note TEXT,
        updated_at TEXT, PRIMARY KEY(tool, session_id))
@@ -123,8 +146,8 @@ notes_meta(key TEXT PK, value INTEGER)   -- hook_from, rebuilt_through (events.i
 (`notes`/`notes_meta` added after the original spec, migration 5; the link lifecycle columns
 and the session title columns are migration 6; `prompt_kind` and the background, cron and todo
 scan columns are migration 7, which also marks recorded injected prompts by the default
-prefixes; `model`/`context_tokens`/`context_at` are migration 8. All of them are NULL on legacy
-rows.)
+prefixes; `model`/`context_tokens`/`context_at` are migration 8; `permission_mode` is
+migration 9. All of them are NULL on legacy rows.)
 Add a `schema_version` pragma (user_version) and simple migrations.
 
 ## State derivation (`reconcile.py`)
@@ -135,10 +158,14 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
 1. `done` (manual) — triage.status = done. A new UserPromptSubmit after the triage timestamp
    reopens it (triage reset to open).
 2. `snoozed` — triage.status = snoozed and until > now (falls through when expired).
-3. `needs_you` — last non-subagent event is PermissionRequest, or Notification with type in
-   {permission_prompt, elicitation_dialog, agent_needs_input, quota_auto_resume_stale,
-   quota_auto_resume_disabled}, or StopFailure, and no later activity event. `waiting_reason` =
-   tool_name / notification message (the usage-limit pauses fall back to "Usage limit reset
+3. `needs_you` — last non-subagent event is PermissionRequest, Elicitation (an MCP server asks
+   the user), or Notification with type in {permission_prompt, elicitation_dialog,
+   elicitation_url_dialog, agent_needs_input, quota_auto_resume_stale,
+   quota_auto_resume_disabled}, or StopFailure, and no later activity event (an
+   ElicitationResult, or the MCP tool's own PostToolUse, ends an Elicitation). `waiting_reason`
+   = tool_name / "<mcp_server_name>: <first line of the message>" for an Elicitation (capped
+   at 160 chars; a parent elicitation_dialog/elicitation_url_dialog Notification arriving while
+   last_event is Elicitation is recorded but keeps that reason) / notification message (the usage-limit pauses fall back to "Usage limit reset
    while asleep: press Enter to resume" / "Paused at a usage limit; auto-resume is off") /
    "<error>: <first line of the message>" for a StopFailure (e.g. "rate_limit: API Error: Rate
    limit reached"), which also records an `error` note. A StopFailure stays needs_you until new
@@ -147,15 +174,15 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
    UserPromptSubmit is newer than the note's `last_ts` (compared as parsed times);
    `waiting_reason` = the note's marker line, else its first line.
 4. `running` — last event is an activity event (UserPromptSubmit, Pre/PostToolUse, Subagent*,
-   PreCompact/PostCompact) AND process alive (or no pid known and last event < 10 min old).
+   PreCompact/PostCompact, CwdChanged, ElicitationResult, PermissionDenied) AND process alive (or no pid known and last event < 10 min old).
    `interrupted` — would be running but process dead or activity stale > 30 min (older than
    24 h: `unconcluded`, reason "interrupted"). Before this rule the session registry breaks
    ties (see Liveness), only while the process is alive: `idle` turns an activity event, or an
    unknown last event (SessionStart, a SessionEnd a resume un-ended), into a finished turn
    (read as Stop); `busy` turns a finished or unknown one into `running`.
    SessionStart never changes state on compaction, nor on resume of a live session, and a
-   PreCompact/PostCompact after a finished turn does not either (the hook keeps the previous
-   last_event).
+   PreCompact/PostCompact, a CwdChanged or a local-only command prompt after a finished turn
+   does not either (the hook keeps the previous last_event).
 5. `review`, "PR #N awaits your review" — the session owns a PR that awaits the user (see
    Links: owned, OPEN, no human response yet), live or ended, ahead of every done rule. When
    the PR's author is the active gh login the reason reads "PR #N open, no response yet".
@@ -410,7 +437,8 @@ then select the tab/window and activate iTerm. Exit non-zero with message if not
       "notes_count": 1,
       "turn_finished_at": "ISO|null", "turn_prompt_kind": "human|loop|cron|injected|null",
       "background_tasks": 0, "turn_ends_background_wait": false,
-      "model": "string|null", "context_tokens": 308011, "context_at": "ISO|null"
+      "model": "string|null", "context_tokens": 308011, "context_at": "ISO|null",
+      "permission_mode": "default|plan|acceptEdits|auto|dontAsk|bypassPermissions|<newer>|null"
     }
   ],
   "usage": [
@@ -441,6 +469,11 @@ read as human). `background_tasks` is `sessions.background_tasks` from the last 
 prompt is injected and the newest parent Stop before it (by event id) listed background tasks:
 the `<task-notification>` turn that reports a background task back. Three grouped queries, as
 for `last_parent_prompt_times`.
+Added with migration 9: each session's `permission_mode`, the mode its newest parent hook
+event reported (null for Codex, for rows no newer hook has touched, and for a session whose
+events never carried it); an unknown value passes through as-is. The app draws it as a row
+tag (none for `default`) only while the session has not ended and is not done, with a tooltip
+saying it is as of the last hook event (an idle-prompt mode change fires no hook).
 Added with migration 8: each session's `model`, `context_tokens` (absolute tokens; the
 context window size is not known) and `context_at` (null when unknown), and the top-level
 `usage`: a list of plan-usage sources, empty when there is none (the normal case for API-key,

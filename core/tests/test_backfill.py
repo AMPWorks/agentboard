@@ -608,6 +608,21 @@ class UpsertBackfillSessionTests(AgentBoardTestCase):
         self.assertEqual(row["title"], "backfill title")
         self.assertEqual(row["interactive"], 0)
 
+    def test_backfill_keeps_a_hook_written_permission_mode(self):
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, cwd, origin, permission_mode) "
+            "VALUES ('claude','s1','/real/cwd','hook','plan')"
+        )
+        backfill.upsert_backfill_session(self.conn, "claude", "s1", {
+            "cwd": "/backfill/cwd", "branch": "b", "title": "t", "first_prompt": "p",
+            "last_prompt": "p", "last_assistant": "a", "started_at": None,
+            "updated_at": "2026-01-01T00:05:00.000Z", "last_event": "Stop",
+            "last_event_at": "2026-01-01T00:05:00.000Z", "transcript_path": "/x",
+            "interactive": 1,
+        })
+        self.assertEqual(self.conn.execute(
+            "SELECT permission_mode FROM sessions WHERE session_id='s1'").fetchone()[0], "plan")
+
     def test_backfill_restores_interactive_when_transcript_has_a_prompt(self):
         # The hook marked a prompt-less SessionEnd as a helper; the transcript
         # shows a real first prompt (hooks installed mid-way).
