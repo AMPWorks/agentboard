@@ -111,8 +111,9 @@ def _session_links(conn, session, config):
 
 
 def _is_tmux_row(session):
-    """True iff the row carries both halves of a tmux identity. cmd_focus,
-    _can_focus, the snapshot's tmux flag and its name lookup all use this."""
+    """True iff the row carries both halves of a tmux identity. _can_focus and
+    the snapshot's tmux flag use this; cmd_focus and the snapshot's name lookup
+    apply the same both-columns check inline on sqlite3.Row (no .get)."""
     return bool(session.get("tmux_pane") and session.get("tmux_socket"))
 
 
