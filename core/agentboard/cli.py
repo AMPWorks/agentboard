@@ -111,8 +111,88 @@ def _session_links(conn, session, config):
 
 
 def _can_focus(session):
-    """True iff cmd_focus has some way to act on this session's terminal."""
+    """True iff cmd_focus has some way to act on this session's terminal.
+    A session inside tmux always does: focus finds an attached client or
+    opens a new window attached to its tmux session."""
+    if session.get("tmux_pane"):
+        return True
     return session.get("term_program") in TERM_PROGRAM_APP_NAMES
+
+
+# -- tmux -----------------------------------------------------------------------
+
+# Where Homebrew puts tmux; the app's PATH under launchd has neither.
+TMUX_FALLBACK_PATHS = ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux")
+# `snapshot` runs every few seconds: a tmux call that hangs must not stall it.
+TMUX_SNAPSHOT_TIMEOUT_SECS = 1
+
+
+def _tmux_binary():
+    """The tmux executable to run, or None if there isn't one."""
+    found = shutil.which("tmux")
+    if found:
+        return found
+    for candidate in TMUX_FALLBACK_PATHS:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _run_tmux(run, binary, socket_path, tmux_args, timeout=None):
+    """Run `tmux -S <socket> <args...>` bounded by `timeout` (the osascript
+    bound by default). A timeout comes back as `_TimedOut`; a binary that
+    can't be executed as a failed result, never an exception."""
+    argv = [binary, "-S", socket_path, *tmux_args]
+    try:
+        if timeout is None:
+            return _run_bounded(run, argv)
+        return _run_bounded(run, argv, timeout=timeout)
+    except OSError as exc:
+        return subprocess.CompletedProcess(argv, 127, "", str(exc))
+
+
+def _tmux_session_names(socket_path, run, binary):
+    """{pane_id: session_name} for every pane on one tmux server, from one
+    bounded `list-panes -a` call, or None if the server can't be asked."""
+    result = _run_tmux(
+        run, binary, socket_path,
+        ["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}"],
+        timeout=TMUX_SNAPSHOT_TIMEOUT_SECS,
+    )
+    if isinstance(result, _TimedOut) or _returncode(result) != 0:
+        diag.debug("cli", "tmux.names_failed", socket=socket_path,
+                   rc=_returncode(result), stderr=diag.tail_text(_stderr_text(result), 200))
+        return None
+    names = {}
+    for line in _stdout_text(result).splitlines():
+        pane, sep, name = line.partition("\t")
+        if sep and pane.startswith("%"):
+            names[pane] = name
+    return names
+
+
+def _resolve_tmux_sessions(entries, tmux_rows, run):
+    """Fill `tmux_session` for the alive, not-ended tmux entries: one
+    `list-panes` call per distinct socket. Rows with no tmux pane, and
+    ended or dead ones, cost nothing."""
+    wanted = {}
+    for entry in entries:
+        identity = tmux_rows.get(entry["key"])
+        if identity is None or not entry["alive"] or entry["ended_at"]:
+            continue
+        wanted.setdefault(identity[0], []).append((entry, identity[1]))
+    if not wanted:
+        return
+    binary = _tmux_binary()
+    if binary is None:
+        diag.debug("cli", "tmux.names_failed", reason="no_binary")
+        return
+    for socket_path, items in wanted.items():
+        names = _tmux_session_names(socket_path, run, binary)
+        if not names:
+            continue
+        for entry, pane in items:
+            entry["tmux_session"] = names.get(pane)
 
 
 def _session_status_text(session, now):
@@ -321,6 +401,9 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
         "alive": bool(alive),
         "interactive": True if session.get("interactive") is None else bool(session.get("interactive")),
         "can_focus": _can_focus(session),
+        "tmux": bool(session.get("tmux_pane")),
+        # Filled in by build_snapshot from the live tmux server.
+        "tmux_session": None,
         "resume_command": _resume_command(tool, cwd, session_id),
         "status_text": _session_status_text(session, now),
         "model": session.get("model"),
@@ -361,7 +444,7 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
     }
 
 
-def build_snapshot(conn, include_all=False, now=None):
+def build_snapshot(conn, include_all=False, now=None, run_tmux=None):
     now = now or datetime.now(timezone.utc)
     home = db.home_dir()
     now_iso = _now_iso(now)
@@ -405,6 +488,14 @@ def build_snapshot(conn, include_all=False, now=None):
                     continue
             filtered.append(entry)
         entries = filtered
+
+    tmux_rows = {
+        f"{row['tool']}:{row['session_id']}": (row["tmux_socket"], row["tmux_pane"])
+        for row in sessions
+        if row["tmux_socket"] and row["tmux_pane"]
+    }
+    if tmux_rows:
+        _resolve_tmux_sessions(entries, tmux_rows, run_tmux or subprocess.run)
 
     state_rank = {name: i for i, name in enumerate(STATES)}
 
@@ -2092,6 +2183,81 @@ on run argv
 end run
 """
 
+# Opens a new iTerm window (never a tab in someone's current window) and
+# types the command into it: used to attach to a tmux session.
+_ITERM_NEW_WINDOW_APPLESCRIPT = """
+on run argv
+  set cmd to item 1 of argv
+  tell application "iTerm2"
+    activate
+    set w to (create window with default profile)
+    tell current session of w
+      write text cmd
+    end tell
+  end tell
+end run
+"""
+
+# Probes for an attached tmux client's tty. Side-effect free unless it
+# matches: they never launch the app (an app that isn't running answers
+# "not_running") and never call `activate` on a miss.
+_ITERM_TMUX_CLIENT_APPLESCRIPT = """
+on run argv
+  set targetTty to item 1 of argv
+  if targetTty is "" then return "not_found"
+  if application "iTerm2" is running then
+    tell application "iTerm2"
+      repeat with w in windows
+        repeat with t in tabs of w
+          repeat with s in sessions of t
+            try
+              if (tty of s) is equal to targetTty then
+                tell t to select
+                tell s to select
+                tell w to select
+                activate
+                delay 0.15
+                tell t to select
+                tell s to select
+                return "found"
+              end if
+            end try
+          end repeat
+        end repeat
+      end repeat
+    end tell
+    return "not_found"
+  end if
+  return "not_running"
+end run
+"""
+
+_TERMINAL_TMUX_CLIENT_APPLESCRIPT = """
+on run argv
+  set targetTty to item 1 of argv
+  if targetTty is "" then return "not_found"
+  if application "Terminal" is running then
+    tell application "Terminal"
+      repeat with w in windows
+        repeat with t in tabs of w
+          try
+            if (tty of t) is equal to targetTty then
+              set selected of t to true
+              set frontmost of w to true
+              activate
+              set selected of t to true
+              return "found"
+            end if
+          end try
+        end repeat
+      end repeat
+    end tell
+    return "not_found"
+  end if
+  return "not_running"
+end run
+"""
+
 _TERMINAL_FOCUS_APPLESCRIPT = """
 on run argv
   set targetTty to item 1 of argv
@@ -2178,13 +2344,14 @@ class _TimedOut:
         self.stderr = f"timed out after {seconds}s"
 
 
-def _run_bounded(run, argv):
-    """`run(argv)` capturing text output, bounded by OSASCRIPT_TIMEOUT_SECS.
-    A timeout comes back as a `_TimedOut` result instead of raising."""
+def _run_bounded(run, argv, timeout=OSASCRIPT_TIMEOUT_SECS):
+    """`run(argv)` capturing text output, bounded by `timeout` seconds
+    (OSASCRIPT_TIMEOUT_SECS by default). A timeout comes back as a
+    `_TimedOut` result instead of raising."""
     try:
-        return run(argv, capture_output=True, text=True, timeout=OSASCRIPT_TIMEOUT_SECS)
+        return run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return _TimedOut(OSASCRIPT_TIMEOUT_SECS)
+        return _TimedOut(timeout)
 
 
 def _activate_app(term_program, run_osascript):
@@ -2228,6 +2395,8 @@ class _FocusTrace:
             term=row["term_program"] if row else None,
             tty=row["tty"] if row else None,
             iterm_id=row["iterm_session_id"] if row else None,
+            tmux_pane=row["tmux_pane"] if row else None,
+            tmux_socket=row["tmux_socket"] if row else None,
         )
 
     def tried(self, strategy, result, **extra):
@@ -2239,12 +2408,14 @@ class _FocusTrace:
             "cli", "focus.try", key=self.key, strategy=strategy, rc=rc,
             stdout=diag.tail_text(out), stderr=diag.tail_text(err), **extra,
         )
-        if strategy != "open_a":
+        if strategy in ("open_a", "open_ra"):
+            self.fields["open_rc"] = rc
+        elif strategy.startswith("tmux_"):
+            self.fields.update(tmux_rc=rc, tmux_err=diag.tail_text(err, 300))
+        else:
             self.fields.update(
                 osa_rc=rc, osa_out=diag.tail_text(out, 200), osa_err=diag.tail_text(err, 300),
             )
-        else:
-            self.fields["open_rc"] = rc
         return rc, out
 
     def finish(self, outcome, level="info"):
@@ -2271,19 +2442,126 @@ def _focus_timed_out(trace, key):
     return 1
 
 
-def cmd_focus(args, run_osascript=subprocess.run):
+def _tmux_failed(trace, outcome, message):
+    trace.finish(outcome, level="warn")
+    print(message, file=sys.stderr)
+    return 1
+
+
+def _focus_tmux(row, key, trace, run_osascript, run_tmux):
+    """Focus a session that runs inside tmux. The inherited iTerm/Terminal
+    ids are the tmux server's, not this pane's, so they are never used:
+    find the pane's tmux session, select its window and pane, then focus
+    a terminal tab that has a client attached to it, or open a new window
+    attached to it."""
+    socket_path, pane = row["tmux_socket"], row["tmux_pane"]
+    diag.info("cli", "focus.begin", **trace.fields)
+    binary = _tmux_binary()
+    if binary is None:
+        return _tmux_failed(trace, "tmux_missing", f"tmux not found to focus {key}")
+
+    # Looked up at click time: the session may have been renamed or the
+    # pane moved to another window since the hook recorded it.
+    result = _run_tmux(run_tmux, binary, socket_path, [
+        "display-message", "-p", "-t", pane,
+        "#{session_id}\t#{session_name}\t#{window_id}",
+    ])
+    rc, out = trace.tried("tmux_display", result, pane=pane)
+    if isinstance(result, _TimedOut):
+        return _focus_timed_out(trace, key)
+    parts = out.split("\t")
+    if rc != 0 or len(parts) < 3 or not parts[0].startswith("$"):
+        return _tmux_failed(trace, "tmux_pane_gone",
+                            f"tmux pane {pane} for {key} is gone")
+    session_id, window_id = parts[0], parts[-1]
+    session_name = "\t".join(parts[1:-1])
+    trace.fields.update(tmux_session_id=session_id, tmux_session=session_name)
+
+    for tmux_args in (["select-window", "-t", window_id], ["select-pane", "-t", pane]):
+        result = _run_tmux(run_tmux, binary, socket_path, tmux_args)
+        trace.tried(f"tmux_{tmux_args[0].replace('-', '_')}", result)
+        if isinstance(result, _TimedOut):
+            return _focus_timed_out(trace, key)
+
+    installed = _run_bounded(run_osascript, ["open", "-Ra", "iTerm"])
+    trace.tried("open_ra", installed, app="iTerm")
+    if isinstance(installed, _TimedOut):
+        return _focus_timed_out(trace, key)
+    iterm_installed = _returncode(installed) == 0
+    trace.fields["iterm_installed"] = iterm_installed
+
+    # Session ids ($N) are unambiguous; a name can be a prefix of another
+    # session's name or hold `:`/`.`, which tmux reads as target syntax.
+    result = _run_tmux(run_tmux, binary, socket_path, [
+        "list-clients", "-t", session_id, "-F", "#{client_tty}\t#{client_termname}",
+    ])
+    rc, out = trace.tried("tmux_list_clients", result)
+    if isinstance(result, _TimedOut):
+        return _focus_timed_out(trace, key)
+    client_ttys = []
+    if rc == 0:
+        for line in out.splitlines():
+            client_tty = line.split("\t", 1)[0].strip()
+            if client_tty and client_tty not in client_ttys:
+                client_ttys.append(client_tty)
+    trace.fields["tmux_clients"] = len(client_ttys)
+
+    probes = []
+    if iterm_installed:
+        probes.append(("iterm_tmux_client", _ITERM_TMUX_CLIENT_APPLESCRIPT))
+    probes.append(("terminal_tmux_client", _TERMINAL_TMUX_CLIENT_APPLESCRIPT))
+    for client_tty in client_ttys:
+        for strategy, script in probes:
+            result = _run_bounded(run_osascript, ["osascript", "-e", script, client_tty])
+            rc, out = trace.tried(strategy, result, tty=client_tty)
+            if isinstance(result, _TimedOut):
+                return _focus_timed_out(trace, key)
+            # Only an exact "found" is a match; "not_found", "not_running"
+            # and anything unexpected move on.
+            if rc in (None, 0) and out == "found":
+                trace.fields["client_tty"] = client_tty
+                trace.finish("tmux_client_focused")
+                return 0
+
+    command = (
+        f"{shlex.quote(binary)} -S {shlex.quote(socket_path)} "
+        f"attach-session -t {shlex.quote(session_id)}"
+    )
+    if iterm_installed:
+        strategy, script, outcome = (
+            "iterm_new_window", _ITERM_NEW_WINDOW_APPLESCRIPT, "tmux_attached_new_window"
+        )
+    else:
+        strategy, script, outcome = (
+            "terminal_script", _TERMINAL_RESUME_APPLESCRIPT, "tmux_attached_terminal"
+        )
+    result = _run_bounded(run_osascript, ["osascript", "-e", script, command])
+    rc, _out = trace.tried(strategy, result, command=command)
+    if isinstance(result, _TimedOut):
+        return _focus_timed_out(trace, key)
+    if rc not in (None, 0):
+        return _tmux_failed(trace, "tmux_attach_failed",
+                            f"opening a window attached to tmux for {key} failed")
+    trace.finish(outcome)
+    return 0
+
+
+def cmd_focus(args, run_osascript=subprocess.run, run_tmux=None):
     key = f"{args.tool}:{args.session_id}"
     trace = _FocusTrace(key)
     conn = db.connect()
     try:
         row = conn.execute(
-            "SELECT iterm_session_id, term_program, tty FROM sessions "
-            "WHERE tool=? AND session_id=?",
+            "SELECT iterm_session_id, term_program, tty, tmux_socket, tmux_pane "
+            "FROM sessions WHERE tool=? AND session_id=?",
             (args.tool, args.session_id),
         ).fetchone()
     finally:
         conn.close()
     trace.identity(row)
+    if row and row["tmux_socket"] and row["tmux_pane"]:
+        return _focus_tmux(row, key, trace, run_osascript,
+                           run_tmux if run_tmux is not None else run_osascript)
     if not row or row["term_program"] not in TERM_PROGRAM_APP_NAMES:
         outcome = "unsupported_terminal" if row and row["term_program"] else "no_terminal"
         trace.finish(outcome)

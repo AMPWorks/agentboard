@@ -81,9 +81,13 @@ class SnapshotTests(AgentBoardTestCase):
             "started_at", "updated_at", "ended_at", "alive", "interactive",
             "can_focus", "resume_command", "status_text", "links", "triage",
             "notes", "notes_count", "model", "context_tokens", "context_at",
+            "tmux", "tmux_session",
         ):
             self.assertIn(key, entry)
         self.assertEqual(entry["key"], "claude:s1")
+        self.assertIs(entry["tmux"], False)
+        self.assertIsNone(entry["tmux_session"])
+        self.assertIs(entry["can_focus"], False)
         self.assertEqual(entry["project"], "proj")
         self.assertIn("usage", snapshot)
 
@@ -3225,6 +3229,341 @@ class FocusResumeTests(AgentBoardTestCase):
         self.assertIn(" WARN cli.resume ", lines[0])
         self.assertIn("outcome=timeout", lines[0])
         self.assertIn("timed out", err.getvalue())
+
+
+TMUX_BIN = "/opt/homebrew/bin/tmux"
+_REAL_TMUX_BINARY = cli._tmux_binary
+TMUX_SOCK = "/private/tmp/tmux-501/default"
+
+
+class TmuxFocusTests(AgentBoardTestCase):
+    """cmd_focus for a session inside tmux: one fake runner answers both
+    the tmux calls and the osascript/open calls, and records them all."""
+
+    def setUp(self):
+        super().setUp()
+        self._old_level = os.environ.get("AGENTBOARD_LOG_LEVEL")
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        patcher = mock.patch.object(cli, "_tmux_binary", return_value=TMUX_BIN)
+        self.tmux_binary = patcher.start()
+        self.addCleanup(patcher.stop)
+        insert_session(
+            self.conn, session_id="s1", term_program="tmux", tty="ttys005",
+            iterm_session_id="w0t0p0:STALE", tmux_socket=TMUX_SOCK, tmux_pane="%0",
+        )
+        self.calls = []
+
+    def tearDown(self):
+        if self._old_level is None:
+            os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        else:
+            os.environ["AGENTBOARD_LOG_LEVEL"] = self._old_level
+        super().tearDown()
+
+    def _runner(self, display=("$3\tamp-agent\t@2\n", 0), clients="",
+                iterm_installed=True, iterm_probe="not_found", terminal_probe="not_found",
+                timeout_on=None):
+        def run(argv, **kwargs):
+            self.calls.append(argv)
+            if timeout_on is not None and timeout_on(argv):
+                raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+            if argv[0] == TMUX_BIN:
+                self.assertEqual(argv[1:3], ["-S", TMUX_SOCK])
+                verb = argv[3]
+                if verb == "display-message":
+                    out, rc = display
+                    return _completed(out, returncode=rc,
+                                      stderr="" if rc == 0 else "can't find pane: %0",
+                                      args=argv)
+                if verb == "list-clients":
+                    return _completed(clients, args=argv)
+                return _completed("", args=argv)
+            if argv[:2] == ["open", "-Ra"]:
+                return _completed("", returncode=0 if iterm_installed else 1, args=argv)
+            if argv[0] == "osascript":
+                script = argv[2]
+                if script is cli._ITERM_TMUX_CLIENT_APPLESCRIPT:
+                    return _completed(iterm_probe + "\n", args=argv)
+                if script is cli._TERMINAL_TMUX_CLIENT_APPLESCRIPT:
+                    return _completed(terminal_probe + "\n", args=argv)
+                return _completed("", args=argv)
+            raise AssertionError(f"unexpected call {argv}")
+        return run
+
+    def _focus(self, run):
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = cli.cmd_focus(args, run_osascript=run)
+        return rc, err.getvalue()
+
+    def _scripts(self):
+        return [c[2] for c in self.calls if c[0] == "osascript"]
+
+    def _focus_line(self):
+        path = self.agentboard_home / "agentboard.log"
+        lines = [l for l in path.read_text().splitlines() if " cli.focus " in l]
+        self.assertEqual(len(lines), 1, lines)
+        return lines[0]
+
+    def test_attached_client_is_focused_without_attaching(self):
+        run = self._runner(clients="/dev/ttys002\txterm-256color\n", iterm_probe="found")
+        rc, _ = self._focus(run)
+        self.assertEqual(rc, 0)
+        tmux_verbs = [c[3] for c in self.calls if c[0] == TMUX_BIN]
+        self.assertEqual(tmux_verbs,
+                         ["display-message", "select-window", "select-pane", "list-clients"])
+        self.assertIn(["-t", "@2"], [c[4:6] for c in self.calls if c[0] == TMUX_BIN])
+        # The session id, not its name, is the target.
+        list_clients = next(c for c in self.calls if c[0] == TMUX_BIN and c[3] == "list-clients")
+        self.assertEqual(list_clients[4:6], ["-t", "$3"])
+        probe = next(c for c in self.calls if c[0] == "osascript")
+        self.assertIs(probe[2], cli._ITERM_TMUX_CLIENT_APPLESCRIPT)
+        self.assertEqual(probe[3], "/dev/ttys002")
+        self.assertNotIn(cli._ITERM_NEW_WINDOW_APPLESCRIPT, self._scripts())
+        self.assertNotIn(cli._ITERM_FOCUS_APPLESCRIPT, self._scripts())
+        line = self._focus_line()
+        self.assertIn("outcome=tmux_client_focused", line)
+        self.assertIn("tmux_pane=%0", line)
+        self.assertIn(f"tmux_socket={TMUX_SOCK}", line)
+        self.assertIn("tmux_session=amp-agent", line)
+
+    def test_client_in_terminal_is_focused(self):
+        run = self._runner(clients="/dev/ttys002\txterm\n",
+                           iterm_probe="not_running", terminal_probe="found")
+        rc, _ = self._focus(run)
+        self.assertEqual(rc, 0)
+        self.assertIn("outcome=tmux_client_focused", self._focus_line())
+
+    def test_no_client_opens_a_new_iterm_window_attached_by_session_id(self):
+        rc, _ = self._focus(self._runner())
+        self.assertEqual(rc, 0)
+        attach = self.calls[-1]
+        self.assertIs(attach[2], cli._ITERM_NEW_WINDOW_APPLESCRIPT)
+        self.assertEqual(
+            attach[3], f"{TMUX_BIN} -S {TMUX_SOCK} attach-session -t '$3'")
+        self.assertEqual(shlex.split(attach[3])[-1], "$3")
+        self.assertNotIn("-d", shlex.split(attach[3]))
+        self.assertIn("outcome=tmux_attached_new_window", self._focus_line())
+
+    def test_new_window_script_never_reuses_the_current_window(self):
+        script = cli._ITERM_NEW_WINDOW_APPLESCRIPT
+        self.assertIn("create window with default profile", script)
+        self.assertNotIn("create tab", script)
+        self.assertNotIn("current window", script)
+
+    def test_unmatched_clients_fall_through_to_attach(self):
+        for iterm_probe, terminal_probe in (
+            ("not_found", "not_found"), ("not_running", "not_running"),
+            ("activated", "activated"), ("weird", ""),
+        ):
+            with self.subTest(iterm=iterm_probe, terminal=terminal_probe):
+                self.calls = []
+                (self.agentboard_home / "agentboard.log").unlink(missing_ok=True)
+                run = self._runner(clients="/dev/ttys002\tx\n/dev/ttys007\tx\n",
+                                   iterm_probe=iterm_probe, terminal_probe=terminal_probe)
+                rc, _ = self._focus(run)
+                self.assertEqual(rc, 0)
+                probes = [c for c in self.calls if c[0] == "osascript"][:-1]
+                self.assertEqual(
+                    [(p[2] is cli._ITERM_TMUX_CLIENT_APPLESCRIPT, p[3]) for p in probes],
+                    [(True, "/dev/ttys002"), (False, "/dev/ttys002"),
+                     (True, "/dev/ttys007"), (False, "/dev/ttys007")])
+                self.assertIs(self.calls[-1][2], cli._ITERM_NEW_WINDOW_APPLESCRIPT)
+                self.assertIn("outcome=tmux_attached_new_window", self._focus_line())
+
+    def test_probe_scripts_are_guarded_and_never_activate_on_a_miss(self):
+        for script, app in ((cli._ITERM_TMUX_CLIENT_APPLESCRIPT, "iTerm2"),
+                            (cli._TERMINAL_TMUX_CLIENT_APPLESCRIPT, "Terminal")):
+            with self.subTest(app=app):
+                guard = f'if application "{app}" is running then'
+                self.assertIn(guard, script)
+                self.assertLess(script.index(guard), script.index(f'tell application "{app}"'))
+                self.assertIn('return "not_running"', script)
+                # `activate` appears only inside the match branch, right
+                # before `return "found"`; nothing after the loops does.
+                found_at = script.index('return "found"')
+                self.assertEqual(script.count("activate"), 1)
+                self.assertLess(script.index("activate"), found_at)
+                self.assertNotIn("activate", script[found_at:])
+
+    def test_pane_gone_fails_without_opening_anything(self):
+        rc, err = self._focus(self._runner(display=("", 1)))
+        self.assertEqual(rc, 1)
+        self.assertIn("gone", err)
+        self.assertEqual([c[3] for c in self.calls], ["display-message"])
+        self.assertIn("outcome=tmux_pane_gone", self._focus_line())
+
+    def test_unknown_pane_with_exit_0_and_empty_output_is_gone(self):
+        # tmux 3.6 answers `display-message -t %99` with rc 0 and a blank line.
+        rc, _ = self._focus(self._runner(display=("\n", 0)))
+        self.assertEqual(rc, 1)
+        self.assertEqual([c[3] for c in self.calls], ["display-message"])
+        self.assertIn("outcome=tmux_pane_gone", self._focus_line())
+
+    def test_tmux_binary_missing_fails(self):
+        self.tmux_binary.return_value = None
+        rc, err = self._focus(self._runner())
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.calls, [])
+        self.assertIn("tmux not found", err)
+        self.assertIn("outcome=tmux_missing", self._focus_line())
+
+    def test_tmux_timeout_uses_the_timeout_path(self):
+        run = self._runner(timeout_on=lambda argv: argv[0] == TMUX_BIN)
+        rc, err = self._focus(run)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("timed out", err)
+        line = self._focus_line()
+        self.assertIn(" WARN cli.focus ", line)
+        self.assertIn("outcome=timeout", line)
+
+    def test_probe_timeout_uses_the_timeout_path(self):
+        run = self._runner(clients="/dev/ttys002\tx\n",
+                           timeout_on=lambda argv: argv[0] == "osascript")
+        rc, _ = self._focus(run)
+        self.assertEqual(rc, 1)
+        self.assertIn("outcome=timeout", self._focus_line())
+
+    def test_without_iterm_attaches_in_terminal_and_skips_the_iterm_probe(self):
+        run = self._runner(clients="/dev/ttys002\tx\n", iterm_installed=False)
+        rc, _ = self._focus(run)
+        self.assertEqual(rc, 0)
+        scripts = self._scripts()
+        self.assertNotIn(cli._ITERM_TMUX_CLIENT_APPLESCRIPT, scripts)
+        self.assertNotIn(cli._ITERM_NEW_WINDOW_APPLESCRIPT, scripts)
+        self.assertEqual(scripts, [cli._TERMINAL_TMUX_CLIENT_APPLESCRIPT,
+                                   cli._TERMINAL_RESUME_APPLESCRIPT])
+        self.assertEqual(self.calls[-1][3],
+                         f"{TMUX_BIN} -S {TMUX_SOCK} attach-session -t '$3'")
+        self.assertEqual(sum(1 for c in self.calls if c[:2] == ["open", "-Ra"]), 1)
+        self.assertIn("outcome=tmux_attached_terminal", self._focus_line())
+
+    def test_run_tmux_is_injectable_separately(self):
+        tmux_calls = []
+
+        def run_tmux(argv, **kwargs):
+            tmux_calls.append(argv)
+            if argv[3] == "display-message":
+                return _completed("$1\tx\t@1\n", args=argv)
+            return _completed("", args=argv)
+
+        args = cli.build_parser().parse_args(["focus", "claude", "s1"])
+        rc = cli.cmd_focus(args, run_osascript=self._runner(), run_tmux=run_tmux)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(tmux_calls), 4)
+        self.assertTrue(all(c[0] != TMUX_BIN for c in self.calls))
+
+    def test_tmux_binary_lookup(self):
+        with mock.patch.object(cli.shutil, "which", return_value=None), \
+             mock.patch.object(cli.os.path, "isfile", side_effect=lambda p: p == "/usr/local/bin/tmux"), \
+             mock.patch.object(cli.os, "access", return_value=True):
+            self.assertEqual(_REAL_TMUX_BINARY(), "/usr/local/bin/tmux")
+        with mock.patch.object(cli.shutil, "which", return_value="/x/tmux"):
+            self.assertEqual(_REAL_TMUX_BINARY(), "/x/tmux")
+        with mock.patch.object(cli.shutil, "which", return_value=None), \
+             mock.patch.object(cli.os.path, "isfile", return_value=False):
+            self.assertIsNone(_REAL_TMUX_BINARY())
+
+
+class TmuxSnapshotTests(AgentBoardTestCase):
+    def setUp(self):
+        super().setUp()
+        self._old_level = os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        patcher = mock.patch.object(cli, "_tmux_binary", return_value=TMUX_BIN)
+        self.tmux_binary = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.alive = set()
+        live = mock.patch.object(
+            reconcile, "effective_liveness",
+            side_effect=lambda tool, pid, sid, *a, **k: (sid in self.alive, pid),
+        )
+        live.start()
+        self.addCleanup(live.stop)
+        self.calls = []
+
+    def tearDown(self):
+        os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        if self._old_level is not None:
+            os.environ["AGENTBOARD_LOG_LEVEL"] = self._old_level
+        super().tearDown()
+
+    def _run(self, stdout="%0\tamp-agent\n%4\tscratch\n", rc=0, exc=None):
+        def run(argv, **kwargs):
+            self.calls.append((argv, kwargs))
+            if exc is not None:
+                raise exc
+            return _completed(stdout, returncode=rc, args=argv)
+        return run
+
+    def _entries(self, run):
+        snap = cli.build_snapshot(self.conn, include_all=True, run_tmux=run)
+        return {e["session_id"]: e for e in snap["sessions"]}
+
+    def test_tmux_row_is_focusable_and_named(self):
+        insert_session(self.conn, session_id="t1", term_program="tmux",
+                       tmux_socket=TMUX_SOCK, tmux_pane="%0")
+        self.alive = {"t1"}
+        entry = self._entries(self._run())["t1"]
+        self.assertIs(entry["can_focus"], True)
+        self.assertIs(entry["tmux"], True)
+        self.assertEqual(entry["tmux_session"], "amp-agent")
+        ((argv, kwargs),) = self.calls
+        self.assertEqual(argv, [TMUX_BIN, "-S", TMUX_SOCK, "list-panes", "-a",
+                                "-F", "#{pane_id}\t#{session_name}"])
+        self.assertEqual(kwargs["timeout"], cli.TMUX_SNAPSHOT_TIMEOUT_SECS)
+
+    def test_one_call_per_socket(self):
+        insert_session(self.conn, session_id="t1", tmux_socket=TMUX_SOCK, tmux_pane="%0")
+        insert_session(self.conn, session_id="t2", tmux_socket=TMUX_SOCK, tmux_pane="%4")
+        insert_session(self.conn, session_id="t3", tmux_socket="/tmp/other", tmux_pane="%1")
+        self.alive = {"t1", "t2", "t3"}
+        entries = self._entries(self._run())
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(entries["t1"]["tmux_session"], "amp-agent")
+        self.assertEqual(entries["t2"]["tmux_session"], "scratch")
+        # A pane the server doesn't list stays unresolved.
+        self.assertIsNone(entries["t3"]["tmux_session"])
+        self.assertIs(entries["t3"]["tmux"], True)
+
+    def test_failures_leave_the_name_null_and_log_nothing_at_info(self):
+        insert_session(self.conn, session_id="t1", tmux_socket=TMUX_SOCK, tmux_pane="%0")
+        self.alive = {"t1"}
+        for run in (self._run(rc=1),
+                    self._run(exc=subprocess.TimeoutExpired(["tmux"], 1)),
+                    self._run(exc=FileNotFoundError("tmux"))):
+            entry = self._entries(run)["t1"]
+            self.assertIs(entry["tmux"], True)
+            self.assertIsNone(entry["tmux_session"])
+        self.tmux_binary.return_value = None
+        self.calls = []
+        entry = self._entries(self._run())["t1"]
+        self.assertIsNone(entry["tmux_session"])
+        self.assertEqual(self.calls, [])
+        path = self.agentboard_home / "agentboard.log"
+        text = path.read_text() if path.exists() else ""
+        self.assertNotIn(" INFO ", text)
+        self.assertNotIn(" WARN ", text)
+
+    def test_ended_dead_and_non_tmux_rows_make_no_calls(self):
+        insert_session(self.conn, session_id="ended", tmux_socket=TMUX_SOCK, tmux_pane="%0",
+                       ended_at="2026-06-15T11:00:00.000000Z")
+        insert_session(self.conn, session_id="dead", tmux_socket=TMUX_SOCK, tmux_pane="%4")
+        insert_session(self.conn, session_id="plain", term_program="iTerm.app")
+        self.alive = {"ended", "plain"}
+        entries = self._entries(self._run())
+        self.assertEqual(self.calls, [])
+        self.assertIsNone(entries["ended"]["tmux_session"])
+        self.assertIs(entries["ended"]["tmux"], True)
+        self.assertIs(entries["plain"]["tmux"], False)
+        self.assertIs(entries["plain"]["can_focus"], True)
+
+    def test_snapshot_without_tmux_rows_never_looks_for_tmux(self):
+        insert_session(self.conn, session_id="plain", term_program="iTerm.app")
+        self.alive = {"plain"}
+        self._entries(self._run())
+        self.assertEqual(self.calls, [])
+        self.tmux_binary.assert_not_called()
 
 
 class _LogLevelMixin:
