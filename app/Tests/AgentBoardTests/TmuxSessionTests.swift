@@ -45,6 +45,14 @@ struct TmuxSessionTests {
         #expect(SessionSearch("amp-agent").filter([session, other]).map(\.key) == [session.key])
     }
 
+    @Test func searchMatchesTheWordTmuxOnTmuxRows() {
+        let named = Fixtures.decoded("t1", extra: ["tmux": true, "tmux_session": "amp-agent"])
+        let unnamed = Fixtures.decoded("t2", extra: ["tmux": true, "tmux_session": NSNull()])
+        let other = Fixtures.decoded("s2")
+        #expect(SessionSearch("tmux").filter([named, unnamed, other]).map(\.key)
+                == [named.key, unnamed.key])
+    }
+
     @Test func fixtureHasOneTmuxSession() throws {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
