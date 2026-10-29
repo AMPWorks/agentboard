@@ -23,7 +23,9 @@ CLEAN_EXIT_REASONS = {"prompt_input_exit", "logout"}
 # Non-subagent events that mean "the agent is blocked on the user", used
 # to confirm nothing needs_you-shaped was left pending right before a
 # clean exit.
-NEEDS_YOU_EVENT_NAMES = {"PermissionRequest", "StopFailure", NEEDS_YOU_TOOL_SENTINEL}
+NEEDS_YOU_EVENT_NAMES = {
+    "PermissionRequest", "StopFailure", NEEDS_YOU_TOOL_SENTINEL, "Elicitation",
+}
 
 # Events after which it is the user's turn (with Notification
 # idle_prompt). SessionEnd is not one: a session the user exited is not
@@ -38,7 +40,9 @@ ENDED_MID_TURN_REASON = "Ended mid-turn"
 # A Stop that listed background tasks still in flight: the session is
 # waiting on its own work, not on the user.
 BACKGROUND_WAIT_REASON = "Waiting on {count} background task{plural}"
-NEEDS_YOU_EVENTS = {"PermissionRequest", "StopFailure", NEEDS_YOU_TOOL_SENTINEL}
+# The needs_you members of hook.FINISHED_TURN_EVENTS (an Elicitation is an
+# MCP server asking the user a question).
+NEEDS_YOU_EVENTS = {"PermissionRequest", "StopFailure", NEEDS_YOU_TOOL_SENTINEL, "Elicitation"}
 
 RUNNING_FRESH_MINUTES = 10
 STALE_MINUTES = 30

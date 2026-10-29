@@ -30,6 +30,8 @@ CLAUDE_EVENTS = [
     "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
     "PostToolUseFailure", "PermissionRequest", "Notification", "Stop",
     "StopFailure", "SubagentStart", "SubagentStop", "SessionEnd",
+    "PreCompact", "PostCompact", "CwdChanged", "Elicitation", "ElicitationResult",
+    "PermissionDenied", "PostModelSwitch",
 ]
 CODEX_EVENTS = [
     "SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
@@ -326,6 +328,7 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
         "model": session.get("model"),
         "context_tokens": session.get("context_tokens"),
         "context_at": session.get("context_at"),
+        "permission_mode": session.get("permission_mode"),
         "links": [
             {
                 "kind": link["kind"],
@@ -2408,7 +2411,8 @@ VACUUM_MIN_FREE_FRACTION = 0.25
 # session row carries `last_event`), and they are most of the table.
 COMPACTED_EVENTS = (
     "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart",
-    "SubagentStop", "PreCompact", "PostCompact",
+    "SubagentStop", "PreCompact", "PostCompact", "CwdChanged", "ElicitationResult",
+    "PermissionDenied",
 )
 PRUNE_META_LAST_PRUNE = "last_prune_at"
 PRUNE_META_LAST_VACUUM = "last_vacuum_at"

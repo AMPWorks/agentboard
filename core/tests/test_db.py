@@ -176,7 +176,7 @@ class DbTests(AgentBoardTestCase):
         old.close()
         conn = db.connect(path)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
             session = conn.execute("SELECT * FROM sessions").fetchone()
             self.assertEqual(session["title"], "kept")
             for col in ("model", "context_tokens", "context_at"):
@@ -185,8 +185,28 @@ class DbTests(AgentBoardTestCase):
         finally:
             conn.close()
 
+    def test_migration_9_adds_permission_mode_to_a_v8_database(self):
+        path = self.tmp_path / "v8.db"
+        old = sqlite3.connect(str(path), isolation_level=None)
+        for version in range(1, 9):
+            old.executescript(db._MIGRATIONS[version])
+        old.execute("PRAGMA user_version = 8")
+        old.execute(
+            "INSERT INTO sessions(tool, session_id, model) VALUES ('claude', 's1', 'kept')"
+        )
+        old.close()
+        conn = db.connect(path)
+        try:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 9)
+            session = conn.execute("SELECT * FROM sessions").fetchone()
+            self.assertEqual(session["model"], "kept")
+            self.assertIn("permission_mode", session.keys())
+            self.assertIsNone(session["permission_mode"])
+        finally:
+            conn.close()
+
     def test_fresh_database_has_usage_columns(self):
-        self.assertEqual(db.SCHEMA_VERSION, 8)
+        self.assertEqual(db.SCHEMA_VERSION, 9)
         cols = {row["name"]: row["type"]
                 for row in self.conn.execute("PRAGMA table_info(sessions)")}
         self.assertEqual(cols.get("model"), "TEXT")
@@ -195,10 +215,12 @@ class DbTests(AgentBoardTestCase):
 
     def test_existing_migrations_are_unchanged(self):
         # Migrations already applied in the field are never edited.
-        self.assertEqual(sorted(db._MIGRATIONS), [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(sorted(db._MIGRATIONS), [1, 2, 3, 4, 5, 6, 7, 8, 9])
         self.assertIn("ALTER TABLE sessions ADD COLUMN retitle_branch TEXT;", db._MIGRATIONS[6])
         self.assertNotIn("prompt_kind", db._MIGRATIONS[6])
         self.assertNotIn("context_tokens", db._MIGRATIONS[7])
+        self.assertIn("ALTER TABLE sessions ADD COLUMN permission_mode TEXT;", db._MIGRATIONS[9])
+        self.assertNotIn("permission_mode", db._MIGRATIONS[8])
 
     def test_db_file_created_under_agentboard_home(self):
         self.assertTrue((self.agentboard_home / "agentboard.db").exists())

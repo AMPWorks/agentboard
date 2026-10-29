@@ -272,6 +272,11 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     var model: String?
     var contextTokens: Int?
     var contextAt: String?
+    /// The permission mode the session's newest parent hook event reported
+    /// (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
+    /// `bypassPermissions`, or a newer one). Nil for Codex, older CLIs and
+    /// rows no hook has touched since the upgrade.
+    var permissionMode: String?
 
     var id: String { key }
 
@@ -303,6 +308,7 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         case model
         case contextTokens = "context_tokens"
         case contextAt = "context_at"
+        case permissionMode = "permission_mode"
     }
 
     /// The CLI emits `null` for cwd/project/resume_command when a session's
@@ -350,6 +356,7 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         model = (try? c.decodeIfPresent(String.self, forKey: .model)) ?? nil
         contextTokens = (try? c.decodeIfPresent(Int.self, forKey: .contextTokens)) ?? nil
         contextAt = (try? c.decodeIfPresent(String.self, forKey: .contextAt)) ?? nil
+        permissionMode = (try? c.decodeIfPresent(String.self, forKey: .permissionMode)) ?? nil
     }
 
     static func == (lhs: Session, rhs: Session) -> Bool {
@@ -361,6 +368,7 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
             // The post-Stop re-parse updates these without touching updatedAt.
             && lhs.model == rhs.model && lhs.contextTokens == rhs.contextTokens
             && lhs.contextAt == rhs.contextAt
+            && lhs.permissionMode == rhs.permissionMode
     }
     func hash(into hasher: inout Hasher) { hasher.combine(key) }
 

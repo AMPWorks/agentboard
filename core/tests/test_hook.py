@@ -1091,6 +1091,463 @@ class HookProcessPayloadTests(AgentBoardTestCase):
         self.assertIsNone(self._session_row()["interactive"])
 
 
+class NewerHookEventTests(AgentBoardTestCase):
+    """The newer Claude Code events: CwdChanged, compaction, Elicitation,
+    PermissionDenied, PostModelSwitch and the permission_mode field."""
+
+    _clock = 0
+
+    def setUp(self):
+        super().setUp()
+        self._old_level = os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        self.git_calls = []
+
+    def tearDown(self):
+        os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        if self._old_level is not None:
+            os.environ["AGENTBOARD_LOG_LEVEL"] = self._old_level
+        super().tearDown()
+
+    def _send(self, event, cwd="/tmp", git_stdout="", **fields):
+        """Send one event at a distinct, increasing timestamp; returns it.
+        Every `git` fallback call is recorded in self.git_calls."""
+        NewerHookEventTests._clock += 1
+        clock = NewerHookEventTests._clock
+        ts = f"2026-10-25T{clock // 3600 % 24:02d}:{clock // 60 % 60:02d}:" \
+             f"{clock % 60:02d}.000000Z"
+        payload = {"session_id": "s1", "hook_event_name": event, **fields}
+        if cwd is not None:
+            payload["cwd"] = cwd
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                self.git_calls.append(cmd)
+                return mock.Mock(returncode=0, stdout=git_stdout)
+            return mock.Mock(returncode=0, stdout="")
+
+        with mock.patch("agentboard.hook.subprocess.run", side_effect=fake_run), \
+             mock.patch("agentboard.hook.subprocess.Popen"), \
+             mock.patch("agentboard.hook._now_iso", return_value=ts):
+            hook.process_payload(self.conn, "claude", payload)
+        return ts
+
+    def _row(self):
+        return self.conn.execute(
+            "SELECT * FROM sessions WHERE tool='claude' AND session_id='s1'").fetchone()
+
+    def _events(self, name):
+        return self.conn.execute(
+            "SELECT * FROM events WHERE event=? ORDER BY id", (name,)).fetchall()
+
+    def _state(self, row, alive=True):
+        now = reconcile.parse_ts(row["updated_at"]) + timedelta(minutes=1)
+        return reconcile.compute_state(dict(row), None, [], now=now, alive=alive)
+
+    def _repo(self, name, head):
+        repo = self.tmp_path / name
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text(head)
+        return str(repo)
+
+    def _event_lines(self):
+        path = self.agentboard_home / "agentboard.log"
+        lines = path.read_text().splitlines() if path.exists() else []
+        return [line for line in lines if " hook.event " in line]
+
+    # -- CwdChanged and compaction -----------------------------------------
+
+    def test_cwd_changed_mid_turn_is_activity_and_rereads_the_branch(self):
+        first = self._repo("one", "ref: refs/heads/main\n")
+        second = self._repo("two", "ref: refs/heads/feature-two\n")
+        self._send("UserPromptSubmit", cwd=first, prompt="go")
+        self._send("PreToolUse", cwd=first, tool_name="Bash")
+        self.assertEqual(self._row()["branch"], "main")
+        ts = self._send("CwdChanged", cwd=second, old_cwd=first, new_cwd=second)
+        row = self._row()
+        self.assertEqual((row["last_event"], row["last_event_at"]), ("CwdChanged", ts))
+        self.assertEqual((row["cwd"], row["branch"]), (second, "feature-two"))
+        self.assertEqual(self.git_calls, [], "the HEAD file is read without a git process")
+        extra = json.loads(self._events("CwdChanged")[0]["extra"])
+        self.assertEqual((extra["old_cwd"], extra["new_cwd"]), (first, second))
+        self.assertEqual(self._state(row)[0], "running")
+
+    def test_cwd_changed_prefers_new_cwd(self):
+        first = self._repo("one", "ref: refs/heads/main\n")
+        second = self._repo("two", "ref: refs/heads/feature-two\n")
+        self._send("UserPromptSubmit", cwd=first, prompt="go")
+        self._send("CwdChanged", cwd=first, old_cwd=first, new_cwd=second)
+        self.assertEqual((self._row()["cwd"], self._row()["branch"]), (second, "feature-two"))
+
+    def test_cwd_changed_out_of_a_repository_clears_the_branch(self):
+        repo = self._repo("one", "ref: refs/heads/main\n")
+        plain = self.tmp_path / "plain"
+        plain.mkdir()
+        self._send("UserPromptSubmit", cwd=repo, prompt="go")
+        self.assertEqual(self._row()["branch"], "main")
+        self._send("CwdChanged", cwd=str(plain), old_cwd=repo, new_cwd=str(plain))
+        self.assertIsNone(self._row()["branch"])
+        self.assertEqual(len(self.git_calls), 1, "outside a repository git is the fallback")
+        # The existing empty-branch re-read: the next event pays one git
+        # process (the documented known cost).
+        self.git_calls.clear()
+        self._send("PreToolUse", cwd=str(plain), tool_name="Bash")
+        self.assertEqual(len(self.git_calls), 1)
+        self.assertIsNone(self._row()["branch"])
+
+    def test_cwd_changed_into_a_detached_head_clears_the_branch(self):
+        repo = self._repo("one", "ref: refs/heads/main\n")
+        detached = self._repo("two", "0123456789abcdef0123456789abcdef01234567\n")
+        self._send("UserPromptSubmit", cwd=repo, prompt="go")
+        self._send("CwdChanged", cwd=detached, old_cwd=repo, new_cwd=detached)
+        self.assertIsNone(self._row()["branch"])
+        self.assertEqual(self.git_calls, [])
+
+    def test_cwd_changed_after_a_stop_keeps_the_finished_turn(self):
+        first = self._repo("one", "ref: refs/heads/main\n")
+        second = self._repo("two", "ref: refs/heads/feature-two\n")
+        self._send("UserPromptSubmit", cwd=first, prompt="go")
+        stop_ts = self._send("Stop", cwd=first, last_assistant_message="All done.")
+        late = self._send("CwdChanged", cwd=second, old_cwd=first, new_cwd=second)
+        row = self._row()
+        self.assertEqual((row["last_event"], row["last_event_at"]), ("Stop", stop_ts))
+        self.assertIsNone(row["waiting_reason"])
+        self.assertEqual(row["updated_at"], late)
+        self.assertEqual((row["cwd"], row["branch"]), (second, "feature-two"))
+        state, reason = self._state(row)[:2]
+        self.assertEqual(state, "review")
+        self.assertTrue(reason.startswith("Your turn"), reason)
+
+    def test_subagent_cwd_changed_keeps_state_and_branch(self):
+        first = self._repo("one", "ref: refs/heads/main\n")
+        second = self._repo("two", "ref: refs/heads/feature-two\n")
+        self._send("UserPromptSubmit", cwd=first, prompt="go")
+        ts = self._send("PermissionRequest", cwd=first, tool_name="Bash")
+        self._send("CwdChanged", cwd=second, agent_id="sub-1", old_cwd=first, new_cwd=second)
+        row = self._row()
+        self.assertEqual((row["last_event"], row["waiting_reason"], row["last_event_at"]),
+                         ("PermissionRequest", "Bash", ts))
+        self.assertEqual(row["branch"], "main", "no branch re-read for a subagent")
+        self.assertEqual(row["cwd"], second, "cwd follows the every-event COALESCE")
+
+    def test_local_only_command_after_a_stop_keeps_the_finished_turn(self):
+        commands = {
+            "/compact": "<command-name>/compact</command-name>"
+                        "<command-message>compact</command-message><command-args></command-args>",
+            "/model opus": "<command-name>/model</command-name>"
+                           "<command-message>model</command-message>"
+                           "<command-args>opus</command-args>",
+        }
+        for label, prompt in commands.items():
+            with self.subTest(label):
+                self._send("UserPromptSubmit", prompt="go")
+                stop_ts = self._send("Stop", last_assistant_message="done")
+                late = self._send("UserPromptSubmit", prompt=prompt)
+                row = self._row()
+                self.assertEqual((row["last_event"], row["last_event_at"]), ("Stop", stop_ts))
+                self.assertEqual(row["updated_at"], late)
+                self.assertEqual(self._events("UserPromptSubmit")[-1]["ts"], late,
+                                 "the event row is still recorded")
+
+    def test_plan_with_args_after_a_stop_starts_a_turn(self):
+        self._send("UserPromptSubmit", prompt="go")
+        self._send("Stop", last_assistant_message="done")
+        late = self._send(
+            "UserPromptSubmit",
+            prompt="<command-name>/plan</command-name><command-message>plan</command-message>"
+                   "<command-args>fix the bug</command-args>",
+        )
+        row = self._row()
+        self.assertEqual((row["last_event"], row["last_event_at"]), ("UserPromptSubmit", late))
+
+    def test_local_only_command_after_a_stop_failure_keeps_needs_you(self):
+        # Deliberate: after an API error the user often switches away from
+        # the failing model with /model. Nothing has been retried yet, so
+        # the failure still needs the user; the row stays needs_you with
+        # the error until a real prompt arrives.
+        self._send("UserPromptSubmit", prompt="go")
+        fail_ts = self._send("StopFailure", error="rate_limit",
+                             last_assistant_message="API Error: Rate limit reached")
+        reason = self._row()["waiting_reason"]
+        self._send(
+            "UserPromptSubmit",
+            prompt="<command-name>/model</command-name><command-message>model"
+                   "</command-message><command-args>opus</command-args>",
+        )
+        row = self._row()
+        self.assertEqual((row["last_event"], row["waiting_reason"], row["last_event_at"]),
+                         ("StopFailure", reason, fail_ts))
+        state, state_reason = self._state(row)[:2]
+        self.assertEqual((state, state_reason), ("needs_you", reason))
+        late = self._send("UserPromptSubmit", prompt="try again")
+        self.assertEqual((self._row()["last_event"], self._row()["last_event_at"]),
+                         ("UserPromptSubmit", late))
+
+    def test_idle_compact_with_a_leading_command_prompt_stays_your_turn(self):
+        self._send("UserPromptSubmit", prompt="go")
+        stop_ts = self._send("Stop", last_assistant_message="All done.")
+        self._send(
+            "UserPromptSubmit",
+            prompt="<command-name>/compact</command-name><command-message>compact"
+                   "</command-message><command-args></command-args>",
+        )
+        self._send("PreCompact", trigger="manual", custom_instructions="")
+        self._send("PostCompact", trigger="manual", compact_summary="the whole conversation")
+        self._send("SessionStart", source="compact")
+        row = self._row()
+        self.assertEqual((row["last_event"], row["last_event_at"]), ("Stop", stop_ts))
+        state, reason = self._state(row)[:2]
+        self.assertEqual(state, "review")
+        self.assertTrue(reason.startswith("Your turn"), reason)
+        extra = json.loads(self._events("PostCompact")[0]["extra"])
+        self.assertEqual(extra, {"trigger": "manual"}, "compact_summary is never stored")
+
+    def test_kept_after_turn_events_log_ignored_after_turn(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._send("UserPromptSubmit", prompt="go")
+        self._send("Stop", last_assistant_message="done")
+        self._send("CwdChanged", old_cwd="/tmp", new_cwd="/tmp")
+        self._send("PreCompact", trigger="manual")
+        lines = self._event_lines()
+        cwd_line = next(line for line in lines if "event=CwdChanged" in line)
+        compact_line = next(line for line in lines if "event=PreCompact" in line)
+        self.assertIn("ignored=after_turn", cwd_line)
+        self.assertIn("ignored=after_turn", compact_line)
+
+    # -- Elicitation --------------------------------------------------------
+
+    def test_elicitation_is_needs_you_with_the_server_and_message(self):
+        for mode in ("form", "url"):
+            with self.subTest(mode):
+                self._send("UserPromptSubmit", prompt="go")
+                self._send("PreToolUse", tool_name="mcp__srv__login")
+                self._send("Elicitation", mcp_server_name="srv", mode=mode,
+                           message="Pick one\nmore detail", elicitation_id="e1",
+                           url="https://example.invalid/auth?token=secret",
+                           requested_schema={"type": "object"})
+                row = self._row()
+                self.assertEqual((row["last_event"], row["waiting_reason"]),
+                                 ("Elicitation", "srv: Pick one"))
+                self.assertEqual(self._state(row)[:2], ("needs_you", "srv: Pick one"))
+                event = self._events("Elicitation")[-1]
+                self.assertEqual(event["text"], "Pick one\nmore detail")
+                extra = json.loads(event["extra"])
+                self.assertEqual(extra, {"mcp_server_name": "srv", "mode": mode})
+
+    def test_elicitation_reason_shapes(self):
+        self.assertEqual(hook.elicitation_reason("srv", ""), "srv")
+        self.assertEqual(hook.elicitation_reason("srv", None), "srv")
+        self.assertEqual(hook.elicitation_reason(None, "\n  Question?  \n"), "Question?")
+        self.assertIsNone(hook.elicitation_reason("", ""))
+        long = hook.elicitation_reason("srv", "x" * 400)
+        self.assertEqual(len(long), hook.ELICITATION_REASON_CHARS)
+        self.assertTrue(long.startswith("srv: xxx"))
+
+    def test_elicitation_dialog_after_the_elicitation_keeps_its_reason(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._send("UserPromptSubmit", prompt="go")
+        ts = self._send("Elicitation", mcp_server_name="srv", message="Pick one")
+        for kind in ("elicitation_dialog", "elicitation_url_dialog"):
+            self._send("Notification", notification_type=kind, message="Some dialog text")
+        row = self._row()
+        self.assertEqual((row["last_event"], row["waiting_reason"], row["last_event_at"]),
+                         ("Elicitation", "srv: Pick one", ts))
+        self.assertEqual(len(self._events("Elicitation")), 1)
+        self.assertEqual(len(self._events("Notification")), 2, "both rows are recorded")
+        dialog_line = next(line for line in self._event_lines() if "event=Notification" in line)
+        self.assertIn("ignored=elicitation_dialog", dialog_line)
+
+    def test_lone_elicitation_dialog_is_needs_you_with_its_message(self):
+        for kind in ("elicitation_dialog", "elicitation_url_dialog"):
+            with self.subTest(kind):
+                self._send("UserPromptSubmit", prompt="go")
+                self._send("Notification", notification_type=kind, message="Sign in please")
+                row = self._row()
+                self.assertEqual((row["last_event"], row["waiting_reason"]),
+                                 ("Notification", "Sign in please"))
+                state = reconcile.compute_state(
+                    dict(row), None, [], now=reconcile.parse_ts(row["updated_at"]),
+                    alive=True, notification_type=kind)
+                self.assertEqual(state[:2], ("needs_you", "Sign in please"))
+
+    def test_elicitation_result_is_activity_whatever_the_action(self):
+        for action in ("accept", "decline", "cancel"):
+            with self.subTest(action):
+                self._send("UserPromptSubmit", prompt="go")
+                self._send("Elicitation", mcp_server_name="srv", message="Pick one")
+                ts = self._send("ElicitationResult", mcp_server_name="srv", action=action,
+                                mode="form", elicitation_id="e1",
+                                content={"password": "hunter2"})
+                row = self._row()
+                self.assertEqual((row["last_event"], row["last_event_at"]),
+                                 ("ElicitationResult", ts))
+                self.assertIsNone(row["waiting_reason"])
+                self.assertEqual(self._state(row)[0], "running")
+                extra = json.loads(self._events("ElicitationResult")[-1]["extra"])
+                self.assertEqual(extra, {"mcp_server_name": "srv", "action": action,
+                                         "mode": "form"})
+
+    def test_mcp_tool_post_tool_use_clears_an_unanswered_elicitation(self):
+        self._send("UserPromptSubmit", prompt="go")
+        self._send("Elicitation", mcp_server_name="srv", message="Pick one")
+        self._send("PostToolUse", tool_name="mcp__srv__login")
+        self.assertEqual(self._row()["last_event"], "PostToolUse")
+
+    def test_subagent_elicitation_and_background_subagent_stop_keep_the_row(self):
+        self._send("UserPromptSubmit", prompt="go")
+        self._send("PreToolUse", tool_name="Bash")
+        self._send("Elicitation", agent_id="sub-1", mcp_server_name="srv", message="x")
+        self.assertEqual(self._row()["last_event"], "PreToolUse")
+        ts = self._send("Elicitation", mcp_server_name="srv", message="Pick one")
+        self._send("SubagentStop", agent_id="bg-1")
+        row = self._row()
+        self.assertEqual((row["last_event"], row["waiting_reason"], row["last_event_at"]),
+                         ("Elicitation", "srv: Pick one", ts))
+
+    def test_elicitation_complete_is_irrelevant(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._send("UserPromptSubmit", prompt="go")
+        stop_ts = self._send("Stop", last_assistant_message="done")
+        self._send("Notification", notification_type="elicitation_complete", message="ok")
+        row = self._row()
+        self.assertEqual((row["last_event"], row["waiting_reason"], row["last_event_at"]),
+                         ("Stop", None, stop_ts))
+        self.assertEqual(len(self._events("Notification")), 1)
+        self._send("UserPromptSubmit", prompt="again")
+        self._send("Elicitation", mcp_server_name="srv", message="Pick one")
+        self._send("ElicitationResult", mcp_server_name="srv", action="accept")
+        self._send("Notification", notification_type="elicitation_complete")
+        self._send("Notification", notification_type="elicitation_response")
+        # Mid-turn a kept event still advances last_event_at, as always.
+        self.assertEqual(self._row()["last_event"], "ElicitationResult")
+        lines = [line for line in self._event_lines() if "event=Notification" in line]
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            self.assertIn("ignored=irrelevant_notification", line)
+
+    # -- PermissionDenied ---------------------------------------------------
+
+    def test_permission_denied_mid_turn_is_activity_with_the_reason(self):
+        self._send("UserPromptSubmit", prompt="go")
+        ts = self._send("PermissionDenied", tool_name="mcp__srv__delete",
+                        tool_input={"path": "/"}, tool_use_id="t1",
+                        reason="[Destructive] deletes files", mcp_server="srv")
+        row = self._row()
+        self.assertEqual((row["last_event"], row["last_event_at"]), ("PermissionDenied", ts))
+        self.assertIsNone(row["waiting_reason"])
+        self.assertEqual(self._state(row)[0], "running")
+        event = self._events("PermissionDenied")[0]
+        self.assertEqual((event["tool_name"], event["text"]),
+                         ("mcp__srv__delete", "[Destructive] deletes files"))
+        self.assertEqual(json.loads(event["extra"]),
+                         {"reason": "[Destructive] deletes files", "mcp_server": "srv"})
+
+    def test_permission_denied_then_permission_request_is_needs_you(self):
+        self._send("UserPromptSubmit", prompt="go")
+        self._send("PermissionDenied", tool_name="Bash", reason="blocked")
+        self._send("PermissionRequest", tool_name="Bash")
+        row = self._row()
+        self.assertEqual(self._state(row)[:2], ("needs_you", "Bash"))
+
+    def test_permission_denied_then_stop_is_your_turn(self):
+        self._send("UserPromptSubmit", prompt="go")
+        self._send("PermissionDenied", tool_name="Bash", reason="blocked")
+        self._send("Stop", last_assistant_message="I could not run that.")
+        state, reason = self._state(self._row())[:2]
+        self.assertEqual(state, "review")
+        self.assertEqual(reason, "Your turn: I could not run that.")
+
+    # -- permission_mode ----------------------------------------------------
+
+    def _mode(self):
+        return self._row()["permission_mode"]
+
+    def test_first_session_start_stores_the_permission_mode(self):
+        self._send("SessionStart", source="startup", permission_mode="plan")
+        self.assertEqual(self._mode(), "plan")
+        self._send("UserPromptSubmit", prompt="go", permission_mode="default")
+        self.assertEqual(self._mode(), "default", "the next event overwrites it")
+
+    def test_first_subagent_event_stores_no_mode(self):
+        self._send("PreToolUse", agent_id="sub-1", tool_name="Bash", permission_mode="plan")
+        self.assertIsNone(self._mode())
+
+    def test_payload_without_a_mode_keeps_the_stored_one(self):
+        self._send("PreToolUse", tool_name="Bash")
+        self.assertIsNone(self._mode())
+        self._send("PreToolUse", tool_name="Bash", permission_mode="auto")
+        self._send("PostToolUse", tool_name="Bash")
+        self.assertEqual(self._mode(), "auto")
+
+    def test_subagent_event_in_another_mode_keeps_the_parent_mode(self):
+        self._send("UserPromptSubmit", prompt="go", permission_mode="acceptEdits")
+        self._send("PreToolUse", agent_id="sub-1", tool_name="Bash",
+                   permission_mode="bypassPermissions")
+        self.assertEqual(self._mode(), "acceptEdits")
+
+    def test_non_string_or_empty_mode_is_ignored(self):
+        self._send("UserPromptSubmit", prompt="go", permission_mode="plan")
+        for value in (3, True, ["plan"], "", "   "):
+            self._send("PreToolUse", tool_name="Bash", permission_mode=value)
+        self.assertEqual(self._mode(), "plan")
+
+    # -- PostModelSwitch ----------------------------------------------------
+
+    def test_model_switch_after_a_stop_keeps_the_turn_and_stores_the_model(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._send("SessionStart", source="startup", model="claude-opus-5-5")
+        self._send("UserPromptSubmit", prompt="go")
+        stop_ts = self._send("Stop", last_assistant_message="All done.")
+        late = self._send("PostModelSwitch", from_model="claude-opus-5-5",
+                          to_model="claude-sonnet-5-5", source="command",
+                          context_tokens=120000, prompt_cache_warm=False)
+        row = self._row()
+        self.assertEqual((row["last_event"], row["waiting_reason"], row["last_event_at"]),
+                         ("Stop", None, stop_ts))
+        self.assertEqual(row["updated_at"], late)
+        self.assertEqual((row["model"], row["context_tokens"], row["context_at"]),
+                         ("claude-sonnet-5-5", 120000, late))
+        extra = json.loads(self._events("PostModelSwitch")[0]["extra"])
+        self.assertEqual(extra, {"from_model": "claude-opus-5-5", "to_model": "claude-sonnet-5-5",
+                                 "source": "command", "context_tokens": 120000})
+        line = next(line for line in self._event_lines() if "event=PostModelSwitch" in line)
+        self.assertIn("ignored=state_neutral", line)
+
+    def test_model_switch_mid_turn_keeps_activity_and_advances_its_time(self):
+        self._send("UserPromptSubmit", prompt="go")
+        self._send("PreToolUse", tool_name="Bash")
+        late = self._send("PostModelSwitch", from_model="a", to_model="b", source="auto")
+        row = self._row()
+        self.assertEqual((row["last_event"], row["last_event_at"]), ("PreToolUse", late))
+        self.assertEqual(row["model"], "b")
+
+    def test_first_event_being_a_model_switch_inserts_a_stateless_row(self):
+        self._send("PostModelSwitch", from_model="a", to_model="b", source="resume",
+                   permission_mode="plan")
+        row = self._row()
+        self.assertIsNone(row["last_event"])
+        self.assertEqual((row["model"], row["permission_mode"]), ("b", "plan"))
+        state = reconcile.compute_state(
+            dict(row), None, [], now=reconcile.parse_ts(row["updated_at"]), alive=True,
+            registry_entry={"status": "waiting", "waitingFor": "approve Bash"})
+        self.assertEqual(state[:2], ("needs_you", "approve Bash"),
+                         "the registry rule decides a row with no last_event")
+
+    def test_malformed_model_switch_fields_are_ignored(self):
+        self._send("SessionStart", source="startup", model="claude-opus-5-5")
+        for to_model, tokens in ((None, True), (42, -1), ("  ", "100"), (["x"], 2 ** 63)):
+            self._send("PostModelSwitch", to_model=to_model, context_tokens=tokens)
+        row = self._row()
+        self.assertEqual(row["model"], "claude-opus-5-5")
+        self.assertIsNone(row["context_tokens"])
+
+    def test_subagent_model_switch_changes_nothing(self):
+        self._send("SessionStart", source="startup", model="claude-opus-5-5")
+        self._send("PostModelSwitch", agent_id="sub-1", to_model="claude-haiku-5",
+                   context_tokens=10)
+        row = self._row()
+        self.assertEqual((row["model"], row["context_tokens"]), ("claude-opus-5-5", None))
+
+
 def _fake_ps_chain(hops):
     """hops: ordered [(pid, ppid, tty, comm), ...] consumed by pid lookups."""
     table = {pid: (ppid, tty, comm) for pid, ppid, tty, comm in hops}
@@ -1635,6 +2092,35 @@ class CleanPromptTextTests(AgentBoardTestCase):
             "<command-name>/review-pr-deterministic</command-name>"
         )
         self.assertEqual(hook.clean_prompt_text(text), "/review-pr-deterministic")
+
+
+class IsLocalOnlyPromptTests(AgentBoardTestCase):
+    def test_none_and_ordinary_prompts_are_not_local_only(self):
+        for text in (None, "fix the bug", "please exit cleanly", 42):
+            self.assertFalse(hook.is_local_only_prompt(text), repr(text))
+
+    def test_exit_words_are_local_only(self):
+        for text in ("exit", " QUIT ", "/exit"):
+            self.assertTrue(hook.is_local_only_prompt(text), repr(text))
+
+    def test_local_only_commands(self):
+        self.assertTrue(hook.is_local_only_prompt("<command-name>/compact</command-name>"))
+        self.assertTrue(hook.is_local_only_prompt(
+            "<command-name>/model</command-name><command-message>model</command-message>"
+            "<command-args>opus</command-args>"))
+
+    def test_plan_without_args_is_local_only(self):
+        self.assertTrue(hook.is_local_only_prompt(
+            "<command-name>/plan</command-name><command-args>  </command-args>"))
+        self.assertTrue(hook.is_local_only_prompt("<command-name>/plan</command-name>"))
+
+    def test_plan_with_args_starts_a_turn(self):
+        self.assertFalse(hook.is_local_only_prompt(
+            "<command-name>/plan</command-name><command-args>fix the bug</command-args>"))
+
+    def test_skill_command_is_not_local_only(self):
+        self.assertFalse(hook.is_local_only_prompt(
+            "<command-name>/review-pr</command-name><command-args>12</command-args>"))
 
 
 class NormalizeBranchTests(AgentBoardTestCase):

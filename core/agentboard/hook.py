@@ -38,7 +38,9 @@ CODEX_MAP_TRIGGER_EVENTS = {"SessionStart", "UserPromptSubmit"}
 # boundaries. Stop and SessionEnd matter because a branch created mid-turn
 # (a PR opened from a fresh feature branch) must be seen once the session
 # goes idle or exits, or a merged PR on the old branch would still retire it.
-BRANCH_REFRESH_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
+# CwdChanged (a `cd` or EnterWorktree in the main conversation) moves the
+# session to another directory, so its branch is read again at once.
+BRANCH_REFRESH_EVENTS = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "CwdChanged"}
 
 # Event names that represent in-progress activity (not needing the user,
 # not a finished turn).
@@ -51,6 +53,12 @@ ACTIVITY_EVENTS = {
     "SubagentStop",
     "PreCompact",
     "PostCompact",
+    "CwdChanged",
+    # The user answered an MCP server's question: the tool call goes on.
+    "ElicitationResult",
+    # Auto mode denied a tool call and Claude carries on (repeated denials
+    # pause auto mode with a PermissionRequest, which is needs_you).
+    "PermissionDenied",
 }
 
 # Event names whose own occurrence signals "running", even when tagged
@@ -61,12 +69,19 @@ SUBAGENT_MARKER_EVENTS = {"SubagentStart", "SubagentStop"}
 NEEDS_YOU_NOTIFICATION_TYPES = {
     "permission_prompt",
     "elicitation_dialog",
+    "elicitation_url_dialog",
     "agent_needs_input",
     # A usage-limit pause (Claude Code >= 2.1.234): the limit reset while
     # the Mac slept and the wait needs Enter, or auto-resume is off.
     "quota_auto_resume_stale",
     "quota_auto_resume_disabled",
 }
+
+# The dialog notifications that follow an MCP server's Elicitation. While
+# the row's last_event is that Elicitation (which names the server), the
+# notification is recorded but keeps the state. elicitation_complete and
+# elicitation_response are in no set: recorded, irrelevant.
+ELICITATION_DIALOG_TYPES = {"elicitation_dialog", "elicitation_url_dialog"}
 
 # The waiting_reason for a needs_you notification that carries no message.
 NOTIFICATION_FALLBACK_REASONS = {
@@ -110,6 +125,7 @@ NEEDS_YOU_TOOL_SENTINEL = "NeedsYouToolUse"
 FINISHED_TURN_EVENTS = {
     "Stop", "Interrupt", "Notification",
     "PermissionRequest", "StopFailure", NEEDS_YOU_TOOL_SENTINEL,
+    "Elicitation",
 }
 
 # Compaction events. A parent one is activity mid-turn, but a /compact
@@ -118,6 +134,17 @@ FINISHED_TURN_EVENTS = {
 # last_event is in FINISHED_TURN_EVENTS the hook keeps it (see
 # process_payload).
 COMPACTION_EVENTS = {"PreCompact", "PostCompact"}
+
+# Parent events that are activity mid-turn but, after a finished turn, must
+# not erase it: a /compact, an idle compaction or a `!cd` typed at an idle
+# prompt. The kept turn keeps its waiting_reason and last_event_at.
+KEEP_AFTER_TURN_EVENTS = COMPACTION_EVENTS | {"CwdChanged"}
+
+# Parent events that never change a session's last_event: a model switch
+# (/model, an automatic fallback, opusplan, the restore on resume) is
+# neither a turn boundary nor the model working. Mid-turn it still
+# refreshes last_event_at, like any kept activity event.
+STATE_NEUTRAL_EVENTS = {"PostModelSwitch"}
 
 # SessionStart sources that continue the same conversation rather than
 # start a new one: they never change a session's state (resume only while
@@ -168,6 +195,24 @@ def clean_prompt_text(text):
     if text.strip().lower() in EXIT_COMMANDS:
         return None
     return text
+
+
+def is_local_only_prompt(text) -> bool:
+    """True for a raw prompt that is a local-only command with no model
+    turn: a bare exit/quit, or a <command-name> in LOCAL_ONLY_COMMANDS. A
+    `/plan` with non-empty <command-args> is not one: it enters plan mode
+    and submits its args as a prompt, so it starts a turn."""
+    if not isinstance(text, str):
+        return False
+    match = _COMMAND_NAME_RE.search(text)
+    if match:
+        name = match.group("name").strip()
+        args_match = _COMMAND_ARGS_RE.search(text)
+        args = args_match.group("args").strip() if args_match else ""
+        if name in LOCAL_ONLY_COMMANDS:
+            return not (name == "plan" and args)
+        text = f"/{name} {args}".strip()
+    return text.strip().lower() in EXIT_COMMANDS
 
 
 def normalize_branch(branch):
@@ -398,6 +443,23 @@ def failure_reason(error, text):
     return error or line or None
 
 
+ELICITATION_REASON_CHARS = 160
+
+
+def elicitation_reason(server, message):
+    """The waiting_reason of an MCP server's Elicitation: "<server>: <first
+    non-empty line of its message>", either part alone when the other is
+    missing, capped at ELICITATION_REASON_CHARS (like note headlines)."""
+    server = server.strip() if isinstance(server, str) else ""
+    line = ""
+    for candidate in (message if isinstance(message, str) else "").splitlines():
+        if candidate.strip():
+            line = candidate.strip()
+            break
+    reason = f"{server}: {line}" if server and line else (server or line)
+    return reason[:ELICITATION_REASON_CHARS] or None
+
+
 def _extract_waiting_reason(event: str, payload: dict):
     if event == "PermissionRequest":
         return payload.get("tool_name")
@@ -412,16 +474,34 @@ def _extract_waiting_reason(event: str, payload: dict):
         )
     if event == "StopFailure":
         return failure_reason(payload.get("error"), _stop_failure_text(payload))
+    if event == "Elicitation":
+        return elicitation_reason(payload.get("mcp_server_name"), payload.get("message"))
     return None
 
 
 def _extract_extra(payload: dict) -> dict:
     extra = {}
     for key in ("source", "model", "turn_id", "reason", "error_message", "error",
-                "error_details", "context_tokens"):
+                "error_details", "context_tokens", "trigger", "old_cwd", "new_cwd",
+                "mcp_server_name", "mode", "action", "mcp_server", "from_model", "to_model"):
         if key in payload:
             extra[key] = payload[key]
     return extra
+
+
+def _valid_model(value):
+    """A model name: a non-empty string, stripped; else None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _valid_context_tokens(value):
+    """A context size: a non-bool int in sqlite's integer range, >= 0;
+    else None."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 2 ** 63:
+        return None
+    return value
 
 
 def _session_start_usage(payload: dict):
@@ -429,16 +509,19 @@ def _session_start_usage(payload: dict):
     or malformed. Claude Code sends `model` only on SessionStart (not after
     /clear or on recovery) and `context_tokens` only on a resume/fork
     SessionStart; Codex sends `model` on every hook event (codex-rs
-    hooks/src/schema.rs), so a `/model` switch shows up at once."""
-    model = payload.get("model")
-    if not isinstance(model, str) or not model.strip():
-        model = None
-    else:
-        model = model.strip()
-    tokens = payload.get("context_tokens")
-    if isinstance(tokens, bool) or not isinstance(tokens, int) or not 0 <= tokens < 2 ** 63:
-        tokens = None
-    return model, tokens
+    hooks/src/schema.rs), so a `/model` switch shows up at once. Claude's
+    PostModelSwitch names the new model `to_model` (read in process_payload)."""
+    return _valid_model(payload.get("model")), _valid_context_tokens(payload.get("context_tokens"))
+
+
+def _permission_mode(payload: dict):
+    """The payload's permission_mode (default, plan, acceptEdits, auto,
+    dontAsk, bypassPermissions, or a newer one) when it is a non-empty
+    string, else None."""
+    mode = payload.get("permission_mode")
+    if not isinstance(mode, str) or not mode.strip():
+        return None
+    return mode.strip()
 
 
 def _background_info(payload: dict):
@@ -767,6 +850,11 @@ def process_payload(conn, tool: str, payload: dict) -> None:
 
     now = _now_iso()
     cwd = payload.get("cwd")
+    new_cwd = payload.get("new_cwd")
+    if event == "CwdChanged" and not payload.get("agent_id") and isinstance(new_cwd, str) and new_cwd:
+        # `cwd` is documented as the new directory already; new_cwd says so
+        # explicitly, so it wins if the two ever disagree.
+        cwd = new_cwd
     transcript_path = payload.get("transcript_path")
     agent_id = payload.get("agent_id")
     tool_name = payload.get("tool_name")
@@ -779,10 +867,12 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         text = _truncate(prompt_text)
     elif event in ("Stop",):
         text = _truncate(payload.get("last_assistant_message"))
-    elif event == "Notification":
+    elif event in ("Notification", "Elicitation"):
         text = _truncate(payload.get("message"))
     elif event == "StopFailure":
         text = _truncate(_stop_failure_text(payload))
+    elif event == "PermissionDenied":
+        text = _truncate(payload.get("reason"))
 
     extra = _extract_extra(payload)
 
@@ -849,6 +939,10 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         branch = None
         if (event in BRANCH_REFRESH_EVENTS and not is_subagent_tagged) or (row and not row["branch"]):
             branch = _git_branch(cwd)
+        # After a `cd` the branch is written as read, NULL included: keeping
+        # the old one after a move into a non-git or detached-HEAD directory
+        # would match that directory against the old branch's PRs.
+        branch_as_read = event == "CwdChanged" and not is_subagent_tagged
 
         pid = None
         tty = None
@@ -890,14 +984,29 @@ def process_payload(conn, tool: str, payload: dict) -> None:
             and row_last_event is not None
             and (source == "compact" or row_last_event != "SessionEnd")
         )
-        # A compaction at an idle prompt keeps the finished turn; mid-turn
-        # it is activity as before.
-        compaction_after_turn = (
-            not is_subagent_tagged and event in COMPACTION_EVENTS and row_finished
+        # A compaction or a `cd` at an idle prompt keeps the finished turn;
+        # mid-turn it is activity as before. So does a local-only command
+        # (/compact, /model, exit, ...) typed at an idle prompt: it starts no
+        # turn, and recording it would lose the finished turn's time.
+        # row_finished is true for every FINISHED_TURN_EVENTS member, so a
+        # needs_you StopFailure is kept too: a /model after an API error
+        # leaves the row needs_you until a real prompt, on purpose (nothing
+        # has been retried, so the failure still needs the user).
+        kept_after_turn = row_finished and not is_subagent_tagged and (
+            event in KEEP_AFTER_TURN_EVENTS
+            or (event == "UserPromptSubmit" and is_local_only_prompt(payload.get("prompt")))
         )
+        # The dialog of an elicitation the row already shows (with the
+        # server's name) must not replace that reason with its own message.
+        elicitation_dialog = (
+            event == "Notification" and not is_subagent_tagged
+            and notification_type in ELICITATION_DIALOG_TYPES
+            and row_last_event == "Elicitation"
+        )
+        state_neutral = event in STATE_NEUTRAL_EVENTS
         keep_state = (
             is_subagent_tagged or irrelevant_notification or marker_after_turn
-            or continued_start or compaction_after_turn
+            or continued_start or kept_after_turn or elicitation_dialog or state_neutral
         )
 
         new_last_event_at = now
@@ -925,6 +1034,8 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         ended_at = now if event == "SessionEnd" else None
         end_reason = payload.get("reason") if event == "SessionEnd" else None
         started_at = now if row is None else None
+        # A subagent can run under its own mode: only parent events set it.
+        permission_mode = None if is_subagent_tagged else _permission_mode(payload)
         todos_open = (
             _todos_open_from_tool_use(tool_name, payload.get("tool_input"))
             if event == "PostToolUse" else None
@@ -941,8 +1052,8 @@ def process_payload(conn, tool: str, payload: dict) -> None:
                 "first_prompt, last_prompt, last_assistant, started_at, "
                 "updated_at, last_event, last_event_at, waiting_reason, pid, "
                 "iterm_session_id, term_program, transcript_path, origin, "
-                "interactive, ended_at, tty, end_reason, todos_open) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "interactive, ended_at, tty, end_reason, todos_open, permission_mode) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     tool,
                     session_id,
@@ -967,13 +1078,14 @@ def process_payload(conn, tool: str, payload: dict) -> None:
                     tty,
                     end_reason,
                     todos_open,
+                    permission_mode,
                 ),
             )
         else:
             conn.execute(
                 "UPDATE sessions SET "
                 "cwd = COALESCE(?, cwd), "
-                "branch = COALESCE(?, branch), "
+                "branch = CASE WHEN ? THEN ? ELSE COALESCE(?, branch) END, "
                 "first_prompt = COALESCE(first_prompt, ?), "
                 "last_prompt = COALESCE(?, last_prompt), "
                 "last_assistant = COALESCE(?, last_assistant), "
@@ -989,10 +1101,13 @@ def process_payload(conn, tool: str, payload: dict) -> None:
                 "ended_at = COALESCE(?, ended_at), "
                 "tty = COALESCE(?, tty), "
                 "end_reason = COALESCE(?, end_reason), "
-                "todos_open = COALESCE(?, todos_open) "
+                "todos_open = COALESCE(?, todos_open), "
+                "permission_mode = COALESCE(?, permission_mode) "
                 "WHERE tool=? AND session_id=?",
                 (
                     cwd,
+                    branch_as_read,
+                    branch,
                     branch,
                     _truncate(first_prompt),
                     last_prompt,
@@ -1009,6 +1124,7 @@ def process_payload(conn, tool: str, payload: dict) -> None:
                     tty,
                     end_reason,
                     todos_open,
+                    permission_mode,
                     tool,
                     session_id,
                 ),
@@ -1041,12 +1157,25 @@ def process_payload(conn, tool: str, payload: dict) -> None:
             # Claude's SessionStart) records it; one without keeps the
             # stored model. The transcript re-parse also refreshes it at
             # every Stop.
-            event_model, _ = _session_start_usage(payload)
+            if event == "PostModelSwitch":
+                event_model = _valid_model(payload.get("to_model"))
+            else:
+                event_model, _ = _session_start_usage(payload)
             if event_model is not None:
                 conn.execute(
                     "UPDATE sessions SET model=? WHERE tool=? AND session_id=? "
                     "AND model IS NOT ?",
                     (event_model, tool, session_id, event_model),
+                )
+
+        if event == "PostModelSwitch" and not is_subagent_tagged:
+            # The context size the next request sends to the new model.
+            switch_tokens = _valid_context_tokens(payload.get("context_tokens"))
+            if switch_tokens is not None:
+                conn.execute(
+                    "UPDATE sessions SET context_tokens=?, context_at=? "
+                    "WHERE tool=? AND session_id=?",
+                    (switch_tokens, now, tool, session_id),
                 )
 
         if event == "SessionStart" and not is_subagent_tagged:
@@ -1112,7 +1241,9 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         ignored=(
             "subagent" if is_subagent_tagged
             else "irrelevant_notification" if irrelevant_notification
-            else "after_turn" if marker_after_turn
+            else "after_turn" if marker_after_turn or kept_after_turn
+            else "elicitation_dialog" if elicitation_dialog
+            else "state_neutral" if state_neutral
             else f"session_start_{source}" if continued_start else None
         ),
         term=term_program,

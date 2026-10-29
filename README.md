@@ -178,8 +178,9 @@ The schema (see `core/agentboard/db.py`) has these tables:
 - `events` — an append-only log of every hook event ever received, per `(tool, session_id)`.
 - `sessions` — one row per session: cwd, branch, title, prompts, last activity, liveness
   bookkeeping (pid, terminal info), a free-form `status_text`/`status_until` set via
-  `agentboard status`, and the model it last ran with its context size (`model`,
-  `context_tokens`, `context_at`; see Plan usage and context below).
+  `agentboard status`, the model it last ran with its context size (`model`,
+  `context_tokens`, `context_at`; see Plan usage and context below), and the permission mode
+  its newest parent hook event reported (`permission_mode`; see Hooks below).
 - `triage` — the user's own done/snoozed/open decision for a session.
 - `links` — PRs, tickets, or arbitrary URLs associated with a session, from whatever source
   reported them (see Links below).
@@ -199,7 +200,8 @@ second app instance or a manual run cannot double it up. Each run:
   still names it, so a crashed session whose pid was reused still ages out); those are skipped and
   counted in the `cli.prune` log line;
 - compacts: deletes tool-use and subagent events (`PreToolUse`, `PostToolUse`,
-  `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`) older than
+  `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`,
+  `CwdChanged`, `ElicitationResult`, `PermissionDenied`) older than
   `compact_days` (default 7), from every session, live or ended. They are most of the table and
   nothing reads them once the turn is over; prompts, `Stop`s, notifications and session start/end
   rows are kept;
@@ -221,13 +223,51 @@ stdout** — Claude Code folds a hook's stdout into the model's context for `Ses
 `UserPromptSubmit`, so any output there would leak into the conversation. Every exception is
 caught and logged to `$AGENTBOARD_HOME/hook-errors.log` (capped at ~1 MB) instead of surfacing.
 
+Claude Code events registered: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
+`PostToolUseFailure`, `PermissionRequest`, `Notification`, `Stop`, `StopFailure`, `SubagentStart`,
+`SubagentStop`, `SessionEnd`, and these newer ones (an older Claude Code never fires them, so their
+entries are inert there):
+
+- `PreCompact` / `PostCompact` — compaction: activity mid-turn; after a finished turn (a `/compact`
+  at an idle prompt) the turn is kept. Only `trigger` is stored, never the summary.
+- `CwdChanged` — a `cd` or `EnterWorktree` in the main conversation: updates the session's
+  directory and re-reads its branch at once; like compaction, it keeps a finished turn.
+- `Elicitation` / `ElicitationResult` — an MCP server asks you something: `needs_you` with
+  "<server>: <question>" until you answer (see State). The link and your answer are never stored.
+- `PermissionDenied` — auto mode's classifier blocked a tool call: recorded (tool name, reason,
+  MCP server) as activity, since Claude carries on; repeated blocks come back as a
+  `PermissionRequest`.
+- `PostModelSwitch` — `/model`, an automatic fallback or the restore on resume: stores the new
+  model and context size, and never changes the session's state.
+
+Every parent event's `permission_mode` (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
+`bypassPermissions`) is stored on the session (`sessions.permission_mode`) and shown as a small tag
+on the row while the session is live and not done; a subagent's is ignored. Codex payloads are not
+known to carry it. A mode change at an idle prompt (Shift+Tab) fires no hook, so the tag is as of
+the last hook event and catches up with the session's next one.
+
+Deliberately **not** registered, so nobody adds them by hand later:
+
+- `WorktreeCreate` / `WorktreeRemove` — a registered `WorktreeCreate` hook *replaces* Claude Code's
+  own `git worktree` step and must print the new worktree's path; AgentBoard's hook prints nothing,
+  so registering it would break `claude --worktree`, `EnterWorktree` and worktree-isolated
+  subagents (and a no-op `WorktreeRemove` would leave worktrees on disk). `CwdChanged` already
+  covers the move into a worktree.
+- `TaskCreated` / `TaskCompleted` — one synchronous hook per task, for a delta the transcript
+  re-parse at every `Stop` already recomputes.
+- `TeammateIdle`, `MessageDisplay`, `PostToolBatch`, `PreModelSwitch` — agent teams only, output
+  held until the hook returns, once per parallel tool batch, and redundant with `PostModelSwitch`.
+
 It targets well under 50 ms per call. The only things that ever shell out are:
 
 - `git -C <cwd> branch --show-current`, and only when the branch can't be read straight from
   the repository's `HEAD` file (which is how it is normally read: one git call costs most of the
   50 ms budget). The branch is re-read on `SessionStart` / `UserPromptSubmit` and on the parent
   `Stop` / `SessionEnd` (so a branch created mid-turn is seen once the session goes idle or
-  exits), or whenever a session's branch is still unknown.
+  exits), on a parent `CwdChanged` (a `cd` or `EnterWorktree` moved the session; the branch is
+  then stored as read, so a move out of every repository clears it), or whenever a session's
+  branch is still unknown. Outside a repository that last case costs one git process per event
+  until the session is back inside one.
 - A short, targeted `ps` walk (at most 5 hops) to find the actual `claude`/`codex` process above
   the hook's immediate parent, recorded once per session the same way the branch is.
 
@@ -270,7 +310,11 @@ A turn that failed on an API error (Claude Code's `StopFailure`) is `needs_you` 
 `error` note under Updates (repeats bump its count). A usage-limit pause that needs you
 (`quota_auto_resume_stale`: the limit reset while the Mac slept and the wait needs Enter;
 `quota_auto_resume_disabled`: auto-resume is off) is `needs_you` too; an auto-resume
-(`quota_auto_resume_fired`) or any new activity makes the session `running` again.
+(`quota_auto_resume_fired`) or any new activity makes the session `running` again. An MCP server
+asking you something (Claude Code's `Elicitation`, a form or a browser link) is `needs_you` with
+"<server>: <first line of its question>" while the dialog is open; your answer
+(`ElicitationResult`, whatever you chose) or the tool call finishing makes it `running` again.
+The elicitation's link and your answer's content are never stored.
 
 **Review always says what to do.** A session is `review` only with a concrete reason in
 `waiting_reason`, which the row shows as its second line:
@@ -287,8 +331,13 @@ crons its last Stop listed in `session_crons`) idling between ticks is not waiti
 `running` with "Loop idle between ticks" while its process is alive. A session whose last Stop
 listed background tasks still in flight (Claude Code's `background_tasks`: subagents, shells,
 monitors, ...) is `running` with "Waiting on N background task(s): <types>" until they finish,
-then "Your turn". A background agent finishing after the turn, and a compaction (including a
-`/compact` typed at an idle prompt) or a resume of a live session, never change a session's state.
+then "Your turn". A background agent finishing after the turn, a compaction (including a
+`/compact` typed at an idle prompt), a `cd` at an idle prompt, a local-only command typed at an
+idle prompt (`/compact`, `/model`, a bare `/plan`, ...), a model switch (at any time) and a
+resume of a live session never change a session's state; the finished turn keeps its time.
+That includes a turn that ended in an API error: switching models with `/model` after a
+`StopFailure` leaves the row in Needs you with the error, since nothing has been retried yet;
+the next real prompt clears it.
 
 Claude Code also writes `~/.claude/sessions/<pid>.json` with a `busy`/`idle` status; AgentBoard
 reads it for every live Claude session as a tie-breaker when it is newer than the last hook
@@ -310,6 +359,12 @@ notifications read (see Notifications):
 - `background_tasks`: how many background tasks the last `Stop` listed (null when unknown).
 - `turn_ends_background_wait`: true when the latest turn was injected right after a `Stop` that
   listed background tasks, i.e. the turn that reports a background task's result back.
+
+Each session also carries `permission_mode`: the permission mode Claude Code reported on the
+session's newest parent hook event (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
+`bypassPermissions`, or a newer value as-is), null for Codex and for sessions no hook has
+touched since the upgrade. The app shows it as a small tag on the row (none for `default`, and
+none once the session has ended or is done; the detail view's Permissions row still shows it).
 
 `agentboard paths --json` reports the resolved data/db/core directories (`{"home": ..., "db":
 ..., "core": ...}`), honoring `AGENTBOARD_HOME` exactly the way the rest of the CLI does. The app
@@ -417,6 +472,9 @@ the values come from:
 - `SessionStart` hooks send the model (Claude Code omits it after `/clear` and on recovery) and,
   on a resume or fork (Claude Code 2.1.251 and later), the context size. A `/compact` that sends
   no size drops the old one, so the tag shows only the model until the next reply.
+- `PostModelSwitch` hooks (Claude Code 2.1.251 and later) send the new model and the context size
+  the next request will carry the moment you switch (`/model`, an automatic fallback,
+  `opusplan`), so the tag changes at once.
 - After every `Stop` (and at the launch backfill) the transcript's newest real reply refreshes both,
   so a `/model` switch or the post-compact size shows up by the next turn's end. Subagent lines and
   synthetic API-error lines are skipped.
