@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+import time
+
+# The hook's event time, taken before any other import so it tracks when
+# the event fired: async hooks can commit out of order, and hook.py orders
+# them by this stamp (see hook.ASYNC_EVENTS).
+_HOOK_STARTED = time.time()
+
 import os
 import sys
 
@@ -57,7 +64,7 @@ if argv and argv[0] == "hook":
             tool = argv[idx + 1]
     from agentboard import hook
 
-    hook.run(tool)
+    hook.run(tool, started_at=_HOOK_STARTED)
     sys.exit(0)
 
 from agentboard.cli import main

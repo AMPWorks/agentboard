@@ -95,7 +95,15 @@ may be hard-coded. `snapshot` must never touch the network; only `refresh-links`
 - Schema changes: add a numbered entry to `_MIGRATIONS` in `db.py` and bump `SCHEMA_VERSION`.
   Never edit an existing migration.
 - A new hook event name goes in `CLAUDE_EVENTS`/`CODEX_EVENTS` in `cli.py` (what `install-hooks`
-  registers) and must be classified in `hook.py` (`ACTIVITY_EVENTS` etc.) and `reconcile.py`.
+  registers) and must be classified in `hook.py` (`ACTIVITY_EVENTS` etc.) and `reconcile.py`. It
+  stays synchronous unless added to `hook.ASYNC_EVENTS` for its tool; an event that any query
+  orders or picks by `events.id` (`ORDER BY id`, `MAX(id)`, `id < ?`) must stay synchronous.
+  Today those readers are `links.last_parent_prompt_at`/`_times`, `newest_parent_prompts`,
+  `last_parent_stop_times`, `background_wait_before_newest_prompt`, `mid_turn_checker`, the
+  replay in `notes.rebuild` and `titles.build_context`. Async hooks are not killed at `timeout`
+  by Claude Code, so every blocking step in the hook must stay self-bounded. An event's `ts` is
+  the hook's start time (`_HOOK_STARTED` in the shim), and `hook._is_stale` ignores a late async
+  commit for state.
 - Any new file AgentBoard writes directly under `$AGENTBOARD_HOME` must be listed in
   `AGENTBOARD_DATA_FILES`/`AGENTBOARD_DATA_DIRS` in `uninstall.sh`, or `--purge-data` refuses
   (`agentboard.log` and `agentboard.log.1` are already there).

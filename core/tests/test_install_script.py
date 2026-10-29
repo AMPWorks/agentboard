@@ -740,6 +740,8 @@ class InstallScriptEndToEndTests(unittest.TestCase):
         core_dir = self.fake_home / ".local" / "share" / "agentboard" / "core"
         first_version = core_dir.resolve()
         settings_before = json.loads((self.fake_home / ".claude" / "settings.json").read_text())
+        codex_hooks_path = self.fake_home / ".codex" / "hooks.json"
+        codex_before = codex_hooks_path.read_bytes()
 
         second = subprocess.run(
             [str(INSTALL_SH), "--no-app"],
@@ -760,6 +762,14 @@ class InstallScriptEndToEndTests(unittest.TestCase):
         # never a specific versioned directory -- so Codex users are never
         # asked to re-trust /hooks just because install.sh re-ran.
         self.assertEqual(settings_before["hooks"]["Stop"], settings_after["hooks"]["Stop"])
+        self.assertEqual(settings_before["hooks"], settings_after["hooks"])
+        # The async entries, too: an unchanged hooks.json is what keeps
+        # Codex from skipping AgentBoard's hooks until they are re-trusted.
+        self.assertEqual(codex_hooks_path.read_bytes(), codex_before)
+        self.assertNotIn("trust them again", second.stdout)
+        pre_tool = [h for g in settings_after["hooks"]["PreToolUse"] for h in g["hooks"]
+                    if "agentboard hook --tool claude" in h["command"]]
+        self.assertEqual([h.get("async") for h in pre_tool], [True])
 
 
 @unittest.skipUnless(sys.platform == "darwin", "install.sh/uninstall.sh are macOS-only")

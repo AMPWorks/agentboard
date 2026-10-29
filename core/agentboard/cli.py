@@ -39,6 +39,23 @@ CODEX_EVENTS = [
     "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
 ]
 
+# Events whose hook install-hooks registers with `"async": true`, so a
+# stalled hook (a busy sqlite lock) never holds up the tool call that fired
+# it. AgentBoard's hook never returns a decision, so no event has to stay
+# synchronous for its result; the rest stay synchronous for ordering,
+# delivery and teardown. Rule: an event that any query orders or picks by
+# events.id (ORDER BY id, MAX(id), id < ?) must stay synchronous. Today
+# those readers are links.last_parent_prompt_at/_times,
+# newest_parent_prompts, last_parent_stop_times,
+# background_wait_before_newest_prompt, mid_turn_checker, the replay in
+# notes.rebuild and titles.build_context, and they read only
+# UserPromptSubmit, Stop, StopFailure, Interrupt and SessionEnd. Stop and
+# SessionEnd also stay synchronous because `claude -p` and Codex cancel
+# background hooks at teardown. The sets live in hook.py, whose stale
+# guard reads the same ones.
+CLAUDE_ASYNC_EVENTS = hook_mod.ASYNC_EVENTS["claude"]
+CODEX_ASYNC_EVENTS = hook_mod.ASYNC_EVENTS["codex"]
+
 DEFAULT_DONE_RETENTION_DAYS = links.SNAPSHOT_RETENTION_DAYS
 
 # TERM_PROGRAM values AgentBoard knows how to turn into a real app name for
@@ -856,17 +873,24 @@ def _has_agentboard_hook(groups, command):
     return False
 
 
-def _merge_hooks(existing_hooks, events, command, timeout):
+def _merge_hooks(existing_hooks, events, command, timeout, async_events=frozenset()):
     """Add/update the agentboard hook for each event.
 
     An existing agentboard entry for this tool (any install path) is
-    rewritten in place to the current command/timeout rather than
+    rewritten in place to the current command/timeout/async rather than
     duplicated -- this is how an old repo-checkout path gets migrated to
-    the installed copy's path on a later `install-hooks` run.
+    the installed copy's path on a later `install-hooks` run, and how an
+    entry gains (or loses) `"async": true`. Returns (hooks, changed,
+    rewritten), rewritten being the events whose existing entry changed
+    (as opposed to newly added ones): Codex skips those until re-trusted.
     """
     hooks = dict(existing_hooks or {})
     changed = False
+    rewritten = []
     for event in events:
+        desired = {"type": "command", "command": command, "timeout": timeout}
+        if event in async_events:
+            desired["async"] = True
         groups = list(hooks.get(event, []))
         new_groups = []
         found = False
@@ -880,19 +904,20 @@ def _merge_hooks(existing_hooks, events, command, timeout):
                 new_groups.append(group)
                 continue
             found = True
-            desired = {"type": "command", "command": command, "timeout": timeout}
             if group_hooks[idx] == desired:
                 new_groups.append(group)
                 continue
             new_group_hooks = list(group_hooks)
-            new_group_hooks[idx] = desired
+            new_group_hooks[idx] = dict(desired)
             new_groups.append({**group, "hooks": new_group_hooks})
             changed = True
+            if event not in rewritten:
+                rewritten.append(event)
         if not found:
-            new_groups.append({"hooks": [{"type": "command", "command": command, "timeout": timeout}]})
+            new_groups.append({"hooks": [dict(desired)]})
             changed = True
         hooks[event] = new_groups
-    return hooks, changed
+    return hooks, changed, rewritten
 
 
 def _strip_agentboard_hook(existing_hooks, command):
@@ -1164,17 +1189,40 @@ def _install_hooks_file(path: Path, old: dict, old_text: str, new_hooks, changed
 
 
 def install_claude_hooks(settings_path: Path, command: str, dry_run: bool):
+    """Returns (old_text, new_text, changed, rewritten); see _merge_hooks."""
     old = _load_json(settings_path)
     old_text = json.dumps(old, indent=2, ensure_ascii=False) + "\n" if settings_path.is_file() else ""
-    new_hooks, changed = _merge_hooks(old.get("hooks", {}), CLAUDE_EVENTS, command, 5)
-    return _install_hooks_file(settings_path, old, old_text, new_hooks, changed, dry_run)
+    new_hooks, changed, rewritten = _merge_hooks(
+        old.get("hooks", {}), CLAUDE_EVENTS, command, 5, CLAUDE_ASYNC_EVENTS)
+    return (*_install_hooks_file(settings_path, old, old_text, new_hooks, changed, dry_run),
+            rewritten)
 
 
 def install_codex_hooks(hooks_path: Path, command: str, dry_run: bool):
+    """Returns (old_text, new_text, changed, rewritten); see _merge_hooks."""
     old = _load_json(hooks_path)
     old_text = json.dumps(old, indent=2, ensure_ascii=False) + "\n" if hooks_path.is_file() else ""
-    new_hooks, changed = _merge_hooks(old.get("hooks", {}), CODEX_EVENTS, command, 5)
-    return _install_hooks_file(hooks_path, old, old_text, new_hooks, changed, dry_run)
+    new_hooks, changed, rewritten = _merge_hooks(
+        old.get("hooks", {}), CODEX_EVENTS, command, 5, CODEX_ASYNC_EVENTS)
+    return (*_install_hooks_file(hooks_path, old, old_text, new_hooks, changed, dry_run),
+            rewritten)
+
+
+def _codex_retrust_warning(hooks_path: Path, rewritten, dry_run: bool) -> str:
+    """The warning for existing Codex hook entries install-hooks rewrote:
+    Codex records trust against a hook's hash and skips a changed one until
+    the user trusts it again in /hooks."""
+    count = len(rewritten)
+    noun = "hook" if count == 1 else "hooks"
+    names = ", ".join(rewritten)
+    if all(event in CODEX_ASYNC_EVENTS for event in rewritten):
+        names += (" now run" if count > 1 else " now runs") + " in the background"
+    verb = "would update" if dry_run else "updated"
+    return (
+        f"warning: {verb} {count} existing AgentBoard {noun} in {hooks_path} ({names}). "
+        "Codex skips changed hooks until you trust them again in /hooks: run /hooks in "
+        "Codex and trust them, or AgentBoard shows no Codex tool activity until you do."
+    )
 
 
 def _restore_original_bytes(path: Path, new: dict, dry_run: bool):
@@ -1840,7 +1888,8 @@ def cmd_install_hooks(args):
         settings_path = Path.home() / ".claude" / "settings.json"
         command = f"{bin_path} hook --tool claude"
         try:
-            old_text, new_text, changed = install_claude_hooks(settings_path, command, args.dry_run)
+            old_text, new_text, changed, _ = install_claude_hooks(
+                settings_path, command, args.dry_run)
         except MalformedConfigError as exc:
             _report("error", "install_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(settings_path))
@@ -1862,7 +1911,8 @@ def cmd_install_hooks(args):
         hooks_path = Path.home() / ".codex" / "hooks.json"
         command = f"{bin_path} hook --tool codex"
         try:
-            old_text, new_text, changed = install_codex_hooks(hooks_path, command, args.dry_run)
+            old_text, new_text, changed, rewritten = install_codex_hooks(
+                hooks_path, command, args.dry_run)
         except MalformedConfigError as exc:
             _report("error", "install_hooks", f"error: {exc}", file=exc.path)
             failed_paths.append(str(hooks_path))
@@ -1871,6 +1921,7 @@ def cmd_install_hooks(args):
                 "cli", "install_hooks", tool="codex", file=hooks_path,
                 outcome="dry_run" if args.dry_run else ("changed" if changed else "unchanged"),
                 would_change=changed if args.dry_run else None,
+                retrust_needed=len(rewritten),
             )
             if args.dry_run:
                 diff = _diff(old_text, new_text, str(hooks_path))
@@ -1879,6 +1930,8 @@ def cmd_install_hooks(args):
                 print(f"Installed Codex hooks in {hooks_path}")
             else:
                 print(f"Codex hooks already installed in {hooks_path}")
+            if rewritten:
+                print(_codex_retrust_warning(hooks_path, rewritten, args.dry_run))
             _print_codex_hooks_reminder(hooks_path, command)
 
     if failed_paths:

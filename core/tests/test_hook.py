@@ -7,13 +7,13 @@ import subprocess
 import sys
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentboard import hook, reconcile
+from agentboard import db, hook, reconcile
 from tests.helpers import AgentBoardTestCase
 
 
@@ -2411,6 +2411,508 @@ class ProcessPayloadCodexMapTriggerTests(AgentBoardTestCase):
                 },
             )
         popen.assert_not_called()
+
+
+_T0 = datetime(2026, 10, 27, 10, 0, 0, tzinfo=timezone.utc)
+
+
+def _stamp(seconds):
+    """The hook's timestamp format, `seconds` after _T0."""
+    return (_T0 + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class AsyncOrderingTests(AgentBoardTestCase):
+    """Events stamped with their own start time (process_payload's `now`)
+    and committed out of order, as async hooks can: the stale guard and the
+    needs-you precedence window."""
+
+    def setUp(self):
+        super().setUp()
+        self._old_level = os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+
+    def tearDown(self):
+        os.environ.pop("AGENTBOARD_LOG_LEVEL", None)
+        if self._old_level is not None:
+            os.environ["AGENTBOARD_LOG_LEVEL"] = self._old_level
+        super().tearDown()
+
+    def _send(self, event, at, tool="claude", **fields):
+        payload = {"session_id": "s1", "cwd": "/tmp", "hook_event_name": event, **fields}
+        with mock.patch("agentboard.hook.subprocess.run",
+                        return_value=mock.Mock(returncode=0, stdout="")), \
+             mock.patch("agentboard.hook.subprocess.Popen"):
+            hook.process_payload(self.conn, tool, payload, now=_stamp(at))
+
+    def _row(self, tool="claude"):
+        return self.conn.execute(
+            "SELECT * FROM sessions WHERE tool=? AND session_id='s1'", (tool,)).fetchone()
+
+    def _event_count(self, event, tool="claude"):
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE tool=? AND event=?", (tool, event)).fetchone()[0]
+
+    def _event_lines(self):
+        path = self.agentboard_home / "agentboard.log"
+        lines = path.read_text().splitlines() if path.exists() else []
+        return [line for line in lines if " hook.event " in line]
+
+    def _mid_turn(self, tool="claude"):
+        """A row mid-turn, prompted at 0.5 s and running a tool at 1 s."""
+        self._send("SessionStart", 0, tool=tool)
+        self._send("UserPromptSubmit", 0.5, tool=tool, prompt="do it")
+        self._send("PostToolUse", 1, tool=tool, tool_name="Bash")
+
+    def _reset(self):
+        self.conn.execute("DELETE FROM sessions")
+        self.conn.execute("DELETE FROM events")
+
+    # -- the stale guard -----------------------------------------------------
+
+    def test_stale_post_tool_use_after_stop_keeps_stop_and_its_times(self):
+        self._mid_turn()
+        self._send("Stop", 10, last_assistant_message="Done.")
+        before = self._row()
+        self._send("PostToolUse", 9.9, tool_name="Bash")
+        row = self._row()
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertEqual(row["last_event_at"], before["last_event_at"])
+        self.assertEqual(row["updated_at"], before["updated_at"])
+        self.assertEqual(self._event_count("PostToolUse"), 2, "the stale event is still recorded")
+        stale_ts = self.conn.execute(
+            "SELECT ts FROM events WHERE event='PostToolUse' ORDER BY id DESC LIMIT 1").fetchone()[0]
+        self.assertEqual(stale_ts, _stamp(9.9))
+
+    def test_stale_activity_event_never_moves_last_event_at_backwards(self):
+        self._mid_turn()
+        self._send("SessionEnd", 10, reason="exit")
+        self._send("PreToolUse", 9, tool_name="Bash")
+        row = self._row()
+        self.assertEqual(row["last_event"], "SessionEnd")
+        self.assertEqual(row["last_event_at"], _stamp(10))
+        # A resume notification is in FINISHED_TURN_EVENTS by name but is
+        # not a finished turn; a stale event still keeps its time.
+        self._send("UserPromptSubmit", 20, prompt="again")
+        self._send("Notification", 30, notification_type="quota_auto_resume_fired")
+        self._send("PostToolUse", 29, tool_name="Bash")
+        row = self._row()
+        self.assertEqual(row["last_event"], "Notification")
+        self.assertEqual(row["last_event_at"], _stamp(30))
+
+    def test_sync_prompt_stamped_before_last_event_at_is_never_stale(self):
+        self._mid_turn()
+        self._send("Stop", 10, last_assistant_message="Done.")
+        self._send("SessionEnd", 11, reason="exit")
+        self.assertIsNotNone(self._row()["ended_at"])
+        self._send("UserPromptSubmit", 5, prompt="one more thing")
+        row = self._row()
+        self.assertEqual(row["last_event"], "UserPromptSubmit")
+        self.assertEqual(row["last_prompt"], "one more thing")
+        self.assertIsNone(row["ended_at"])
+        self.assertEqual(row["last_event_at"], _stamp(11))
+        self.assertEqual(row["updated_at"], _stamp(11))
+
+    def test_stale_subagent_stop_after_stop_leaves_background_tasks(self):
+        # Beyond STALE_JITTER_SECS (1 s; exactly 1 s is beyond it too).
+        for at in (8, 10 - hook.STALE_JITTER_SECS):
+            with self.subTest(at=at):
+                self._reset()
+                self._mid_turn()
+                self._send("Stop", 10,
+                           background_tasks=[{"type": "subagent", "status": "running"}])
+                self.assertEqual(self._row()["background_tasks"], 1)
+                self._send("SubagentStop", at, agent_id="a1")
+                row = self._row()
+                self.assertEqual(row["background_tasks"], 1)
+                self.assertEqual(json.loads(row["background_types"]), ["subagent"])
+                # The same SubagentStop stamped after the Stop still lowers it.
+                self._send("SubagentStop", 11, agent_id="a1")
+                self.assertEqual(self._row()["background_tasks"], 0)
+
+    def test_stale_subagent_stop_within_jitter_still_drops_the_subagent(self):
+        # A background subagent that finished a few ms after the Stop listed
+        # it, but whose SubagentStop was stamped first: the count drops, and
+        # nothing else of the stale event applies.
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        for at in (10 - 0.005, 10 - 0.9):
+            with self.subTest(at=at):
+                self._reset()
+                self._mid_turn()
+                self._send("Stop", 10, last_assistant_message="Done.",
+                           background_tasks=[{"type": "subagent", "status": "running"},
+                                             {"type": "subagent", "status": "running"}])
+                before = self._row()
+                self._send("SubagentStop", at, agent_id="a1")
+                row = self._row()
+                self.assertEqual(row["background_tasks"], 1)
+                self.assertEqual(json.loads(row["background_types"]), ["subagent"])
+                self.assertEqual(row["last_event"], "Stop")
+                self.assertEqual(row["last_event_at"], before["last_event_at"])
+                self.assertEqual(row["updated_at"], before["updated_at"])
+                self.assertIn('ignored=stale', self._event_lines()[-1])
+
+    def test_stale_subagent_start_within_jitter_changes_nothing(self):
+        self._mid_turn()
+        self._send("Stop", 10, background_tasks=[{"type": "subagent", "status": "running"}])
+        before = self._row()
+        self._send("SubagentStart", 10 - 0.005, agent_id="a2")
+        row = self._row()
+        self.assertEqual(row["background_tasks"], 1)
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertEqual(row["last_event_at"], before["last_event_at"])
+
+    def test_stale_post_tool_use_within_jitter_stays_fully_stale(self):
+        self._mid_turn()
+        self._send("Stop", 10, permission_mode="plan")
+        self.conn.execute("UPDATE sessions SET todos_open=0 WHERE session_id='s1'")
+        self._send("PostToolUse", 10 - 0.005, tool_name="TodoWrite", permission_mode="default",
+                   tool_input={"todos": [{"status": "pending"}]})
+        row = self._row()
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertEqual(row["todos_open"], 0)
+        self.assertEqual(row["permission_mode"], "plan")
+
+    def test_stale_todo_write_leaves_todos_open(self):
+        self._mid_turn()
+        self._send("PostToolUse", 2, tool_name="TodoWrite",
+                   tool_input={"todos": [{"status": "pending"}]})
+        self.assertEqual(self._row()["todos_open"], 1)
+        self._send("Stop", 10)
+        # The Stop re-parse's authoritative count.
+        self.conn.execute("UPDATE sessions SET todos_open=0 WHERE session_id='s1'")
+        self._send("PostToolUse", 9, tool_name="TodoWrite",
+                   tool_input={"todos": [{"status": "pending"}, {"status": "pending"}]})
+        self.assertEqual(self._row()["todos_open"], 0)
+
+    def test_stale_event_does_not_overwrite_permission_mode(self):
+        self._mid_turn()
+        self._send("Stop", 10, permission_mode="plan")
+        self._send("PostToolUse", 9, tool_name="Bash", permission_mode="default")
+        self.assertEqual(self._row()["permission_mode"], "plan")
+
+    def test_parent_stop_after_later_subagent_event_ends_the_turn(self):
+        self._mid_turn()
+        self._send("PostToolUse", 5.003, agent_id="a1", tool_name="Read")
+        self._send("Stop", 5, last_assistant_message="Done.")
+        row = self._row()
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertEqual(row["last_event_at"], _stamp(5.003))
+        state = reconcile.compute_state(
+            dict(row), None, [], now=_T0 + timedelta(minutes=1), alive=True)
+        self.assertEqual(state[0], "review")
+
+    def test_parent_permission_notification_after_later_subagent_event_needs_you(self):
+        self._mid_turn()
+        self._send("PostToolUse", 5.003, agent_id="a1", tool_name="Read")
+        self._send("Notification", 5, notification_type="permission_prompt",
+                   message="Claude needs your permission to use Bash")
+        row = self._row()
+        self.assertEqual(row["last_event"], "Notification")
+        self.assertEqual(row["last_event_at"], _stamp(5.003))
+        state = reconcile.compute_state(
+            dict(row), None, [], now=_T0 + timedelta(minutes=1), alive=True,
+            notification_type="permission_prompt")
+        self.assertEqual(state[0], "needs_you")
+
+    def test_parent_ask_user_question_after_later_subagent_event_needs_you(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._mid_turn()
+        self._send("PostToolUse", 5.003, agent_id="a1", tool_name="Read")
+        self._send("PreToolUse", 5, tool_name="AskUserQuestion")
+        row = self._row()
+        self.assertEqual(row["last_event"], hook.NEEDS_YOU_TOOL_SENTINEL)
+        self.assertEqual(row["waiting_reason"], "question")
+        self.assertEqual(row["last_event_at"], _stamp(5.003))
+        last = self._event_lines()[-1]
+        self.assertIn("event=PreToolUse", last)
+        self.assertNotIn("stale", last)
+
+    def test_parent_todo_write_before_later_subagent_event_still_applies(self):
+        self._mid_turn()
+        self._send("PostToolUse", 5.003, agent_id="a1", tool_name="Read")
+        self._send("PostToolUse", 5, tool_name="TodoWrite",
+                   tool_input={"todos": [{"status": "pending"}, {"status": "completed"}]})
+        row = self._row()
+        self.assertEqual(row["todos_open"], 1)
+        self.assertEqual(row["last_event"], "PostToolUse")
+        self.assertEqual(row["last_event_at"], _stamp(5.003))
+
+    def test_stale_is_logged_at_debug_only(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._mid_turn()
+        self._send("Stop", 10)
+        self._send("PostToolUse", 9, tool_name="Bash")
+        self.assertIn("stale", self._event_lines()[-1])
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "info"
+        (self.agentboard_home / "agentboard.log").unlink(missing_ok=True)
+        self._send("PostToolUse", 9.5, tool_name="Bash")
+        self.assertEqual(self._event_lines(), [])
+
+    # -- Codex ----------------------------------------------------------------
+
+    def test_codex_stale_post_tool_use_after_stop_keeps_stop(self):
+        self._mid_turn(tool="codex")
+        self._send("Stop", 10, tool="codex")
+        self._send("PostToolUse", 9, tool="codex", tool_name="shell")
+        row = self._row("codex")
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertEqual(row["last_event_at"], _stamp(10))
+
+    def test_codex_stale_subagent_stop_after_stop_leaves_background_tasks(self):
+        self._mid_turn(tool="codex")
+        self._send("Stop", 10, tool="codex")
+        self.conn.execute(
+            "UPDATE sessions SET background_tasks=1, background_types='[\"subagent\"]' "
+            "WHERE tool='codex' AND session_id='s1'")
+        self._send("SubagentStop", 8, tool="codex", agent_id="a1")
+        self.assertEqual(self._row("codex")["background_tasks"], 1)
+        # Within STALE_JITTER_SECS of the Stop it drops the subagent.
+        self._send("SubagentStop", 9.995, tool="codex", agent_id="a1")
+        row = self._row("codex")
+        self.assertEqual(row["background_tasks"], 0)
+        self.assertEqual(row["last_event"], "Stop")
+        self.assertEqual(row["last_event_at"], _stamp(10))
+
+    def test_codex_pre_tool_use_just_after_permission_request_keeps_needs_you(self):
+        self._mid_turn(tool="codex")
+        self._send("PermissionRequest", 5, tool="codex", tool_name="shell")
+        self._send("PreToolUse", 5.2, tool="codex", tool_name="shell")
+        row = self._row("codex")
+        self.assertEqual(row["last_event"], "PermissionRequest")
+        self.assertEqual(row["last_event_at"], _stamp(5))
+
+    def test_codex_sync_events_stamped_earlier_always_apply(self):
+        self._mid_turn(tool="codex")
+        self._send("Stop", 10, tool="codex")
+        self._send("Interrupt", 9, tool="codex")
+        row = self._row("codex")
+        self.assertEqual(row["last_event"], "Interrupt")
+        self.assertEqual(row["last_event_at"], _stamp(10))
+        self._send("UserPromptSubmit", 8, tool="codex", prompt="go on")
+        row = self._row("codex")
+        self.assertEqual(row["last_event"], "UserPromptSubmit")
+        self.assertEqual(row["last_prompt"], "go on")
+        self.assertEqual(row["last_event_at"], _stamp(10))
+
+    def test_claude_only_async_event_under_codex_is_not_gated(self):
+        self._mid_turn(tool="codex")
+        self._send("Stop", 10, tool="codex")
+        self._send("PostToolUseFailure", 9, tool="codex", tool_name="shell")
+        self.assertEqual(self._row("codex")["last_event"], "PostToolUseFailure")
+
+    def test_unknown_tool_is_never_gated(self):
+        self._mid_turn(tool="other")
+        self._send("Stop", 10, tool="other")
+        self._send("PostToolUse", 9, tool="other", tool_name="x")
+        self.assertEqual(self._row("other")["last_event"], "PostToolUse")
+        self._send("PermissionRequest", 20, tool="other")
+        self._send("PreToolUse", 20.2, tool="other", tool_name="x")
+        self.assertEqual(self._row("other")["last_event"], "PreToolUse")
+
+    # -- the needs-you precedence window --------------------------------------
+
+    def _assert_pre_tool_use_window(self, setup):
+        for gap, expected in ((0.2, None), (2, "PreToolUse")):
+            with self.subTest(gap=gap):
+                self._reset()
+                self._mid_turn()
+                kept = setup()
+                self._send("PreToolUse", 5 + gap, tool_name="Bash")
+                self.assertEqual(self._row()["last_event"], expected or kept)
+
+    def test_pre_tool_use_just_after_permission_request_keeps_needs_you(self):
+        def setup():
+            self._send("PermissionRequest", 5, tool_name="Bash")
+            return "PermissionRequest"
+        self._assert_pre_tool_use_window(setup)
+
+    def test_pre_tool_use_just_after_needs_you_tool_keeps_needs_you(self):
+        def setup():
+            self._send("PreToolUse", 5, tool_name="ExitPlanMode")
+            return hook.NEEDS_YOU_TOOL_SENTINEL
+        self._assert_pre_tool_use_window(setup)
+
+    def test_pre_tool_use_just_after_needs_you_notification_keeps_needs_you(self):
+        def setup():
+            self._send("Notification", 5, notification_type="permission_prompt",
+                       message="needs permission")
+            return "Notification"
+        self._assert_pre_tool_use_window(setup)
+
+    def test_pre_tool_use_just_after_idle_notification_is_not_held(self):
+        self._mid_turn()
+        self._send("Notification", 5, notification_type="idle_prompt", message="waiting")
+        self._send("PreToolUse", 5.2, tool_name="Bash")
+        self.assertEqual(self._row()["last_event"], "PreToolUse")
+
+    def test_precedence_is_logged_at_debug(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._mid_turn()
+        self._send("PermissionRequest", 5, tool_name="Bash")
+        self._send("PreToolUse", 5.2, tool_name="Bash")
+        self.assertIn("needs_you_precedence", self._event_lines()[-1])
+
+    def test_post_tool_use_just_after_permission_request_is_running(self):
+        self._mid_turn()
+        self._send("PermissionRequest", 5, tool_name="Bash")
+        self._send("PostToolUse", 5.2, tool_name="Bash")
+        row = self._row()
+        self.assertEqual(row["last_event"], "PostToolUse")
+        self.assertEqual(row["last_event_at"], _stamp(5.2))
+
+    def test_permission_request_stamped_before_committed_pre_tool_use_needs_you(self):
+        for gap in (0.005, 2):
+            with self.subTest(gap=gap):
+                self._reset()
+                self._mid_turn()
+                self._send("PreToolUse", 5, tool_name="Bash")
+                self._send("PermissionRequest", 5 - gap, tool_name="Bash")
+                row = self._row()
+                self.assertEqual(row["last_event"], "PermissionRequest")
+                self.assertEqual(row["last_event_at"], _stamp(5))
+
+    def test_precedence_events_are_needs_you_events(self):
+        self.assertLessEqual(hook.NEEDS_YOU_PRECEDENCE_EVENTS, reconcile.NEEDS_YOU_EVENTS)
+        self.assertNotIn("StopFailure", hook.NEEDS_YOU_PRECEDENCE_EVENTS)
+
+    def test_subagent_tagged_pre_tool_use_is_unaffected(self):
+        os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        self._mid_turn()
+        self._send("PermissionRequest", 5, tool_name="Bash")
+        self._send("PreToolUse", 5.2, agent_id="a1", tool_name="Bash")
+        self.assertEqual(self._row()["last_event"], "PermissionRequest")
+        last = self._event_lines()[-1]
+        self.assertIn("subagent", last)
+        self.assertNotIn("needs_you_precedence", last)
+
+    # -- timestamps -------------------------------------------------------------
+
+    def test_mixed_precision_last_event_at_compares_as_time(self):
+        self._mid_turn()
+        self._send("Stop", 10)
+        # Backfill-style millisecond precision: as strings "...10.123Z" sorts
+        # after "...10.123456Z", though it is earlier.
+        self.conn.execute(
+            "UPDATE sessions SET last_event_at='2026-10-27T10:00:10.123Z' WHERE session_id='s1'")
+        self._send("PostToolUse", 10.123456, tool_name="Bash")
+        row = self._row()
+        self.assertEqual(row["last_event"], "PostToolUse")
+        self.assertEqual(row["last_event_at"], _stamp(10.123456))
+
+    def test_backfill_origin_rows_are_not_gated(self):
+        self._mid_turn()
+        self._send("Stop", 10)
+        self.conn.execute("UPDATE sessions SET origin='backfill' WHERE session_id='s1'")
+        self._send("PostToolUse", 9, tool_name="Bash")
+        row = self._row()
+        self.assertEqual(row["last_event"], "PostToolUse")
+        self.assertEqual(row["last_event_at"], _stamp(10))
+
+    def test_async_sets_match_their_tools(self):
+        self.assertEqual(set(hook.ASYNC_EVENTS), {"claude", "codex"})
+        self.assertNotIn("PostToolUseFailure", hook.ASYNC_EVENTS["codex"])
+        self.assertLessEqual(hook.ASYNC_EVENTS["codex"], hook.ASYNC_EVENTS["claude"])
+
+
+class AsyncHookProcessTests(AgentBoardTestCase):
+    """Real hook processes racing on one database: the order they commit in
+    never decides the final state."""
+
+    BIN = Path(__file__).resolve().parent.parent / "bin" / "agentboard"
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.tmp_path / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+        (self.repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        self.env = dict(os.environ)
+        self.env["HOME"] = str(self.fake_home)
+        self.env["AGENTBOARD_HOME"] = str(self.agentboard_home)
+        self.env.pop(hook.HOOK_SKIP_ENV, None)
+        self.env.pop("AGENTBOARD_LOG_LEVEL", None)
+
+    def _seed(self, tool):
+        """A mid-turn row whose pid, tty and branch are known, so no event
+        takes the ps walk or a git shell-out."""
+        self.conn.execute("DELETE FROM sessions")
+        self.conn.execute("DELETE FROM events")
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, cwd, branch, started_at, updated_at, "
+            "last_event, last_event_at, pid, tty, origin, first_prompt) "
+            "VALUES (?, 's1', ?, 'main', ?, ?, 'PostToolUse', ?, ?, 'ttys001', 'hook', 'go')",
+            (tool, str(self.repo), _stamp(0), _stamp(0), _stamp(0), os.getpid()),
+        )
+
+    def _spawn(self, tool, event, **fields):
+        proc = subprocess.Popen(
+            [sys.executable, str(self.BIN), "hook", "--tool", tool],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=self.env,
+        )
+        payload = {"session_id": "s1", "cwd": str(self.repo), "hook_event_name": event, **fields}
+        proc.stdin.write(json.dumps(payload).encode())
+        proc.stdin.close()
+        return proc
+
+    def _wait(self, *procs):
+        for proc in procs:
+            proc.wait(timeout=30)
+            out, err = proc.stdout.read(), proc.stderr.read()
+            proc.stdout.close()
+            proc.stderr.close()
+            self.assertEqual(proc.returncode, 0, err)
+            self.assertEqual(out, b"")
+
+    def _final(self, tool, *events):
+        for event in events:
+            count = self.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE tool=? AND event=?", (tool, event)).fetchone()[0]
+            self.assertEqual(count, 1, f"{event} was not recorded")
+        return self.conn.execute(
+            "SELECT last_event FROM sessions WHERE tool=? AND session_id='s1'", (tool,)
+        ).fetchone()[0]
+
+    def _lock_race(self, tool, first, second, gap, rounds=5):
+        """Spawn `first`, then `second` `gap` seconds later, while this test
+        holds the write lock, so both queue on it and commit in whichever
+        order sqlite's busy handler picks; either order occurs. The guard,
+        not the commit order, must decide: the row ends in `second`."""
+        (first_event, first_fields), (second_event, second_fields) = first, second
+        for round_no in range(rounds):
+            with self.subTest(tool=tool, round=round_no):
+                self._seed(tool)
+                holder = db.connect()
+                try:
+                    holder.execute("BEGIN IMMEDIATE")
+                    one = self._spawn(tool, first_event, **first_fields)
+                    time.sleep(gap)
+                    two = self._spawn(tool, second_event, **second_fields)
+                    # Long enough for both to be queued on the write lock.
+                    time.sleep(0.5)
+                    holder.execute("ROLLBACK")
+                finally:
+                    holder.close()
+                self._wait(one, two)
+                self.assertEqual(self._final(tool, first_event, second_event), second_event)
+
+    def test_pre_tool_use_and_permission_request_queued_on_the_lock_end_in_needs_you(self):
+        # ~5 ms apart, inside the start-stamp jitter: either the stale guard
+        # (PermissionRequest stamped later) or the needs-you precedence
+        # window (stamped earlier) keeps PermissionRequest. At this gap the
+        # later-spawned hook committed first in about 40% of rounds, so with
+        # both guards off all 20 rounds pass with chance 0.6**20 (~4e-5).
+        self._lock_race(
+            "claude", ("PreToolUse", {"tool_name": "Bash"}),
+            ("PermissionRequest", {"tool_name": "Bash"}), gap=0.005, rounds=20)
+
+    def test_post_tool_use_and_stop_queued_on_the_lock_end_in_stop(self):
+        self._lock_race(
+            "claude", ("PostToolUse", {"tool_name": "Bash"}),
+            ("Stop", {"last_assistant_message": "Done."}), gap=0.05)
+
+    def test_codex_post_tool_use_and_stop_queued_on_the_lock_end_in_stop(self):
+        self._lock_race(
+            "codex", ("PostToolUse", {"tool_name": "Bash"}),
+            ("Stop", {"last_assistant_message": "Done."}), gap=0.05)
 
 
 class HookRunTests(AgentBoardTestCase):

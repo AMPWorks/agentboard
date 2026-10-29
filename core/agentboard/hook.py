@@ -128,6 +128,52 @@ FINISHED_TURN_EVENTS = {
     "Elicitation",
 }
 
+# Events install-hooks registers with `"async": true`, per tool (cli.py's
+# CLAUDE_ASYNC_EVENTS/CODEX_ASYNC_EVENTS read these, so the install side
+# and the stale guard below can't drift). Only the high-frequency mid-turn
+# events: an event that any query orders or picks by events.id (ORDER BY
+# id, MAX(id), id < ?) must stay synchronous, since only a synchronous hook
+# commits in firing order. Today those readers (links, notes.rebuild,
+# titles.build_context) read only UserPromptSubmit, Stop, StopFailure,
+# Interrupt and SessionEnd. Codex has no PostToolUseFailure.
+ASYNC_EVENTS = {
+    "claude": frozenset({"PreToolUse", "PostToolUse", "PostToolUseFailure",
+                         "SubagentStart", "SubagentStop"}),
+    "codex": frozenset({"PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop"}),
+}
+
+# Settled last_event values an async event stamped before them must not
+# replace: a finished turn, a needs-you state or an ended session. One
+# activity event replacing another is never visibly wrong, so the stale
+# guard protects only these.
+STALE_GUARDED_EVENTS = FINISHED_TURN_EVENTS | {"SessionEnd"}
+
+# A stale SubagentStop stamped less than this before the row's
+# last_event_at still performs the background-subagent decrement; every
+# other stale effect (state, todos, model, permission_mode) stays skipped.
+# A background subagent that finishes within the ~5-7 ms start-stamp
+# jitter after the parent Stop was listed in that Stop's background_tasks,
+# but its SubagentStop can be stamped before the Stop. Without the
+# decrement the finished row stays Running ("waiting on 1 background
+# task") until the next Stop. The trade-off: a SubagentStop that really
+# fired up to this long before the Stop and committed after it (a stall)
+# was already left out of the Stop's count, so if another background
+# subagent is still listed, the decrement under-counts it and the row can
+# read as finished while that one runs. Under-counting shows "done" early;
+# skipping the decrement sticks on Running, so the margin favors the
+# former. Beyond it a stale SubagentStop stays fully stale.
+STALE_JITTER_SECS = 1.0
+
+# The needs-you last_event values (plus a Notification whose type is in
+# NEEDS_YOU_NOTIFICATION_TYPES) that a parent async PreToolUse stamped less
+# than NEEDS_YOU_PRECEDENCE_SECS after them does not replace: an async
+# PreToolUse and its own synchronous PermissionRequest fire ~9 ms apart,
+# inside the start-stamp jitter. A subset of reconcile.NEEDS_YOU_EVENTS
+# (not imported: reconcile imports from here); StopFailure is a turn end,
+# not a tool-adjacent prompt, so it is not in here.
+NEEDS_YOU_PRECEDENCE_EVENTS = {"PermissionRequest", NEEDS_YOU_TOOL_SENTINEL, "Elicitation"}
+NEEDS_YOU_PRECEDENCE_SECS = 1.0
+
 # Compaction events. A parent one is activity mid-turn, but a /compact
 # typed at an idle prompt (Stop -> PreCompact -> PostCompact ->
 # SessionStart compact) must not erase the finished turn, so when the row's
@@ -224,6 +270,36 @@ def normalize_branch(branch):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _iso_from_epoch(seconds: float) -> str:
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _parse_iso(value):
+    """A stored timestamp as an aware datetime, or None. Always compare
+    these, never the strings: backfill-origin values can carry millisecond
+    precision, and "...00.123Z" > "...00.123456Z" as strings."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _later_iso(stored, own):
+    """Whichever of two timestamp strings is later (own when stored is
+    missing or unparseable), so last_event_at/updated_at never move
+    backwards when events commit out of order."""
+    stored_at = _parse_iso(stored)
+    own_at = _parse_iso(own)
+    if stored_at is None or own_at is None:
+        return own
+    return stored if stored_at > own_at else own
 
 
 def _truncate(text):
@@ -820,6 +896,53 @@ def _row_turn_finished(conn, tool, session_id, row) -> bool:
     return not (found and found[0] in RESUME_NOTIFICATION_TYPES)
 
 
+def _row_needs_you(conn, tool, session_id, row) -> bool:
+    """True when the row's last_event is a tool-adjacent needs-you state
+    (NEEDS_YOU_PRECEDENCE_EVENTS, or a Notification whose newest relevant
+    parent type is in NEEDS_YOU_NOTIFICATION_TYPES). The events lookup runs
+    only when last_event is a Notification."""
+    if row is None:
+        return False
+    if row["last_event"] in NEEDS_YOU_PRECEDENCE_EVENTS:
+        return True
+    if row["last_event"] != "Notification":
+        return False
+    found = conn.execute(
+        "SELECT notification_type FROM events WHERE tool=? AND session_id=? "
+        "AND event='Notification' AND agent_id IS NULL "
+        "AND notification_type IN (" + ",".join("?" for _ in RELEVANT_NOTIFICATION_TYPES) + ") "
+        "ORDER BY ts DESC, id DESC LIMIT 1",
+        (tool, session_id, *sorted(RELEVANT_NOTIFICATION_TYPES)),
+    ).fetchone()
+    return bool(found) and found[0] in NEEDS_YOU_NOTIFICATION_TYPES
+
+
+def _is_stale(tool, event, row, now) -> bool:
+    """True for an async event (ASYNC_EVENTS for its tool) that commits
+    after a settled hook-written state stamped later than its own start.
+    Synchronous events are never stale: Claude Code and Codex fire one only
+    after every earlier event's hook finished, so the only later stamp it
+    can meet is a concurrent subagent event's."""
+    if event not in ASYNC_EVENTS.get(tool, frozenset()):
+        return False
+    if row is None or row["origin"] != "hook" or row["last_event"] not in STALE_GUARDED_EVENTS:
+        return False
+    stored_at = _parse_iso(row["last_event_at"])
+    own_at = _parse_iso(now)
+    return stored_at is not None and own_at is not None and own_at < stored_at
+
+
+def _within_stale_jitter(row, now) -> bool:
+    """True when `now` is less than STALE_JITTER_SECS before the row's
+    last_event_at (called only for a stale event, so it is before it)."""
+    stored_at = _parse_iso(row["last_event_at"]) if row is not None else None
+    own_at = _parse_iso(now)
+    return (
+        stored_at is not None and own_at is not None
+        and (stored_at - own_at).total_seconds() < STALE_JITTER_SECS
+    )
+
+
 def _drop_background_subagent(conn, tool, session_id, row) -> None:
     """Remove one "subagent" entry from the session's background_types and
     decrement background_tasks (floor 0), only if an entry was removed."""
@@ -838,8 +961,12 @@ def _drop_background_subagent(conn, tool, session_id, row) -> None:
     )
 
 
-def process_payload(conn, tool: str, payload: dict) -> None:
-    """Record one hook event. Raises on error; caller must swallow it."""
+def process_payload(conn, tool: str, payload: dict, now=None) -> None:
+    """Record one hook event. Raises on error; caller must swallow it.
+
+    `now` is the event's own time: the shim passes the hook process's start
+    time (see run), so an async event that commits late still carries the
+    time it fired. It defaults to the current time."""
     event = payload.get("hook_event_name") or payload.get("event") or ""
     session_id = payload.get("session_id")
     if not session_id:
@@ -848,7 +975,8 @@ def process_payload(conn, tool: str, payload: dict) -> None:
               reason="empty_payload" if not payload else "missing_session_id")
         return
 
-    now = _now_iso()
+    if now is None:
+        now = _now_iso()
     cwd = payload.get("cwd")
     new_cwd = payload.get("new_cwd")
     if event == "CwdChanged" and not payload.get("agent_id") and isinstance(new_cwd, str) and new_cwd:
@@ -1004,20 +1132,52 @@ def process_payload(conn, tool: str, payload: dict) -> None:
             and row_last_event == "Elicitation"
         )
         state_neutral = event in STATE_NEUTRAL_EVENTS
+        # An async event that commits after a settled state stamped later
+        # than its own start is recorded but changes nothing that is
+        # ordered (see _is_stale).
+        stale = _is_stale(tool, event, row, now)
+        # A parent async PreToolUse stamped just after a needs-you state is
+        # its own tool call's jitter (the PermissionRequest that follows it
+        # can be stamped first): the row keeps waiting on the user.
+        # Assumption for Codex: like Claude Code, it fires a tool's
+        # PreToolUse before that tool's PermissionRequest. The Codex hooks
+        # docs (learn.chatgpt.com/docs/hooks, checked 2026-10-28) do not
+        # state this; they only list PreToolUse before PermissionRequest
+        # and say PreToolUse can block or rewrite the call before it runs.
+        # If Codex instead fires PreToolUse after the user approves, an
+        # approval within NEEDS_YOU_PRECEDENCE_SECS of the PermissionRequest
+        # stamp leaves the row on Needs you for the whole tool run, until
+        # its PostToolUse. A first report of a Codex row stuck on Needs you
+        # while a tool runs points here.
+        needs_you_precedence = False
+        if (
+            not stale and row is not None and event == "PreToolUse"
+            and not is_subagent_tagged and event in ASYNC_EVENTS.get(tool, frozenset())
+        ):
+            stored_at = _parse_iso(row["last_event_at"])
+            own_at = _parse_iso(now)
+            needs_you_precedence = (
+                stored_at is not None and own_at is not None
+                and 0 <= (own_at - stored_at).total_seconds() < NEEDS_YOU_PRECEDENCE_SECS
+                and _row_needs_you(conn, tool, session_id, row)
+            )
         keep_state = (
             is_subagent_tagged or irrelevant_notification or marker_after_turn
             or continued_start or kept_after_turn or elicitation_dialog or state_neutral
+            or stale or needs_you_precedence
         )
 
-        new_last_event_at = now
+        # Neither time moves backwards when events commit out of order.
+        new_last_event_at = _later_iso(row["last_event_at"], now) if row else now
+        new_updated_at = _later_iso(row["updated_at"], now) if row else now
         if keep_state:
             new_last_event = row_last_event
             new_waiting_reason = row["waiting_reason"] if row else None
-            # A kept finished turn keeps the time it finished; a kept
-            # activity event (a subagent working mid-turn, a mid-turn
-            # compaction) keeps advancing it, since it is compute_state's
-            # freshness signal when liveness is unknown.
-            if row_finished:
+            # A kept finished turn keeps the time it finished, and so does a
+            # stale event; a kept activity event (a subagent working
+            # mid-turn, a mid-turn compaction) keeps advancing it, since it
+            # is compute_state's freshness signal when liveness is unknown.
+            if row_finished or stale or needs_you_precedence:
                 new_last_event_at = row["last_event_at"] or now
         elif needs_you_tool_reason is not None:
             new_last_event = NEEDS_YOU_TOOL_SENTINEL
@@ -1035,10 +1195,13 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         end_reason = payload.get("reason") if event == "SessionEnd" else None
         started_at = now if row is None else None
         # A subagent can run under its own mode: only parent events set it.
-        permission_mode = None if is_subagent_tagged else _permission_mode(payload)
+        # A stale event fills only what is not ordered (cwd, branch, pid,
+        # tty, transcript_path): an older mode or todo estimate must not
+        # overwrite a newer one, or the Stop re-parse's authoritative count.
+        permission_mode = None if is_subagent_tagged or stale else _permission_mode(payload)
         todos_open = (
             _todos_open_from_tool_use(tool_name, payload.get("tool_input"))
-            if event == "PostToolUse" else None
+            if event == "PostToolUse" and not stale else None
         )
         resumed = (
             row is not None and row["ended_at"]
@@ -1112,7 +1275,7 @@ def process_payload(conn, tool: str, payload: dict) -> None:
                     _truncate(first_prompt),
                     last_prompt,
                     last_assistant,
-                    now,
+                    new_updated_at,
                     new_last_event,
                     new_last_event_at,
                     new_waiting_reason,
@@ -1146,13 +1309,23 @@ def process_payload(conn, tool: str, payload: dict) -> None:
                     session_id,
                 ),
             )
-        elif marker_after_turn and event == "SubagentStop":
+        elif marker_after_turn and event == "SubagentStop" and (
+            not stale or _within_stale_jitter(row, now)
+        ):
             # A background subagent finished: one fewer in flight. A
             # SubagentStop of a workflow/teammate task changes neither
-            # until the next parent Stop rewrites both.
+            # until the next parent Stop rewrites both. A stale one stamped
+            # well before the Stop committed after the Stop that already
+            # left it out; one within STALE_JITTER_SECS is taken as having
+            # finished just after it (see the constant for the trade-off).
+            # Only a parent Stop rewrites the count, so a stale one beyond
+            # the margin that lands on another settled state (a mid-turn
+            # PermissionRequest, say) leaves it one too high until the next
+            # Stop corrects it; checking for a later Stop event instead
+            # would add a query to every async SubagentStop.
             _drop_background_subagent(conn, tool, session_id, row)
 
-        if not is_subagent_tagged and not event.startswith("Subagent"):
+        if not is_subagent_tagged and not stale and not event.startswith("Subagent"):
             # Any parent event that names the model (every Codex event,
             # Claude's SessionStart) records it; one without keeps the
             # stored model. The transcript re-parse also refreshes it at
@@ -1239,7 +1412,9 @@ def process_payload(conn, tool: str, payload: dict) -> None:
         "debug", "event", tool=tool, event=event, session=session_id, pid=pid,
         tty=tty, daemon=is_daemon, subagent=is_subagent_tagged,
         ignored=(
-            "subagent" if is_subagent_tagged
+            "stale" if stale
+            else "needs_you_precedence" if needs_you_precedence
+            else "subagent" if is_subagent_tagged
             else "irrelevant_notification" if irrelevant_notification
             else "after_turn" if marker_after_turn or kept_after_turn
             else "elicitation_dialog" if elicitation_dialog
@@ -1273,13 +1448,18 @@ def process_payload(conn, tool: str, payload: dict) -> None:
 HOOK_SKIP_ENV = "AGENTBOARD_HOOK_SKIP"
 
 
-def run(tool: str, stdin_stream=None) -> None:
-    """Entry point used by the CLI. Never raises, never prints."""
+def run(tool: str, stdin_stream=None, started_at=None) -> None:
+    """Entry point used by the CLI. Never raises, never prints.
+
+    `started_at` is the hook process's start time (epoch seconds, stamped
+    by the shim before any import), recorded as the event's time so events
+    are ordered by when they fired, not by when they commit."""
     if os.environ.get(HOOK_SKIP_ENV):
         return
     if stdin_stream is None:
         stdin_stream = sys.stdin
     try:
+        now = _iso_from_epoch(started_at) if started_at is not None else None
         raw = stdin_stream.read()
         try:
             payload = json.loads(raw) if raw else {}
@@ -1288,7 +1468,7 @@ def run(tool: str, stdin_stream=None) -> None:
             raise
         conn = db.connect()
         try:
-            process_payload(conn, tool, payload)
+            process_payload(conn, tool, payload, now=now)
         finally:
             conn.close()
     except Exception as exc:

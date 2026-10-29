@@ -75,6 +75,14 @@ every other byte, including comments, is preserved. Either way, the first time h
 `install.sh` re-run while they're still present) you'll see a reminder to run `/hooks` inside
 Codex to trust them — Codex won't act on a hook it hasn't been told to trust, same as Claude Code.
 
+**Codex users: re-trust AgentBoard's hooks after upgrading.** Codex records trust against each
+hook's exact entry and skips a changed one until you trust it again. The upgrade that made the
+mid-turn hooks async (see Hooks below) changes four existing entries in `~/.codex/hooks.json`
+(`PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`), and `install.sh` prints a warning
+naming them. Run `/hooks` in Codex and trust them, or AgentBoard shows no Codex tool activity
+until you do. Prompts, turn ends and permission prompts keep being recorded meanwhile, since
+those hooks did not change. This happens once: later re-runs leave every entry byte-identical.
+
 `uninstall.sh` removes whatever `install.sh` added, and documents what it restores versus leaves
 in place:
 
@@ -271,6 +279,56 @@ It targets well under 50 ms per call. The only things that ever shell out are:
 - A short, targeted `ps` walk (at most 5 hops) to find the actual `claude`/`codex` process above
   the hook's immediate parent, recorded once per session the same way the branch is.
 
+### Async hooks
+
+The high-frequency mid-turn events are registered with `"async": true`, so a hook that stalls
+(for example on a busy sqlite write lock) never holds up the tool call that fired it:
+
+- Claude Code: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`,
+  `SubagentStop` (about 87% of all hook calls).
+- Codex: `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop` (Codex has no
+  `PostToolUseFailure`).
+
+The hook never returns a decision, so no event has to be synchronous for its result. The rest
+stay synchronous anyway: `UserPromptSubmit`, `Stop`, `StopFailure`, `Interrupt` and `SessionEnd`
+are turn boundaries that several queries order by event id, so their hooks must commit in
+firing order; `UserPromptSubmit` and `SessionStart` also find the session's process and
+terminal; `claude -p` and Codex cancel background hooks at teardown, which would lose a `Stop` or
+`SessionEnd`; and `PermissionRequest`, `Notification`, `Elicitation` and the other newer events
+are rare. The sets live in `hook.ASYNC_EVENTS`.
+
+Claude Code does not kill an async hook at its `timeout` (Codex does, on background hooks too),
+so the hook bounds itself: sqlite waits at most 5 s for the lock, `git` 1 s, and the `ps` walk at
+most 5 hops of 1 s each. A stalled async hook finishes late and still records its event.
+
+Async hooks can commit out of order, so each event's `ts` is the hook process's start time,
+stamped by `bin/agentboard` before any import. An async event that commits after a settled
+state (a finished turn, a needs-you state or an ended session) stamped later than its own start
+is still stored in `events` but does not change the session's state, its times, its todo count
+or its background-task count. One exception: a stale `SubagentStop` stamped less than
+`STALE_JITTER_SECS` (1 s) before the settled state still lowers the background-task count. A
+background subagent that finishes a few ms after the parent `Stop` listed it can be stamped
+before that `Stop`, and skipping it would leave the finished row on "waiting on 1 background
+task" until the next `Stop`. The cost is that a stalled `SubagentStop` that really fired up to
+1 s before the `Stop` (so the `Stop` no longer counted it) lowers the count of another subagent
+still running, and the row can read as finished while that one runs. A stale `SubagentStop`
+more than 1 s early that lands on a settled state other than a parent `Stop` (a mid-turn
+permission request, say) leaves the count one too high until the next `Stop`, which rewrites
+it. No event moves
+`last_event_at` or `updated_at` backwards. A
+parent async `PreToolUse` stamped less than a second after a needs-you state (a permission
+request, a question, a plan approval, an MCP elicitation) also keeps the row in Needs you: it is
+the same tool call, whose permission prompt can be stamped first. For Codex this assumes that,
+like Claude Code, Codex fires a tool's `PreToolUse` before its `PermissionRequest`. The Codex
+hooks docs don't say so (they only list `PreToolUse` first), and it is untested against a real
+Codex. If Codex fires `PreToolUse` after the user approves instead, an approval given within a
+second of the prompt leaves the row in Needs you while the tool runs, until its `PostToolUse`.
+
+Known limitation (not changed by async hooks): in a batch of parallel tool calls where one call
+needs permission and the others don't, the others' `PostToolUse` events land after the
+`PermissionRequest` and flip the row to Running until Claude Code's `permission_prompt`
+notification about 6 s later.
+
 Install/remove the hooks with:
 
 ```
@@ -282,7 +340,10 @@ agentboard enable-codex-hooks [--dry-run]
 Both `install-hooks`/`uninstall-hooks` back up the target file first
 (`<file>.agentboard-bak-<timestamp>`), append (or remove) one hook group per event, and are
 idempotent — re-running detects the existing AgentBoard entry and leaves everything else (other
-hooks, other settings keys, their ordering) untouched. If a target file isn't valid JSON,
+hooks, other settings keys, their ordering) untouched. An existing AgentBoard entry whose
+command, `timeout` or `async` differs is rewritten in place, in whatever group it sits; when that
+happens to Codex entries, `install-hooks` warns that Codex must re-trust them in `/hooks`
+("would update" under `--dry-run`). If a target file isn't valid JSON,
 install/uninstall prints an error naming that file, skips just that tool, and still processes the
 other tool and the backfill step — the overall run exits non-zero at the end so the problem isn't
 silently missed. `enable-codex-hooks` is the opt-in that sets Codex's `[features]` / `hooks = true`

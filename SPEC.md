@@ -402,6 +402,27 @@ other keys / ordering; idempotent — detect existing agentboard entry). For Cod
 `~/.codex/hooks.json` and print that the user must trust the new hooks via `/hooks` in Codex.
 Never touch `~/.codex/config.toml`.
 
+Async hooks (added after the original spec): the entry for each event in `hook.ASYNC_EVENTS`
+also carries `"async":true` (Claude: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
+`SubagentStart`, `SubagentStop`; Codex: the same minus `PostToolUseFailure`). Every other event
+stays synchronous: an event that any query orders by `events.id` must commit in firing order,
+and `claude -p`/Codex cancel background hooks at teardown. Claude Code does not enforce `timeout`
+on an async hook (Codex does), so the hook bounds itself (sqlite 5 s, `git` 1 s, `ps` 5 × 1 s).
+An existing AgentBoard entry is rewritten in place when it differs, with the command string
+unchanged; rewriting Codex entries prints a warning that Codex skips changed hooks until they are
+trusted again in `/hooks`. An event's `ts` is the hook process's start time (stamped by the shim
+before any import); an async event that commits after a settled state stamped later than it is
+recorded in `events` but does not change the session row's state or times. A stale
+`SubagentStop` stamped less than `STALE_JITTER_SECS` (1 s) before the row's `last_event_at` still
+decrements the background-subagent count (a subagent finishing within the stamp jitter after the
+parent `Stop` that listed it), and nothing else; the trade-off is that a stalled `SubagentStop`
+fired up to 1 s before the `Stop` can under-count another still-running subagent. Beyond the
+margin it is fully stale. A parent async `PreToolUse` stamped less than
+`NEEDS_YOU_PRECEDENCE_SECS` (1 s) after a needs-you state keeps that state. For Codex this
+assumes it fires a tool's `PreToolUse` before its `PermissionRequest`, as Claude Code does; the
+Codex hooks docs don't state the order. If Codex fires `PreToolUse` after approval instead, an
+approval within 1 s of the prompt leaves the row needs-you until that tool's `PostToolUse`.
+
 Resume commands: Claude `cd <cwd> && claude --resume <id>`; Codex `cd <cwd> && codex resume <id>`.
 Focus: iTerm `ITERM_SESSION_ID` is `w0t1p0:<UUID>`; match `unique id` of iTerm sessions to UUID,
 then select the tab/window and activate iTerm. Exit non-zero with message if not found.
