@@ -25,9 +25,13 @@ enum SettingsKeys {
         AgentBoardCLI.fixturePathDefaultsKey,
         CLIRunner.verboseLoggingKey,
         SettingsKeys.showPlanUsage,
+        SettingsKeys.showClosedAndMergedPRs,
     ]
 
     /// Show the plan-usage lines (one per usage source) in the popover
     /// footer and the dashboard sidebar (default on).
     static let showPlanUsage = "showPlanUsage"
+    /// Also give merged and closed PRs buttons on session rows (default
+    /// off). Display only: the detail view lists every link either way.
+    static let showClosedAndMergedPRs = "showClosedAndMergedPRs"
 }

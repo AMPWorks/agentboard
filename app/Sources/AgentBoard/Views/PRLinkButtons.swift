@@ -28,14 +28,16 @@ enum PRStyle {
 
 /// One compact button per PR link (glyph + `#N`, tinted by state) that opens
 /// the PR in the browser. A separate hit target from the row: clicking one
-/// never focuses the session's terminal. More than `PRButtons.defaultCap`
-/// PRs show a "+N" that opens the detail view instead.
+/// never focuses the session's terminal. Merged and closed PRs get no button
+/// unless Settings → Show closed and merged PRs is on. More than
+/// `PRButtons.defaultCap` shown PRs add a "+N" that opens the detail view.
 struct PRLinkButtons: View {
     let session: Session
     let onOverflow: () -> Void
+    @AppStorage(SettingsKeys.showClosedAndMergedPRs) private var showClosedAndMergedPRs: Bool = false
 
     var body: some View {
-        let layout = PRButtons.layout(for: session.links)
+        let layout = PRButtons.layout(for: session.links, showFinished: showClosedAndMergedPRs)
         if !layout.shown.isEmpty {
             HStack(spacing: 3) {
                 ForEach(layout.shown) { link in
@@ -46,7 +48,7 @@ struct PRLinkButtons: View {
                         .buttonStyle(.borderless)
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .help("Show all \(layout.shown.count + layout.overflow) PRs")
+                        .help("\(layout.overflow) more PR\(layout.overflow == 1 ? "" : "s"): open the detail view, which lists every link")
                 }
             }
         }

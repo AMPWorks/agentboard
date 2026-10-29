@@ -696,10 +696,13 @@ reviews and comments count once they come while the session isn't mid-turn, and 
 default `gh` login and sessions open PRs with a separate token), your reviews and comments count
 like anyone else's.
 
-**PR buttons.** Popover and dashboard rows show one small button per PR (`#N`, green open, purple
-merged, red closed, outlined when it awaits you) that opens it in the browser without focusing
-the terminal; past three PRs a "+N" opens the detail view, whose Links section lists every link
-with its state.
+**PR buttons.** Popover and dashboard rows show one small button per PR that is not merged or closed (`#N`, green open,
+gray while its state is unknown, outlined when it awaits you) that opens it in the browser without
+focusing the terminal. Merged and closed PRs get no button by default; **Settings → General →
+Show closed and merged PRs** (`showClosedAndMergedPRs`, off by default) adds them, purple merged
+and red closed. Past three shown PRs a "+N" (counting only shown PRs) opens the detail view, whose
+Links section lists every link with its state either way. The setting is display-only: the
+right-click menu and search still include every PR, and session states do not change.
 
 **Titles that follow the work.** Claude Code names a session once, so a long-lived session keeps
 its opening summary. `refresh-links` retitles a session once it has 5 new prompts since its last
