@@ -27,7 +27,10 @@ enum SessionDisplay {
 }
 
 /// The PR buttons on a session row: one per PR link that has a URL, the
-/// ones that need the user first, capped with a "+N" for the rest.
+/// ones that need the user first, capped with a "+N" for the rest. Merged
+/// and closed PRs are left off unless `showFinished` is set (Settings →
+/// Show closed and merged PRs). The filter runs before the cap, so "+N"
+/// counts only PRs the row would show.
 enum PRButtons {
     static let defaultCap = 3
 
@@ -49,8 +52,17 @@ enum PRButtons {
         }
     }
 
-    static func layout(for links: [Link], cap: Int = defaultCap) -> Layout {
-        let prs = links.filter { $0.isPR && $0.openURL != nil }
+    /// A merged or closed PR: left off the row buttons unless Settings →
+    /// Show closed and merged PRs is on. Display only; the CLI's state rules
+    /// read the same links unchanged. A nil, `DONE` or nonstandard state
+    /// stays visible, and so does a PR that awaits the user.
+    static func isFinished(_ link: Link) -> Bool {
+        link.isPR && link.awaitsYou != true
+            && (link.state == "MERGED" || link.state == "CLOSED")
+    }
+
+    static func layout(for links: [Link], showFinished: Bool = false, cap: Int = defaultCap) -> Layout {
+        let prs = links.filter { $0.isPR && $0.openURL != nil && (showFinished || !isFinished($0)) }
         let ordered = prs.enumerated().sorted { lhs, rhs in
             let (l, r) = (rank(lhs.element), rank(rhs.element))
             if l != r { return l < r }
