@@ -87,6 +87,15 @@ struct SessionRowView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Spacer(minLength: 4)
+                    if let tag = session.tmuxTag {
+                        Label(tag, systemImage: "rectangle.split.3x1")
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .help(SessionActionHelp.tmuxTag(session))
+                    }
                     PRLinkButtons(session: session, onOverflow: showDetail)
                     // Model and context: always the rightmost item. The branch
                     // truncates before it does; SessionModelTag caps the model

@@ -6,6 +6,19 @@ import AppKit
 /// described the same way everywhere.
 enum SessionActionHelp {
     static let focus = "Bring this session's terminal tab to the front"
+    static let focusTmux = "Bring the window attached to this session's tmux session to the front, or open a new iTerm window attached to it"
+
+    /// The Focus tooltip: a tmux session is focused through tmux.
+    static func focusHelp(_ session: Session) -> String {
+        session.tmux ? focusTmux : focus
+    }
+
+    static func tmuxTag(_ session: Session) -> String {
+        if let name = session.tmuxSession, !name.isEmpty {
+            return "Runs in tmux session \(name); click to focus or attach"
+        }
+        return "Runs in tmux; click to focus or attach"
+    }
     static let resume = "Open a new terminal tab that resumes this session"
     static let copyResume = "Copy the command that resumes this session"
     static let markDone = "Mark this session done and hide it; a new prompt reopens it"
@@ -26,7 +39,7 @@ struct SessionContextMenu: View {
         Group {
             if session.isFocusable {
                 Button("Focus") { Task { await store.focus(session) } }
-                    .help(SessionActionHelp.focus)
+                    .help(SessionActionHelp.focusHelp(session))
             }
             if session.resumeAvailable {
                 Button("Resume") { Task { await store.resume(session) } }

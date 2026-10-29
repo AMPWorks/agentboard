@@ -209,6 +209,7 @@
       "interactive": true,
       "can_focus": true,
       "resume_command": "cd /Users/dev/projects/agentboard/app && claude --resume sess-running-1",
+      "tmux": true, "tmux_session": "agentboard-dev",
       "links": [
         {
           "kind": "ticket",
