@@ -110,11 +110,17 @@ def _session_links(conn, session, config):
     return list(by_key.values())
 
 
+def _is_tmux_row(session):
+    """True iff the row carries both halves of a tmux identity. cmd_focus,
+    _can_focus, the snapshot's tmux flag and its name lookup all use this."""
+    return bool(session.get("tmux_pane") and session.get("tmux_socket"))
+
+
 def _can_focus(session):
     """True iff cmd_focus has some way to act on this session's terminal.
     A session inside tmux always does: focus finds an attached client or
     opens a new window attached to its tmux session."""
-    if session.get("tmux_pane"):
+    if _is_tmux_row(session):
         return True
     return session.get("term_program") in TERM_PROGRAM_APP_NAMES
 
@@ -123,8 +129,10 @@ def _can_focus(session):
 
 # Where Homebrew puts tmux; the app's PATH under launchd has neither.
 TMUX_FALLBACK_PATHS = ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux")
-# `snapshot` runs every few seconds: a tmux call that hangs must not stall it.
-TMUX_SNAPSHOT_TIMEOUT_SECS = 1
+# `snapshot` runs every few seconds: a tmux call that hangs must not stall it,
+# and must stay well under SLOW_QUIET_MS so a wedged server doesn't make every
+# poll log a slow snapshot at info.
+TMUX_SNAPSHOT_TIMEOUT_SECS = 0.5
 
 
 def _tmux_binary():
@@ -401,7 +409,7 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
         "alive": bool(alive),
         "interactive": True if session.get("interactive") is None else bool(session.get("interactive")),
         "can_focus": _can_focus(session),
-        "tmux": bool(session.get("tmux_pane")),
+        "tmux": _is_tmux_row(session),
         # Filled in by build_snapshot from the live tmux server.
         "tmux_session": None,
         "resume_command": _resume_command(tool, cwd, session_id),

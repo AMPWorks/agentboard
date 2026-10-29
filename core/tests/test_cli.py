@@ -3262,7 +3262,7 @@ class TmuxFocusTests(AgentBoardTestCase):
 
     def _runner(self, display=("$3\tamp-agent\t@2\n", 0), clients="",
                 iterm_installed=True, iterm_probe="not_found", terminal_probe="not_found",
-                timeout_on=None):
+                timeout_on=None, attach_rc=0):
         def run(argv, **kwargs):
             self.calls.append(argv)
             if timeout_on is not None and timeout_on(argv):
@@ -3286,6 +3286,11 @@ class TmuxFocusTests(AgentBoardTestCase):
                     return _completed(iterm_probe + "\n", args=argv)
                 if script is cli._TERMINAL_TMUX_CLIENT_APPLESCRIPT:
                     return _completed(terminal_probe + "\n", args=argv)
+                if script in (cli._ITERM_NEW_WINDOW_APPLESCRIPT,
+                              cli._TERMINAL_RESUME_APPLESCRIPT):
+                    return _completed("", returncode=attach_rc,
+                                      stderr="" if attach_rc == 0 else "execution error",
+                                      args=argv)
                 return _completed("", args=argv)
             raise AssertionError(f"unexpected call {argv}")
         return run
@@ -3439,6 +3444,22 @@ class TmuxFocusTests(AgentBoardTestCase):
         self.assertEqual(sum(1 for c in self.calls if c[:2] == ["open", "-Ra"]), 1)
         self.assertIn("outcome=tmux_attached_terminal", self._focus_line())
 
+    def _assert_attach_failed(self, rc, err, script):
+        self.assertEqual(rc, 1)
+        self.assertEqual(self._scripts()[-1], script)
+        self.assertIn("opening a window attached to tmux for claude:s1 failed", err)
+        line = self._focus_line()
+        self.assertIn(" WARN cli.focus ", line)
+        self.assertIn("outcome=tmux_attach_failed", line)
+
+    def test_failed_iterm_attach_reports_tmux_attach_failed(self):
+        rc, err = self._focus(self._runner(attach_rc=1))
+        self._assert_attach_failed(rc, err, cli._ITERM_NEW_WINDOW_APPLESCRIPT)
+
+    def test_failed_terminal_attach_reports_tmux_attach_failed(self):
+        rc, err = self._focus(self._runner(iterm_installed=False, attach_rc=1))
+        self._assert_attach_failed(rc, err, cli._TERMINAL_RESUME_APPLESCRIPT)
+
     def test_run_tmux_is_injectable_separately(self):
         tmux_calls = []
 
@@ -3557,6 +3578,23 @@ class TmuxSnapshotTests(AgentBoardTestCase):
         self.assertIs(entries["ended"]["tmux"], True)
         self.assertIs(entries["plain"]["tmux"], False)
         self.assertIs(entries["plain"]["can_focus"], True)
+
+    def test_half_a_tmux_identity_is_not_a_tmux_row(self):
+        # cmd_focus needs both socket and pane; the snapshot must agree.
+        insert_session(self.conn, session_id="pane_only", term_program="tmux",
+                       tmux_pane="%0")
+        insert_session(self.conn, session_id="sock_only", term_program="tmux",
+                       tmux_socket=TMUX_SOCK)
+        self.alive = {"pane_only", "sock_only"}
+        entries = self._entries(self._run())
+        self.assertEqual(self.calls, [])
+        for sid in ("pane_only", "sock_only"):
+            self.assertIs(entries[sid]["tmux"], False, sid)
+            self.assertIs(entries[sid]["can_focus"], False, sid)
+
+    def test_snapshot_tmux_bound_stays_under_the_slow_threshold(self):
+        # A hung tmux server must not make every poll a slow (info) snapshot.
+        self.assertLessEqual(cli.TMUX_SNAPSHOT_TIMEOUT_SECS * 1000, cli.SLOW_QUIET_MS / 2)
 
     def test_snapshot_without_tmux_rows_never_looks_for_tmux(self):
         insert_session(self.conn, session_id="plain", term_program="iTerm.app")

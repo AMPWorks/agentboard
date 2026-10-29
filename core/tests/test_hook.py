@@ -1214,6 +1214,15 @@ class HookTmuxIdentityTests(AgentBoardTestCase):
         self.assertIsNone(row["tmux_pane"])
         self.assertEqual(row["term_program"], "iTerm.app")
 
+    def test_tmux_term_program_without_tmux_vars_keeps_stored_values(self):
+        # TERM_PROGRAM=tmux with $TMUX/$TMUX_PANE scrubbed is still inside
+        # tmux: only a terminal other than tmux means the session left it.
+        self._fire("SessionStart", self.TMUX_ENV)
+        self._fire("PreToolUse", {"TERM_PROGRAM": "tmux"}, tool_name="Bash")
+        row = self._row()
+        self.assertEqual(row["tmux_socket"], self.SOCK)
+        self.assertEqual(row["tmux_pane"], "%3")
+
     def test_new_pane_replaces_old_one(self):
         self._fire("SessionStart", self.TMUX_ENV)
         self._fire(
