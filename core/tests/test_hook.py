@@ -1106,6 +1106,124 @@ def _fake_ps_chain(hops):
     return fake_run
 
 
+class HookTmuxIdentityTests(AgentBoardTestCase):
+    SOCK = "/private/tmp/tmux-501/default"
+    TMUX_ENV = {
+        "TMUX": "/private/tmp/tmux-501/default,4242,0",
+        "TMUX_PANE": "%3",
+        "TERM_PROGRAM": "tmux",
+        "ITERM_SESSION_ID": "w0t0p0:STALE",
+    }
+
+    def _row(self, tool="claude"):
+        return self.conn.execute(
+            "SELECT * FROM sessions WHERE tool=? AND session_id='s1'", (tool,)
+        ).fetchone()
+
+    def _fire(self, event, env, tool="claude", fake_run=None, **extra):
+        payload = {"session_id": "s1", "cwd": "/tmp", "hook_event_name": event}
+        payload.update(extra)
+        if fake_run is None:
+            def fake_run(cmd, **kwargs):
+                return mock.Mock(returncode=0, stdout="")
+        with mock.patch("agentboard.hook.subprocess.run", side_effect=fake_run), \
+             mock.patch.dict("agentboard.hook.os.environ", env, clear=False):
+            for key in ("TMUX", "TMUX_PANE", "TERM_PROGRAM"):
+                if key not in env:
+                    os.environ.pop(key, None)
+            hook.process_payload(self.conn, tool, payload)
+
+    def test_identity_parses_socket_and_pane(self):
+        self.assertEqual(
+            hook._tmux_identity(self.TMUX_ENV), (self.SOCK, "%3")
+        )
+        # A socket path with a comma keeps it: the split is from the right.
+        self.assertEqual(
+            hook._tmux_identity({"TMUX": "/tmp/a,b/sock,1,2", "TMUX_PANE": "%0"}),
+            ("/tmp/a,b/sock", "%0"),
+        )
+
+    def test_identity_rejects_malformed_values(self):
+        cases = [
+            {},
+            {"TMUX": "", "TMUX_PANE": "%1"},
+            {"TMUX": "/tmp/sock,1,2"},
+            {"TMUX": "/tmp/sock,1,2", "TMUX_PANE": "1"},
+            {"TMUX": "/tmp/sock,1,2", "TMUX_PANE": "%1; rm -rf /"},
+            {"TMUX": "relative/sock,1,2", "TMUX_PANE": "%1"},
+            {"TMUX": "/tmp/sock,abc,2", "TMUX_PANE": "%1"},
+            {"TMUX": "/tmp/sock,1", "TMUX_PANE": "%1"},
+            {"TMUX": "/tmp/so\nck,1,2", "TMUX_PANE": "%1"},
+        ]
+        for env in cases:
+            with self.subTest(env=env):
+                self.assertEqual(hook._tmux_identity(env), (None, None))
+
+    def test_tmux_env_is_recorded(self):
+        self._fire("SessionStart", self.TMUX_ENV)
+        row = self._row()
+        self.assertEqual(row["tmux_socket"], self.SOCK)
+        self.assertEqual(row["tmux_pane"], "%3")
+        self.assertEqual(row["term_program"], "tmux")
+
+    def test_malformed_tmux_env_is_ignored(self):
+        env = dict(self.TMUX_ENV, TMUX="garbage")
+        self._fire("SessionStart", env)
+        row = self._row()
+        self.assertIsNone(row["tmux_socket"])
+        self.assertIsNone(row["tmux_pane"])
+
+    def test_not_recorded_for_daemon_origin_event(self):
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return mock.Mock(returncode=0, stdout="")
+            table = {1000: (40007, "ttys003", "sh"), 40007: (1, "??", "codex")}
+            entry = table.get(int(cmd[-1]))
+            if entry is None:
+                return mock.Mock(stdout="")
+            ppid, tty, comm = entry
+            return mock.Mock(stdout=f"{ppid} {tty} {comm}\n")
+
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, tmux_socket, tmux_pane, origin, "
+            "updated_at) VALUES ('codex','s1','/tmp/old','%9','hook',"
+            "'2026-01-01T00:00:00.000000Z')"
+        )
+        with mock.patch("agentboard.hook.os.getppid", return_value=1000):
+            self._fire("SessionStart", self.TMUX_ENV, tool="codex", fake_run=fake_run)
+        row = self._row(tool="codex")
+        self.assertIsNone(row["tmux_socket"])
+        self.assertIsNone(row["tmux_pane"])
+
+    def test_later_event_without_vars_keeps_stored_values(self):
+        self._fire("SessionStart", self.TMUX_ENV)
+        self._fire("PreToolUse", {}, tool_name="Bash")
+        row = self._row()
+        self.assertEqual(row["tmux_socket"], self.SOCK)
+        self.assertEqual(row["tmux_pane"], "%3")
+
+    def test_event_from_a_plain_terminal_clears_tmux_columns(self):
+        self._fire("SessionStart", self.TMUX_ENV)
+        self._fire(
+            "UserPromptSubmit",
+            {"TERM_PROGRAM": "iTerm.app", "ITERM_SESSION_ID": "w0t1p0:NEW"},
+            prompt="resumed in a plain tab",
+        )
+        row = self._row()
+        self.assertIsNone(row["tmux_socket"])
+        self.assertIsNone(row["tmux_pane"])
+        self.assertEqual(row["term_program"], "iTerm.app")
+
+    def test_new_pane_replaces_old_one(self):
+        self._fire("SessionStart", self.TMUX_ENV)
+        self._fire(
+            "UserPromptSubmit",
+            dict(self.TMUX_ENV, TMUX_PANE="%7"),
+            prompt="moved",
+        )
+        self.assertEqual(self._row()["tmux_pane"], "%7")
+
+
 class SessionStartUsageTests(AgentBoardTestCase):
     """A parent SessionStart stores the model and, on resume/fork, the
     context size; any other parent event that names a model stores it."""

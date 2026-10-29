@@ -6,7 +6,7 @@ from pathlib import Path
 
 DB_FILENAME = "agentboard.db"
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _MIGRATIONS = {
     1: """
@@ -157,6 +157,13 @@ _MIGRATIONS = {
     ALTER TABLE sessions ADD COLUMN model TEXT;
     ALTER TABLE sessions ADD COLUMN context_tokens INTEGER;
     ALTER TABLE sessions ADD COLUMN context_at TEXT;
+    """,
+    # tmux hosting: a session started inside tmux records its server socket
+    # path and pane id (from $TMUX/$TMUX_PANE), so `focus` can find the pane
+    # and its attached clients, or attach a new window to it.
+    9: """
+    ALTER TABLE sessions ADD COLUMN tmux_socket TEXT;
+    ALTER TABLE sessions ADD COLUMN tmux_pane TEXT;
     """,
 }
 

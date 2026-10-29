@@ -275,6 +275,11 @@ the .app's Resources, then PATH, then UserDefaults override).
 Terminal focus: support iTerm2 (ITERM_SESSION_ID) and Apple Terminal (TERM_SESSION_ID / tty via
 AppleScript); for other terminals just activate the app by TERM_PROGRAM / bundle; report
 `can_focus` accordingly. Resume opens in the same terminal app the session used when possible.
+tmux (added after the original spec): the hook records `$TMUX`'s socket path and `$TMUX_PANE`
+(env only) in `sessions.tmux_socket`/`tmux_pane`; a session with a pane is always `can_focus`,
+and focus goes through tmux, never the iTerm/Terminal ids it inherited from the tmux server.
+The snapshot's `tmux` is true for such a session; `tmux_session` is its tmux session name, read
+for alive, not-ended rows with one bounded (1 s) `tmux list-panes -a` per socket, else null.
 
 ## Backfill (`agentboard backfill --days 30`)
 
@@ -346,7 +351,8 @@ agentboard status [--text T] [--ttl MIN] [--model ID] [--context-tokens N] [--se
 agentboard title --text T [--session TOOL:ID]   name a session (a user's custom title is kept)
 agentboard install-hooks [--claude] [--codex] [--dry-run]
 agentboard uninstall-hooks [--claude] [--codex]
-agentboard focus <tool> <session_id>         activate iTerm2 tab by ITERM_SESSION_ID (osascript)
+agentboard focus <tool> <session_id>         activate iTerm2 tab by ITERM_SESSION_ID (osascript);
+                                             inside tmux: focus an attached client or attach a new window
 agentboard resume <tool> <session_id> [--print]  open new iTerm2 tab running resume cmd
 agentboard prune [--days N] [--compact-days N] [--dry-run] [--auto] [--vacuum]   retention
 agentboard logs [--since 1h] [--grep T] [--lines N] [--app]   print the diagnostic log
@@ -365,7 +371,9 @@ Diagnostic log (added after the original spec): every subcommand, hook and app a
 once to `agentboard.log.1` at 2 MB (never a `.2`), never raises, and `snapshot`/`paths` stay at
 debug unless they fail or run over 1 s. `focus` logs an `outcome` (`matched_uuid`, `matched_tty`,
 `matched_unknown`, `activated_only`, `activate_failed`, `not_found`, `timeout`, `no_terminal`,
-`unsupported_terminal`; osascript/`open -a` calls are bounded at 10 s, and a timeout exits 1); its other
+`unsupported_terminal`, and for tmux sessions `tmux_client_focused`, `tmux_attached_new_window`,
+`tmux_attached_terminal`, `tmux_pane_gone`, `tmux_missing`, `tmux_attach_failed`;
+osascript/`open -a`/tmux calls are bounded at 10 s, and a timeout exits 1); its other
 exit codes are unchanged. `hook-errors.log` is still written as described under Hook.
 
 install-hooks: back up the file first (`<file>.agentboard-bak-<ts>`), then append one matcher
@@ -378,6 +386,12 @@ Never touch `~/.codex/config.toml`.
 Resume commands: Claude `cd <cwd> && claude --resume <id>`; Codex `cd <cwd> && codex resume <id>`.
 Focus: iTerm `ITERM_SESSION_ID` is `w0t1p0:<UUID>`; match `unique id` of iTerm sessions to UUID,
 then select the tab/window and activate iTerm. Exit non-zero with message if not found.
+tmux focus (when `tmux_pane` is set): `tmux -S <socket> display-message -p -t <pane>` gives the
+pane's session id, name and window (failure: `tmux_pane_gone`, exit 1); `select-window` and
+`select-pane` it; `list-clients -t <session-id>` gives client ttys, each probed in iTerm2 (if
+installed, per `open -Ra iTerm`) and Terminal by tty with scripts that return `not_running`
+for an app that isn't running and never activate on a miss; with no match, a new iTerm window
+(Terminal if iTerm is missing) runs `<tmux> -S <socket> attach-session -t '$<id>'`.
 
 ## Snapshot JSON contract (consumed by the Swift app)
 
@@ -401,6 +415,7 @@ then select the tab/window and activate iTerm. Exit non-zero with message if not
       "started_at": "ISO", "updated_at": "ISO", "ended_at": "ISO|null",
       "alive": true, "interactive": true,
       "can_focus": true,
+      "tmux": false, "tmux_session": "string|null",
       "resume_command": "cd ... && claude --resume ...",
       "links": [{"kind": "pr|ticket", "ref": "ABC-123|#26", "url": "...", "state": "OPEN|MERGED|CLOSED|null", "title": "...",
                  "branch": "string|null", "owned": false, "awaits_you": false}],

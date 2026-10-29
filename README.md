@@ -492,8 +492,9 @@ A newer turn of the same session replaces its delivered notification instead of 
 your next prompt in that session removes it, as does the session ending (quitting it, or
 `SessionEnd`); this cleanup still runs after you turn the toggle off. Notifications are grouped per session in
 Notification Center. Clicking either kind brings the session's terminal tab to the front (iTerm2
-and Terminal, via `agentboard focus`); when the session has no focusable terminal, the dashboard
-opens with it selected. A click on an earlier notification while AgentBoard is not running
+and Terminal, via `agentboard focus`; for a session inside tmux, the window attached to its tmux
+session, or a new iTerm window attached to it); when the session has no focusable terminal, the
+dashboard opens with it selected. A click on an earlier notification while AgentBoard is not running
 launches it and does the same once the first snapshot loads.
 
 ## Search
@@ -800,6 +801,21 @@ Terminal focus/resume support iTerm2 (`ITERM_SESSION_ID`) and Apple Terminal
 (`TERM_SESSION_ID`); for anything else, `agentboard focus`/`resume` just activates the app by
 `TERM_PROGRAM`.
 
+**Sessions inside tmux.** The hook records the tmux server socket and pane from `$TMUX` and
+`$TMUX_PANE` (environment only, no extra shell-out), and an event from a plain terminal clears
+them again. Inside tmux the inherited iTerm/Terminal ids belong to whatever started the tmux
+server, so `agentboard focus` ignores them and goes through tmux instead: it looks up the pane's
+current tmux session (`display-message`; a gone pane or dead server fails with
+`outcome=tmux_pane_gone`), selects its window and pane, then brings forward an iTerm2 or Terminal
+tab that has a client attached to that tmux session. Those probes only look at apps that are
+already running and never launch or activate one on a miss. With no attached client found, it
+opens a **new** iTerm window running `tmux -S <socket> attach-session -t '$<id>'` (a shared
+attach, never `-d`), or a Terminal window when iTerm isn't installed. tmux is found on `PATH`,
+then at `/opt/homebrew/bin/tmux` and `/usr/local/bin/tmux`. Rows of a live tmux session show a
+`tmux · <name>` tag (the name comes from one bounded `tmux list-panes -a` call per tmux server
+per snapshot, so a rename shows up on the next poll), the detail view has a tmux row, and
+dashboard search matches the tmux session name. Resume is unchanged.
+
 ## Backfill
 
 `agentboard backfill [--days 30]` imports Claude Code transcripts
@@ -995,6 +1011,14 @@ died mid-attempt:
   does the same and logs `outcome=timeout`.
 - `no_terminal` / `unsupported_terminal`: the session has no recorded terminal, or one AgentBoard
   cannot drive.
+- `tmux_client_focused`: the session runs inside tmux, and an iTerm2 or Terminal tab whose tty is
+  an attached tmux client (`client_tty`) was brought to the front.
+- `tmux_attached_new_window` / `tmux_attached_terminal`: no attached client was found in a
+  running iTerm2 or Terminal, so a new iTerm window (Terminal when iTerm isn't installed, see
+  `iterm_installed`) was opened running `tmux attach-session` to the session.
+- `tmux_pane_gone`: the recorded tmux pane or its server no longer exists; nothing opens and
+  `focus` exits 1. `tmux_missing` means no tmux binary was found, and `tmux_attach_failed` that
+  the attach AppleScript exited non-zero.
 
 For more detail turn on Verbose logging (or set `AGENTBOARD_LOG_LEVEL=debug`): each strategy is
 then logged as a `cli.focus.try` line.

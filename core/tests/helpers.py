@@ -30,6 +30,8 @@ class AgentBoardTestCase(unittest.TestCase):
         scrubbed_keys = [
             "AGENTBOARD_HOME", "HOME",
             "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CODEX_THREAD_ID",
+            # A suite run from inside tmux must not record its own pane.
+            "TMUX", "TMUX_PANE",
         ]
         self._old_env = {key: os.environ.get(key) for key in scrubbed_keys}
         for key in scrubbed_keys:

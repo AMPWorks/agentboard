@@ -124,6 +124,7 @@ struct SessionSearch: Sendable, Equatable {
             session.project,
             session.cwd,
             session.branch ?? "",
+            session.tmuxSession ?? "",
             session.tool,
             session.state.rawValue,
             session.state.displayName,
