@@ -12,7 +12,7 @@ JSON contract:
   derives each session's state.
 - `app/` is a SwiftPM/SwiftUI menu bar app (macOS 14+, Swift 6 language mode, no dependencies).
   It never opens the database; it shells out to the CLI for everything.
-- `scripts/` holds `install.sh`, `uninstall.sh`, `build-app.sh`. docs/REFERENCE.md documents their
+- `scripts/` holds `install.sh`, `uninstall.sh`, `build-app.sh`, `swift-test.sh`. docs/REFERENCE.md documents their
   behavior in depth; SPEC.md is the original design contract (snapshot JSON shape, state rules).
 
 ## Commands
@@ -27,18 +27,18 @@ python3 -m unittest core.tests.test_cli.SnapshotTests.test_name # one test
 core/bin/agentboard snapshot                                    # CLI from the checkout
 AGENTBOARD_HOME=/tmp/ab core/bin/agentboard backfill --days 7   # against a throwaway data dir
 
-cd app && swift build -c release                                # compile the app only
-cd app && F=/Library/Developer/CommandLineTools/Library/Developer/Frameworks && \
-  swift test -Xswiftc -F -Xswiftc $F -Xlinker -rpath -Xlinker $F  # app tests (Swift Testing); see note below
-scripts/build-app.sh --no-install                               # assemble app/build/AgentBoard.app
+scripts/swift-test.sh                                           # app tests (Swift Testing), quiet; -v for full output
+scripts/build-app.sh --no-install                               # compile + assemble app/build/AgentBoard.app (also leaves app/.build/release/AgentBoard)
 AGENTBOARD_FIXTURE_PATH=app/Fixtures/snapshot.json app/.build/release/AgentBoard  # app on the sample fixture, no CLI
-bash -n scripts/*.sh
+for f in scripts/*.sh; do bash -n "$f"; done                    # syntax-check every script (bash -n a b checks only a)
 scripts/install.sh --dry-run                                    # preview against the real ~/.claude and ~/.codex
 ```
 
-With only the Command Line Tools installed (no Xcode), plain `cd app && swift test` builds,
-runs zero tests, and exits 0, because SwiftPM leaves Testing.framework off the search paths;
-the `-Xswiftc -F`/`-Xlinker -rpath` form above is the working command. The app tests live in
+Use the wrappers, not bare `swift build`/`swift test`: with only the Command Line Tools, plain
+`swift test` runs zero tests, and some releases need the Testing plugin path or an older SDK.
+Both are quiet (logs in `app/build/`; `--verbose`/`AGENTBOARD_VERBOSE=1` for everything);
+`AGENTBOARD_SDKROOT=default|<sdk dir>` skips or forces the SDK fallback. Details:
+docs/DEVELOPMENT.md#testing, docs/REFERENCE.md#building-the-app. The app tests live in
 `app/Tests/AgentBoardTests` and use Swift Testing, not XCTest.
 
 There is no linter configured. `scripts/install.sh` runs the full install (core copy, app build,
@@ -113,9 +113,10 @@ may be hard-coded. `snapshot` must never touch the network; only `refresh-links`
   `cli._report()`, which prints and logs the same text. `snapshot`/`paths` must stay quiet at
   `info` (debug lines only). `hook.py` imports `diag` lazily inside `_diag()`, never at module
   top. App-side logging uses `OSLog` (subsystem `io.github.agentboard`) with `privacy: .public`.
-- `install.sh`, `uninstall.sh`, and `build-app.sh` deliberately duplicate their helper functions
-  (`normalize_path`, `safe_remove_in_store`, `find_python3`, ...) so each works standalone. Change
-  every copy together; the tests extract them by name from each script.
+- `install.sh`, `uninstall.sh`, `build-app.sh` and `swift-test.sh` deliberately duplicate their
+  helper functions (`normalize_path`, `safe_remove_in_store`, `find_python3`, ...; the SDK
+  helpers only in the last two, kept identical by a test) so each works standalone. Change every
+  copy together; the tests extract them by name from each script.
 - A new `config.json` key goes in `core/agentboard/config_keys.py`, docs/REFERENCE.md's
   "Configuration (config.json)" table and `app/Sources/AgentBoard/Help/HelpContent.swift`; a new
   CLI subcommand or option goes in HelpContent's CLI reference and docs/REFERENCE.md; a new

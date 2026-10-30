@@ -172,6 +172,40 @@ mv ~/.local/share/agentboard/core ~/.local/share/agentboard/core.old
 
 and re-run `install.sh` (or set `AGENTBOARD_CORE_DIR` to a new location instead).
 
+### Building the app
+
+`install.sh` builds the app only through `scripts/build-app.sh [--no-install] [--prefix DIR]
+[--verbose]`, which runs `swift build -c release` in `app/`, assembles
+`app/build/AgentBoard.app` (bundled `core/` CLI, `Info.plist`, ad-hoc signature) and, without
+`--no-install`, copies it to `--prefix` (default `~/Applications`). It is quiet: on success it
+prints one line (`built app/build/AgentBoard.app`, or `built and installed <path>`); on failure,
+the compiler's `error:` lines and `full log: app/build/build-app.log`. That log, overwritten on
+each run, holds the step lines and the full `swift build` output. `--verbose` or
+`AGENTBOARD_VERBOSE=1` (which `install.sh` passes through) prints everything as it runs.
+
+Before building, it checks that the default macOS SDK can expand SwiftUI's `@State` and
+`@AppStorage` with this toolchain, by typechecking a five-line SwiftUI view. Newer SDKs declare
+those as macros from a SwiftUIMacros compiler plugin, and a Command Line Tools release can ship
+a default SDK that needs the plugin without shipping the plugin. When the check fails for that
+reason, `build-app.sh` builds against the newest older `MacOSX*.sdk` in the same directory as
+the default SDK that passes the same check, and prints one line:
+
+```
+note: the default macOS SDK (<version>) can't expand SwiftUI macros with this toolchain; building with MacOSX<older>.sdk (<older>). Set AGENTBOARD_SDKROOT=default to skip this check.
+```
+
+The check decides only by what it finds, never by the macOS or Swift version, so with full Xcode
+selected, or a Command Line Tools release whose default SDK works, it passes and nothing changes.
+If no older SDK works either, a `warning:` line says so and the build runs with the default SDK,
+so the real compiler error shows; install Xcode, or point `AGENTBOARD_SDKROOT` at a working SDK.
+If the check itself can't run (a timeout, no compiler, any other error), a `note:` line gives
+the reason and the default SDK is used. `AGENTBOARD_SDKROOT=default` skips the check,
+`AGENTBOARD_SDKROOT=<sdk dir>` builds with that SDK, and an `SDKROOT` already set in the
+environment is used as is. The app's deployment target stays macOS 14 whichever SDK builds it.
+If SwiftPM ever reports module-cache mismatches after the SDK changed, `rm -rf app/.build`
+clears them. `scripts/swift-test.sh` applies the same check to the app's tests (see
+[Testing](DEVELOPMENT.md#testing)).
+
 ## Data
 
 Everything AgentBoard knows lives in one sqlite database:

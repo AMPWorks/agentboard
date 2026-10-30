@@ -18,7 +18,7 @@ agentboard/
     bin/agentboard          executable CLI entry point
     tests/                  unittest suite — python3 -m unittest discover core/tests
   app/                      SwiftUI menu bar app (macOS 14+), built by scripts/build-app.sh
-  scripts/                  install.sh, uninstall.sh, build-app.sh
+  scripts/                  install.sh, uninstall.sh, build-app.sh, swift-test.sh
 ```
 
 ## Testing
@@ -38,15 +38,46 @@ scripts as a subprocess also put a `python3` stub on `PATH` that execs the suite
 interpreter, so the shim's `#!/usr/bin/env python3` can't drift to a different one.
 
 The app has a Swift Testing target (`app/Tests/AgentBoardTests`; Swift Testing because the
-Command Line Tools ship no XCTest). With Xcode selected, `cd app && swift test` runs it. With only
-the Command Line Tools, SwiftPM leaves their Testing.framework off the search paths and plain
-`swift test` silently runs zero tests, so pass the path explicitly:
+Command Line Tools ship no XCTest). Run it with:
+
+```
+scripts/swift-test.sh                       # quiet: one summary line, or the failures + log path
+scripts/swift-test.sh --verbose             # stream everything (or AGENTBOARD_VERBOSE=1)
+scripts/swift-test.sh -- --filter HelpTests # anything after -- goes to swift test
+```
+
+The script runs `swift test` in `app/` and adds only what this toolchain needs, deciding by what
+is on disk:
+
+- **Testing.framework.** With only the Command Line Tools, SwiftPM leaves their
+  Testing.framework off the search paths and plain `swift test` silently runs zero tests. When
+  `$(xcode-select -p)/Library/Developer/Frameworks/Testing.framework` exists, the script passes
+  that directory with `-Xswiftc -F` and `-Xlinker -rpath`. With Xcode selected the directory
+  doesn't exist and nothing is added.
+- **The TestingMacros plugin.** Some Command Line Tools releases keep it in
+  `usr/lib/swift/host/plugins/testing/`, which the compiler doesn't search. When the plugin is
+  there and not directly in `host/plugins/`, the script adds `-Xswiftc -plugin-path` for it,
+  derived from the location of `xcrun --find swiftc`.
+- **The macOS SDK.** The same SwiftUI-macro check as `build-app.sh` (see
+  [Building the app](REFERENCE.md#building-the-app)): when the default SDK can't expand
+  `@State`/`@AppStorage` with this toolchain, it builds against the newest older SDK that can,
+  and prints one `note:` line on stderr.
+
+A run that passes but executes no Swift Testing test counts as a failure, so a missing framework
+(or a `--filter` that matches nothing) can't pass silently; only `-- --list-tests` (or `-l`)
+skips that check. The full output always goes to `app/build/swift-test.log` (gitignored).
+
+Without the script, on a Command Line Tools-only machine, the equivalent is:
 
 ```
 cd app
 F=/Library/Developer/CommandLineTools/Library/Developer/Frameworks
 swift test -Xswiftc -F -Xswiftc $F -Xlinker -rpath -Xlinker $F
 ```
+
+plus `-Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing`
+where the plugin sits in that subdirectory, and `SDKROOT=<an older SDK>` where the default SDK
+can't expand SwiftUI macros.
 
 `app/Fixtures/` holds snapshots for running the app without the CLI:
 `AGENTBOARD_FIXTURE_PATH=app/Fixtures/snapshot-needs-you.json app/.build/release/AgentBoard`
@@ -66,7 +97,7 @@ that every image is referenced, is a PNG of at most 1 MB and has its twin.
 Capture them from the fixture, never from a real board, so no real project, path, account or
 token can appear:
 
-1. Build the app (`cd app && swift build -c release`) and quit the installed AgentBoard (gear
+1. Build the app (`scripts/build-app.sh --no-install`) and quit the installed AgentBoard (gear
    menu → Quit AgentBoard): both would register the ⌃⌥⌘A hotkey and show a menu bar icon.
 2. The fixture's timestamps are fixed, so rows would read "2w ago". Write a copy shifted to now:
 

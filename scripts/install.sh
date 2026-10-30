@@ -74,6 +74,8 @@ Usage: $0 [--no-hooks] [--no-app] [--dry-run] [--prefix DIR] [--enable-codex-hoo
 Env vars:
   AGENTBOARD_HOME       data dir (default: ~/Library/Application Support/AgentBoard)
   AGENTBOARD_CORE_DIR   installed core/ copy (default: ~/.local/share/agentboard/core)
+  AGENTBOARD_SDKROOT    default|<sdk dir>: skip the SwiftUI-macro SDK check, or force an SDK for the app build
+  AGENTBOARD_VERBOSE    1: show the full swift build output
 EOF
 }
 
