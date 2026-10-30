@@ -69,7 +69,7 @@ Usage: $0 [--no-hooks] [--no-app] [--dry-run] [--prefix DIR] [--enable-codex-hoo
   --prefix DIR          install the .app bundle under DIR (default: ~/Applications)
   --enable-codex-hooks  opt in: set [features]\\nhooks = true in ~/.codex/config.toml,
                         needed for Codex older than 0.124, or when hooks = false is
-                        set (backs up the file first; see README for what this does)
+                        set (backs up the file first; see docs/REFERENCE.md for what this does)
 
 Env vars:
   AGENTBOARD_HOME       data dir (default: ~/Library/Application Support/AgentBoard)
@@ -252,7 +252,7 @@ PYEOF
 }
 
 # Picks the interpreter the installed/bundled CLI gets pinned to. A bare
-# `python3` first (what the README documents), then versioned names, so a
+# `python3` first (what docs/REFERENCE.md documents), then versioned names, so a
 # Mac whose `python3` on PATH is an older system/Homebrew 3.9 but which
 # also has e.g. Homebrew's python3.12 installed just works instead of
 # failing the prerequisite check. AGENTBOARD_PYTHON3 (an explicit path)

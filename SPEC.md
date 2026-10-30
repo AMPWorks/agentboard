@@ -1,8 +1,8 @@
 # AgentBoard — spec
 
 All setup/installation is done by scripts in the repo (`scripts/install.sh`,
-`scripts/uninstall.sh`, `scripts/build-app.sh`); README documents only those. Agents and
-humans install by running the scripts, never by hand-editing config.
+`scripts/uninstall.sh`, `scripts/build-app.sh`); README.md and docs/REFERENCE.md document only
+those. Agents and humans install by running the scripts, never by hand-editing config.
 
 A local-only macOS menu bar dashboard showing the state of every Claude Code and Codex CLI
 session on this Mac: what needs the user, what has output to review, what is running, and what
@@ -33,7 +33,12 @@ agentboard/
                             optionally enables launch at login. Flags: --no-hooks, --no-app,
                             --dry-run, --prefix. Idempotent; safe to re-run to upgrade.
   scripts/uninstall.sh      removes its own hooks (other hooks stay), app, optionally data dir
-  README.md
+  docs/
+    REFERENCE.md            the full reference: install, hooks, state, config, CLI, diagnostics
+    DEVELOPMENT.md          components and tests
+    images/                 README screenshots, light and dark
+  README.md                 overview for new users
+  LOG.md                    development log
 ```
 
 Data dir: `~/Library/Application Support/AgentBoard/` containing `agentboard.db`.

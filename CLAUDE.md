@@ -12,7 +12,7 @@ JSON contract:
   derives each session's state.
 - `app/` is a SwiftPM/SwiftUI menu bar app (macOS 14+, Swift 6 language mode, no dependencies).
   It never opens the database; it shells out to the CLI for everything.
-- `scripts/` holds `install.sh`, `uninstall.sh`, `build-app.sh`. README.md documents their
+- `scripts/` holds `install.sh`, `uninstall.sh`, `build-app.sh`. docs/REFERENCE.md documents their
   behavior in depth; SPEC.md is the original design contract (snapshot JSON shape, state rules).
 
 ## Commands
@@ -116,12 +116,15 @@ may be hard-coded. `snapshot` must never touch the network; only `refresh-links`
 - `install.sh`, `uninstall.sh`, and `build-app.sh` deliberately duplicate their helper functions
   (`normalize_path`, `safe_remove_in_store`, `find_python3`, ...) so each works standalone. Change
   every copy together; the tests extract them by name from each script.
-- A new `config.json` key goes in `core/agentboard/config_keys.py`, README's "Configuration
-  (config.json)" table and `app/Sources/AgentBoard/Help/HelpContent.swift`; a new CLI subcommand
-  or option goes in HelpContent's CLI reference; a new Settings key goes in `SettingsKeys.all`
-  and the Settings help topic. `core/tests/test_help_coverage.py` enforces all three.
+- A new `config.json` key goes in `core/agentboard/config_keys.py`, docs/REFERENCE.md's
+  "Configuration (config.json)" table and `app/Sources/AgentBoard/Help/HelpContent.swift`; a new
+  CLI subcommand or option goes in HelpContent's CLI reference and docs/REFERENCE.md; a new
+  Settings key goes in `SettingsKeys.all` and the Settings help topic.
+  `core/tests/test_help_coverage.py` enforces all three.
 - Every new control (`Button`, `Toggle`, `Picker`, `Menu`, `TextField`, `SecureField`, `SwiftUI.Link`)
   gets a `.help("what it does")` tooltip, or `// no-tooltip: <reason>` on its line;
   `core/tests/test_app_tooltips.py` enforces it.
 - Snapshot JSON: adding fields is safe (the Swift model decodes leniently and defaults missing
   ones). Removing or renaming a field breaks the app.
+- Docs: README.md is the user overview, the reference is docs/REFERENCE.md and testing is
+  docs/DEVELOPMENT.md. Each task appends a `LOG.md` entry in its PR (format at the top of LOG.md).

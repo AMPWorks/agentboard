@@ -5,7 +5,7 @@
 this registry is what documents them. `core/tests/test_help_coverage.py`
 fails when core reads a key that is not listed here, when a listed key (or
 sub-field) no longer appears in core, and when a listed key is missing from
-README.md or the in-app guide (`app/Sources/AgentBoard/Help/HelpContent.swift`).
+docs/REFERENCE.md or the in-app guide (`app/Sources/AgentBoard/Help/HelpContent.swift`).
 """
 
 from dataclasses import dataclass

@@ -1,10 +1,11 @@
-"""Keeps the in-app guide, README and the code in step.
+"""Keeps the in-app guide, docs/REFERENCE.md and the code in step.
 
 - Every config.json key core reads is registered in `config_keys.py`, and
   every registered key (and sub-field) is still read somewhere in core.
-- Every registered key is in the in-app guide and README's Configuration
-  section.
-- Every CLI subcommand and long option is in the in-app guide.
+- Every registered key is in the in-app guide and docs/REFERENCE.md's
+  Configuration section.
+- Every CLI subcommand and long option is in the in-app guide and
+  docs/REFERENCE.md's CLI reference.
 - Every UserDefaults key the app reads or writes is a Settings key
   (`SettingsKeys.all`) or carries a `// not-a-setting: <reason>` comment.
 """
@@ -24,7 +25,7 @@ from tests.helpers import AgentBoardTestCase  # noqa: E402
 
 CORE = Path(__file__).resolve().parents[1] / "agentboard"
 HELP_CONTENT = swift_source.APP_SOURCES / "Help" / "HelpContent.swift"
-README = swift_source.REPO / "README.md"
+REFERENCE = swift_source.REPO / "docs" / "REFERENCE.md"
 SETTINGS_KEYS_SWIFT = swift_source.APP_SOURCES / "Support" / "SettingsKeys.swift"
 
 # Keys the scan finds today; a broken scan that finds nothing fails here.
@@ -125,8 +126,8 @@ def core_string_literals() -> set:
     return literals
 
 
-def readme_section(title: str) -> str:
-    text = README.read_text()
+def reference_section(title: str) -> str:
+    text = REFERENCE.read_text()
     start = text.find(f"\n## {title}\n")
     if start == -1:
         return ""
@@ -214,13 +215,13 @@ class ConfigKeyRegistryTests(unittest.TestCase):
                     for field in entry.fields if f"`{field}`" not in content]
         self.assertEqual(missing, [], f"config keys missing from {HELP_CONTENT.name}")
 
-    def test_every_registered_key_is_in_readme_configuration(self):
-        section = readme_section("Configuration (config.json)")
-        self.assertTrue(section, "README.md has no '## Configuration (config.json)' section")
+    def test_every_registered_key_is_in_reference_configuration(self):
+        section = reference_section("Configuration (config.json)")
+        self.assertTrue(section, "docs/REFERENCE.md has no '## Configuration (config.json)' section")
         missing = [entry.key for entry in config_keys.CONFIG_KEYS if f"`{entry.key}`" not in section]
         missing += [f"{entry.key}[].{field}" for entry in config_keys.CONFIG_KEYS
                     for field in entry.fields if f"`{field}`" not in section]
-        self.assertEqual(missing, [], "config keys missing from README's Configuration section")
+        self.assertEqual(missing, [], "config keys missing from docs/REFERENCE.md's Configuration section")
 
 
 # -- CLI coverage ------------------------------------------------------------------
@@ -232,24 +233,41 @@ def _subcommands(parser):
     return {}
 
 
+def missing_cli_mentions(content: str, *, skip=()) -> list:
+    """`agentboard <subcommand>` and every long option (except --help and
+    INTERNAL_FLAGS) that `content` does not mention."""
+    subcommands = _subcommands(cli.build_parser())
+    missing = []
+    for name, subparser in sorted(subcommands.items()):
+        if name in skip:
+            continue
+        if not re.search(r"agentboard " + re.escape(name) + r"(?![\w-])", content):
+            missing.append(f"agentboard {name}")
+        for action in subparser._actions:
+            for option in action.option_strings:
+                if not option.startswith("--") or option == "--help" or option in INTERNAL_FLAGS:
+                    continue
+                if not re.search(re.escape(option) + r"(?![\w-])", content):
+                    missing.append(f"agentboard {name} {option}")
+    return missing
+
+
 class CliCoverageTests(AgentBoardTestCase):
     def test_every_subcommand_and_long_option_is_in_the_in_app_guide(self):
-        content = HELP_CONTENT.read_text()
-        subcommands = _subcommands(cli.build_parser())
-        self.assertGreater(len(subcommands), 15)
-        missing = []
-        for name, subparser in sorted(subcommands.items()):
-            if name == "hook":
-                continue
-            if f"agentboard {name}" not in content:
-                missing.append(f"agentboard {name}")
-            for action in subparser._actions:
-                for option in action.option_strings:
-                    if not option.startswith("--") or option == "--help" or option in INTERNAL_FLAGS:
-                        continue
-                    if not re.search(re.escape(option) + r"(?![\w-])", content):
-                        missing.append(f"agentboard {name} {option}")
+        self.assertGreater(len(_subcommands(cli.build_parser())), 15)
+        missing = missing_cli_mentions(HELP_CONTENT.read_text(), skip={"hook"})
         self.assertEqual(missing, [], f"CLI commands or options missing from {HELP_CONTENT.name}")
+
+    def test_every_subcommand_and_long_option_is_in_the_reference(self):
+        section = reference_section("CLI reference")
+        self.assertTrue(section, "docs/REFERENCE.md has no '## CLI reference' section")
+        self.assertEqual(missing_cli_mentions(section), [],
+                         "CLI commands or options missing from docs/REFERENCE.md's CLI reference")
+
+    def test_a_longer_subcommand_name_is_not_a_mention(self):
+        # `agentboard notes ...` must not count as mentioning `agentboard note`.
+        self.assertIn("agentboard note", missing_cli_mentions("agentboard notes --all"))
+        self.assertNotIn("agentboard note", missing_cli_mentions("agentboard note --kind"))
 
     def test_internal_flags_still_exist(self):
         options = {option for subparser in _subcommands(cli.build_parser()).values()
