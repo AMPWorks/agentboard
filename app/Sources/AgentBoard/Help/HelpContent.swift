@@ -1,6 +1,6 @@
 import Foundation
 
-/// The in-app guide, topic by topic. It mirrors README.md: when a behavior,
+/// The in-app guide, topic by topic. It mirrors docs/REFERENCE.md: when a behavior,
 /// a Settings control, a config.json key (`core/agentboard/config_keys.py`)
 /// or a CLI command changes, change both. Tests check that every config key,
 /// every Settings key and every CLI subcommand and long option appears here.
