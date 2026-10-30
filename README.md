@@ -80,7 +80,9 @@ Full rules: [State](docs/REFERENCE.md#state) and [Menu bar icon](docs/REFERENCE.
 - macOS 14 or newer.
 - Python 3.11 or newer. A bare `python3` that is older is fine as long as a `python3.11` to
   `python3.14` is on `PATH` (for example `brew install python@3.12`).
-- Xcode Command Line Tools, for the app. Without them you get the hooks only; re-run later.
+- Xcode Command Line Tools, for the app. Without them you get the hooks only; re-run later. If
+  their default macOS SDK can't build SwiftUI's macros, the build picks an older installed SDK
+  on its own ([Building the app](docs/REFERENCE.md#building-the-app)).
 - Claude Code, Codex CLI, or both.
 - Optional: the GitHub CLI `gh`, signed in, for PR buttons and "awaits your review".
 

@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -2173,7 +2174,10 @@ class InstallLeavesForeignAppBundleAloneTests(unittest.TestCase):
     """install.sh must refuse to overwrite (or even quit) a same-named
     AgentBoard.app whose CFBundleIdentifier isn't io.github.agentboard --
     the one test here that needs a real `swift build` (via build-app.sh),
-    bounded by a generous timeout; empirically well under a minute."""
+    bounded by a generous timeout; empirically well under a minute. On a
+    toolchain whose default SDK can't expand SwiftUI macros, build-app.sh's
+    SDK fallback (pick_fallback_sdkroot) is what lets that build succeed;
+    its probe adds about ten seconds on a cold module cache."""
 
     def test_foreign_bundle_survives_install(self):
         tmp = Path(tempfile.mkdtemp(prefix="agentboard-install-foreign-app-test-")).resolve()
@@ -2250,7 +2254,8 @@ class BuildAppRefusesForeignBundleEndToEndTests(unittest.TestCase):
     """Round-6 finding 6: build-app.sh's standalone install step (without
     --no-install) must apply the same bundle-ID check and
     not-a-real-directory refusal install.sh and uninstall.sh do, before
-    replacing an existing bundle. Needs a real `swift build`, same as
+    replacing an existing bundle. Needs a real `swift build` (with the SDK
+    fallback where the toolchain needs it), same as
     InstallLeavesForeignAppBundleAloneTests above."""
 
     def test_foreign_bundle_survives_standalone_install(self):
@@ -2441,6 +2446,948 @@ class PurgeDataSafetyTests(unittest.TestCase):
         self.assertTrue(fake_home.is_dir())
         self.assertTrue((fake_home / "important-file.txt").is_file())
         self.assertTrue((fake_home / ".claude").is_dir(), "uninstall's own setup must survive too")
+
+SWIFT_TEST_SH = SCRIPTS_DIR / "swift-test.sh"
+_SDK_HELPER_SCRIPTS = (BUILD_APP_SH, SWIFT_TEST_SH)
+_SDK_HELPERS = ("_swiftui_macro_probe", "pick_fallback_sdkroot")
+_SDK_ENV_VARS = ("SDKROOT", "AGENTBOARD_SDKROOT", "AGENTBOARD_VERBOSE",
+                 "AGENTBOARD_SDK_PROBE_TIMEOUT", "DEVELOPER_DIR")
+_SWIFTUI_MACRO_ERROR = (
+    "probe.swift:3:6: error: external macro implementation type "
+    "'SwiftUIMacros.StateMacro' could not be found for macro 'State()'; "
+    "plugin for module 'SwiftUIMacros' not found"
+)
+_PASSING_RUN = (
+    "Building for debugging...\n"
+    "Build complete!\n"
+    "◇ Test run started.\n"
+    "✔ Test ok() passed after 0.001 seconds.\n"
+    "✔ Test run with 3 tests in 2 suites passed after 0.01 seconds.\n"
+)
+_FAILING_RUN = (
+    "Building for debugging...\n"
+    "✔ Test ok() passed after 0.001 seconds.\n"
+    "✘ Test bad() recorded an issue at T.swift:4:21: Expectation failed: two() == 3\n"
+    "✘ Test bad() failed after 0.001 seconds with 1 issue.\n"
+    "✘ Test run with 2 tests in 1 suite failed after 0.001 seconds with 1 issue.\n"
+)
+
+
+class _FakeToolchain:
+    """A throwaway developer dir plus stub xcrun/swiftc/swift/xcode-select/
+    codesign/sw_vers on PATH, so the SDK-fallback and swift-test helpers can
+    be exercised without the real toolchain. Layouts:
+
+    - "clt": <tmp>/CommandLineTools with SDKs/ and usr/ (Command Line Tools);
+    - "xcode": <tmp>/Xcode.app/Contents/Developer, SDKs under
+      Platforms/MacOSX.platform/Developer/SDKs, compiler in the default
+      toolchain.
+
+    sdks are the SDK dir names to create, each with a VERSION file (read by
+    the stub `xcrun --show-sdk-version`); aliases map a symlink name to one
+    of them; default is the name `xcrun --show-sdk-path` reports. working
+    and other_error list SDK names whose probe passes, or fails with a
+    module-cache error instead of the SwiftUIMacros one. The stub swiftc
+    logs each probe's SDKROOT ("<default>" when unset) to probe-calls."""
+
+    def __init__(self, tmp, *, layout="clt", sdks=("MacOSX27.0.sdk", "MacOSX26.5.sdk"),
+                 aliases=None, default="MacOSX.sdk", working=(), other_error=(),
+                 testing_framework=False, plugin=None, sdks_dir=None):
+        self.tmp = tmp
+        self.state = tmp / "tc-state"
+        self.state.mkdir()
+        self.bin = tmp / "tc-bin"
+        self.bin.mkdir()
+        if layout == "clt":
+            self.dev = tmp / "CommandLineTools"
+            usr = self.dev / "usr"
+            default_sdks_dir = self.dev / "SDKs"
+        else:
+            self.dev = tmp / "Xcode.app" / "Contents" / "Developer"
+            usr = self.dev / "Toolchains" / "XcodeDefault.xctoolchain" / "usr"
+            default_sdks_dir = self.dev / "Platforms" / "MacOSX.platform" / "Developer" / "SDKs"
+        self.sdks_dir = sdks_dir or default_sdks_dir
+        self.sdks_dir.mkdir(parents=True)
+        for name in sdks:
+            (self.sdks_dir / name).mkdir()
+            version = name[len("MacOSX"):-len(".sdk")] or "27.0"
+            (self.sdks_dir / name / "VERSION").write_text(version + "\n")
+        if aliases is None:
+            aliases = {"MacOSX.sdk": "MacOSX27.0.sdk", "MacOSX27.sdk": "MacOSX27.0.sdk",
+                       "MacOSX26.sdk": "MacOSX26.5.sdk"}
+        for alias, target in aliases.items():
+            if (self.sdks_dir / target).exists():
+                (self.sdks_dir / alias).symlink_to(target)
+        (self.state / "default_sdk").write_text(str(self.sdks_dir / default) + "\n")
+        (self.state / "dev_dir").write_text(str(self.dev) + "\n")
+        (self.state / "working").write_text("".join(self.sdk(n) + "\n" for n in working))
+        (self.state / "other_error").write_text("".join(self.sdk(n) + "\n" for n in other_error))
+        if testing_framework:
+            (self.dev / "Library" / "Developer" / "Frameworks" / "Testing.framework").mkdir(parents=True)
+        self.plugins = usr / "lib" / "swift" / "host" / "plugins"
+        self.plugins.mkdir(parents=True)
+        if plugin == "testing":
+            (self.plugins / "testing").mkdir()
+            (self.plugins / "testing" / "libTestingMacros.dylib").write_text("")
+        elif plugin == "default":
+            (self.plugins / "libTestingMacros.dylib").write_text("")
+        elif plugin == "both":
+            (self.plugins / "testing").mkdir()
+            (self.plugins / "testing" / "libTestingMacros.dylib").write_text("")
+            (self.plugins / "libTestingMacros.dylib").write_text("")
+        (usr / "bin").mkdir(parents=True)
+        self.swiftc = usr / "bin" / "swiftc"
+        self.tmpdir = tmp / "tmpdir"
+        self.tmpdir.mkdir()
+        self._write_stubs()
+
+    def sdk(self, name):
+        return os.path.realpath(self.sdks_dir / name)
+
+    def _write_stubs(self):
+        s = self.state
+        _write_executable(self.swiftc, f'''S="{s}"
+sdk="${{SDKROOT:-}}"
+printf '%s\\n' "${{sdk:-<default>}}" >> "$S/probe-calls"
+[[ -n "$sdk" ]] || sdk="$(cat "$S/default_sdk")"
+real="$(cd -P -- "$sdk" 2>/dev/null && pwd -P)"
+if [[ -f "$S/sleep" ]]; then exec sleep "$(cat "$S/sleep")"; fi
+if grep -qxF -- "$real" "$S/working"; then exit 0; fi
+if grep -qxF -- "$real" "$S/other_error"; then
+  echo "<unknown>:0: error: unable to open output file '/m/ModuleCache/x.pcm': Operation not permitted" >&2
+  exit 1
+fi
+echo "{_SWIFTUI_MACRO_ERROR}" >&2
+exit 1''')
+        _write_executable(self.bin / "xcrun", f'''S="{s}"
+if [[ "$1" == "swiftc" ]]; then
+  if [[ -f "$S/xcrun_swiftc_fail" ]]; then
+    echo 'xcrun: error: unable to find utility "swiftc", not a developer tool or in PATH' >&2
+    exit 69
+  fi
+  shift
+  exec "{self.swiftc}" "$@"
+fi
+if [[ "$1" == "--find" && "$2" == "swiftc" ]]; then echo "{self.swiftc}"; exit 0; fi
+if [[ "$1" == "--sdk" && "$2" == "macosx" && "$3" == "--show-sdk-path" ]]; then
+  [[ ! -f "$S/xcrun_fail" ]] || exit 1
+  cat "$S/default_sdk"
+  exit 0
+fi
+if [[ "$1" == "--sdk" && "$3" == "--show-sdk-version" ]]; then
+  [[ -f "$2/VERSION" ]] || exit 1
+  cat "$2/VERSION"
+  exit 0
+fi
+echo "xcrun stub: unexpected $*" >&2
+exit 64''')
+        _write_executable(self.bin / "xcode-select", f'[[ "$1" == "-p" ]] && cat "{s}/dev_dir"')
+        _write_executable(self.bin / "swift", f'''S="{s}"
+printf '%s\\n' "$@" > "$S/swift-argv"
+printf '%s\\n' "${{SDKROOT-<unset>}}" > "$S/swift-sdkroot"
+case "$1" in
+  build)
+    echo "Building for production..."
+    if [[ -f "$S/swift_build_fail" ]]; then
+      echo "/x/Foo.swift:1:1: error: something broke"
+      echo "/x/Foo.swift:1:1: error: something broke"
+      echo "error: Build failed"
+      exit 1
+    fi
+    mkdir -p .build/release
+    printf '#!/bin/bash\\n' > .build/release/AgentBoard
+    chmod +x .build/release/AgentBoard
+    echo "Build complete!"
+    ;;
+  test)
+    [[ ! -f "$S/test-output" ]] || cat "$S/test-output"
+    exit "$(cat "$S/test-rc" 2>/dev/null || echo 0)"
+    ;;
+esac''')
+        _write_executable(self.bin / "codesign",
+                          'echo "AgentBoard.app: replacing existing signature" >&2')
+        _write_executable(self.bin / "sw_vers", f'touch "{s}/sw_vers-called"\nexit 99')
+        # Every sleep started under this toolchain (the probe watchdog's, the
+        # hanging swiftc's) carries this test's temp dir in its argv[0], so
+        # leftover_processes() can find it after the caller has exited. Its
+        # argument goes to sleep-calls, so a test can see the watchdog tick.
+        _write_executable(self.bin / "sleep", f'printf "%s\\n" "$*" >> "{s}/sleep-calls"\n'
+                          f'exec -a "{self.tmp}/marked-sleep" /bin/sleep "$@"')
+
+    def flag(self, name, content=""):
+        (self.state / name).write_text(content)
+
+    def env(self, **extra):
+        env = _python3_stub_env(self.tmp)
+        for var in _SDK_ENV_VARS:
+            env.pop(var, None)
+        env["PATH"] = f"{self.bin}:{env['PATH']}"
+        env["TMPDIR"] = str(self.tmpdir)
+        env["HOME"] = str(self.tmp / "home")
+        env.update(extra)
+        return env
+
+    def probe_calls(self):
+        path = self.state / "probe-calls"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def sleep_calls(self):
+        path = self.state / "sleep-calls"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def swift_argv(self):
+        return (self.state / "swift-argv").read_text().splitlines()
+
+    def swift_sdkroot(self):
+        return (self.state / "swift-sdkroot").read_text().strip()
+
+    def sw_vers_called(self):
+        return (self.state / "sw_vers-called").exists()
+
+    def leftover_probe_dirs(self):
+        return sorted(p.name for p in self.tmpdir.glob("agentboard-sdk-probe.*"))
+
+    def leftover_processes(self):
+        """Live processes whose command line names this test's temp dir:
+        the probe-loop script's subshells (the watchdog), the stub
+        xcrun/swiftc, and every marked sleep."""
+        r = subprocess.run(["pgrep", "-fl", re.escape(str(self.tmp))],
+                           capture_output=True, text=True)
+        return r.stdout.splitlines()
+
+    def probe_loop_script(self, script, n, capture=True):
+        """A /bin/bash script calling script's own _swiftui_macro_probe n
+        times and printing one "rc<TAB>reason" line per call. With capture,
+        each call goes through $(...) as the callers do (a watchdog holding
+        that pipe would stall it); without, it runs in the script's own shell,
+        where bash 3.2 reports a killed job ("Terminated: 15") on `wait`'s
+        stderr, which a command substitution never does."""
+        out = self.tmp / "probe-out"
+        call = ('out="$(_swiftui_macro_probe "")" || rc=$?' if capture else
+                f'_swiftui_macro_probe "" > "{out}" || rc=$?; out="$(cat "{out}")"')
+        body = "set -euo pipefail\n" + _extract_function("_swiftui_macro_probe", source=script)
+        body += (f'i=0\nwhile [[ "$i" -lt {int(n)} ]]; do\n'
+                 f'  rc=0; {call}\n'
+                 '  printf "%s\\t%s\\n" "$rc" "$out"\n'
+                 '  i=$((i + 1))\ndone\n')
+        func_file = self.tmp / "run-probe-loop.sh"
+        func_file.write_text(body)
+        return func_file
+
+    def run_probe_loop(self, script, n, capture=True, **extra_env):
+        func_file = self.probe_loop_script(script, n, capture)
+        return subprocess.run(["/bin/bash", str(func_file)], capture_output=True, text=True,
+                              env=self.env(**extra_env), cwd=self.tmp, timeout=120)
+
+    def run_pick(self, script, cwd=None, **extra_env):
+        """pick_fallback_sdkroot from script's own copy, under /bin/bash
+        (3.2 on macOS) with set -euo pipefail like the scripts, captured
+        through $(...) like the callers do."""
+        body = "set -euo pipefail\n"
+        body += "".join(_extract_function(n, source=script) for n in _SDK_HELPERS)
+        body += 'rc=0\nout="$(pick_fallback_sdkroot)" || rc=$?\nprintf "%s" "$out"\nexit "$rc"\n'
+        func_file = self.tmp / "run-pick.sh"
+        func_file.write_text(body)
+        return subprocess.run(["/bin/bash", str(func_file)], capture_output=True, text=True,
+                              env=self.env(**extra_env), cwd=cwd or self.tmp, timeout=60)
+
+    def make_checkout(self):
+        """A temp checkout with copies of both scripts, the fixture and a
+        minimal core/, so a run never touches the real app/.build."""
+        co = self.tmp / "checkout"
+        (co / "scripts").mkdir(parents=True)
+        for script in _SDK_HELPER_SCRIPTS:
+            dest = co / "scripts" / script.name
+            dest.write_text(script.read_text())
+            dest.chmod(0o755)
+        (co / "app" / "Fixtures").mkdir(parents=True)
+        (co / "app" / "Fixtures" / "snapshot.json").write_text("{}\n")
+        (co / "core" / "bin").mkdir(parents=True)
+        (co / "core" / "agentboard").mkdir()
+        (co / "core" / "bin" / "agentboard").write_text(
+            "#!/usr/bin/env python3\n_BAKED_AGENTBOARD_HOME = None\n")
+        (co / "core" / "agentboard" / "__init__.py").write_text("")
+        return co
+
+    def run_script(self, co, name, *args, merge=False, **extra_env):
+        return subprocess.run(
+            [str(co / "scripts" / name), *args], env=self.env(**extra_env), cwd=self.tmp,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT if merge else subprocess.PIPE,
+            text=True, timeout=60,
+        )
+
+
+def _tmpdir(test, prefix):
+    tmp = Path(tempfile.mkdtemp(prefix=prefix)).resolve()
+    test.addCleanup(lambda: subprocess.run(["rm", "-rf", str(tmp)]))
+    return tmp
+
+
+def _clt27(test, **kw):
+    """This Mac's case: MacOSX.sdk -> MacOSX27.0.sdk fails the probe, the
+    older 26.5 and 15.4 SDKs pass."""
+    kw.setdefault("sdks", ("MacOSX27.0.sdk", "MacOSX26.5.sdk", "MacOSX15.4.sdk"))
+    kw.setdefault("working", ("MacOSX26.5.sdk", "MacOSX15.4.sdk"))
+    return _FakeToolchain(_tmpdir(test, "agentboard-sdk-test-"), **kw)
+
+
+def _one_line(text):
+    lines = text.splitlines()
+    assert len(lines) == 1, f"expected exactly one line, got {lines!r}"
+    return lines[0]
+
+
+@unittest.skipUnless(sys.platform == "darwin", "build-app.sh/swift-test.sh are macOS-only")
+class PickFallbackSdkrootTests(unittest.TestCase):
+    """pick_fallback_sdkroot (and _swiftui_macro_probe), run against each
+    script's own copy with stub xcrun/swiftc, never the real toolchain."""
+
+    def test_default_sdk_works_is_a_silent_noop(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"),
+                                    working=("MacOSX27.0.sdk",))
+                r = tc.run_pick(script)
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+                self.assertEqual(tc.probe_calls(), ["<default>"])
+                self.assertEqual(tc.leftover_probe_dirs(), [])
+
+    def test_falls_back_to_the_older_sdk_with_one_note(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"),
+                                    working=("MacOSX26.5.sdk",))
+                r = tc.run_pick(script)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout, tc.sdk("MacOSX26.5.sdk"))
+                note = _one_line(r.stderr)
+                self.assertTrue(note.startswith("note: the default macOS SDK (27.0) can't expand"),
+                                note)
+                self.assertIn("building with MacOSX26.5.sdk (26.5)", note)
+                self.assertIn("AGENTBOARD_SDKROOT=default", note)
+                self.assertEqual(tc.leftover_probe_dirs(), [])
+
+    def test_picks_the_newest_working_sdk_below_the_default(self):
+        sdks = ("MacOSX28.0.sdk", "MacOSX27.0.sdk", "MacOSX26.10.sdk", "MacOSX26.5.sdk",
+                "MacOSX15.4.sdk")
+        aliases = {"MacOSX.sdk": "MacOSX27.0.sdk", "MacOSX27.sdk": "MacOSX27.0.sdk",
+                   "MacOSX26.sdk": "MacOSX26.10.sdk", "MacOSX15.sdk": "MacOSX15.4.sdk"}
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"),
+                                    sdks=sdks, aliases=aliases,
+                                    working=("MacOSX28.0.sdk", "MacOSX15.4.sdk"))
+                r = tc.run_pick(script)
+                self.assertEqual(r.stdout, tc.sdk("MacOSX15.4.sdk"))
+                self.assertIn("building with MacOSX15.4.sdk (15.4)", _one_line(r.stderr))
+                # Newer SDKs are never tried, aliases are probed once, and
+                # 26.10 sorts above 26.5.
+                self.assertEqual(tc.probe_calls(), [
+                    "<default>", tc.sdk("MacOSX26.10.sdk"), tc.sdk("MacOSX26.5.sdk"),
+                    tc.sdk("MacOSX15.4.sdk"),
+                ])
+
+    def test_patch_version_breaks_the_tie(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"),
+                                    sdks=("MacOSX27.0.sdk", "MacOSX26.5.sdk", "MacOSX26.5.1.sdk"),
+                                    working=("MacOSX26.5.sdk", "MacOSX26.5.1.sdk"))
+                r = tc.run_pick(script)
+                self.assertEqual(r.stdout, tc.sdk("MacOSX26.5.1.sdk"))
+                self.assertIn("(26.5.1)", r.stderr)
+
+    def test_sdks_dir_with_a_space_and_a_dot(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tmp = _tmpdir(self, "agentboard-sdk-test-")
+                tc = _FakeToolchain(tmp,
+                                    sdks_dir=tmp / "Dev 1.2" / "SDKs", working=("MacOSX26.5.sdk",))
+                r = tc.run_pick(script)
+                self.assertEqual(r.stdout, str(tmp / "Dev 1.2" / "SDKs" / "MacOSX26.5.sdk"))
+                self.assertEqual(r.returncode, 0)
+
+    def test_no_working_sdk_warns_once_and_uses_the_default(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"))
+                r = tc.run_pick(script)
+                self.assertEqual((r.returncode, r.stdout), (0, ""))
+                warning = _one_line(r.stderr)
+                self.assertTrue(warning.startswith("warning: the default macOS SDK (27.0)"),
+                                warning)
+                self.assertIn(str(tc.sdks_dir), warning)
+
+    def test_other_probe_errors_are_inconclusive_not_a_fallback(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"),
+                                    other_error=("MacOSX27.0.sdk",), working=("MacOSX26.5.sdk",))
+                r = tc.run_pick(script)
+                self.assertEqual((r.returncode, r.stdout), (0, ""))
+                note = _one_line(r.stderr)
+                self.assertTrue(note.startswith("note: could not check the macOS SDK"), note)
+                self.assertIn("unable to open output file", note)
+                self.assertTrue(note.endswith("; using the default"), note)
+                self.assertEqual(tc.probe_calls(), ["<default>"])
+
+    def test_an_inconclusive_older_sdk_is_skipped_not_picked(self):
+        # The default fails with the macro error, 26.5's probe fails for an
+        # unrelated reason (inconclusive), 15.4 works: 26.5 is skipped like
+        # an SDK that lacks the plugin, and 15.4 is used.
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _clt27(self, other_error=("MacOSX26.5.sdk",), working=("MacOSX15.4.sdk",))
+                r = tc.run_pick(script)
+                self.assertEqual((r.returncode, r.stdout), (0, tc.sdk("MacOSX15.4.sdk")))
+                self.assertIn("building with MacOSX15.4.sdk (15.4)", _one_line(r.stderr))
+                self.assertEqual(tc.probe_calls(), [
+                    "<default>", tc.sdk("MacOSX26.5.sdk"), tc.sdk("MacOSX15.4.sdk"),
+                ])
+
+    def test_xcrun_unable_to_run_swiftc_is_inconclusive(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"),
+                                    working=("MacOSX26.5.sdk",))
+                tc.flag("xcrun_swiftc_fail")
+                r = tc.run_pick(script)
+                self.assertEqual((r.returncode, r.stdout), (0, ""))
+                self.assertIn("unable to find utility", _one_line(r.stderr))
+
+    def test_agentboard_sdkroot_default_skips_the_probe(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"),
+                                    working=("MacOSX26.5.sdk",))
+                r = tc.run_pick(script, AGENTBOARD_SDKROOT="default")
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+                self.assertEqual(tc.probe_calls(), [])
+
+    def test_agentboard_sdkroot_dir_is_used_as_its_real_path(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"))
+                r = tc.run_pick(script, AGENTBOARD_SDKROOT=str(tc.sdks_dir / "MacOSX26.sdk"))
+                self.assertEqual((r.returncode, r.stdout, r.stderr),
+                                 (0, tc.sdk("MacOSX26.5.sdk"), ""))
+                self.assertEqual(tc.probe_calls(), [])
+
+    def test_relative_agentboard_sdkroot_becomes_absolute(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"))
+                r = tc.run_pick(script, cwd=tc.dev, AGENTBOARD_SDKROOT="SDKs/MacOSX26.5.sdk")
+                self.assertEqual((r.returncode, r.stdout), (0, tc.sdk("MacOSX26.5.sdk")))
+
+    def test_bad_agentboard_sdkroot_is_an_error(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"))
+                r = tc.run_pick(script, AGENTBOARD_SDKROOT="/nonexistent/MacOSX.sdk")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(r.stdout, "")
+                self.assertEqual(_one_line(r.stderr), "error: AGENTBOARD_SDKROOT="
+                                 "/nonexistent/MacOSX.sdk is not an SDK directory")
+
+    def test_preset_sdkroot_is_respected(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"),
+                                    working=("MacOSX26.5.sdk",))
+                r = tc.run_pick(script, SDKROOT=tc.sdk("MacOSX27.0.sdk"))
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+                self.assertEqual(tc.probe_calls(), [])
+
+    def test_no_toolchain_is_silent(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"))
+                tc.flag("xcrun_fail")
+                r = tc.run_pick(script)
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+                self.assertEqual(tc.probe_calls(), [])
+
+    def test_probe_timeout_is_bounded_quiet_and_no_fallback(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"),
+                                    working=("MacOSX26.5.sdk",))
+                tc.flag("sleep", "30")
+                started = time.monotonic()
+                r = tc.run_pick(script, AGENTBOARD_SDK_PROBE_TIMEOUT="1")
+                elapsed = time.monotonic() - started
+                self.assertLess(elapsed, 5,
+                                "the watchdog must bound the probe and not hold the pipe")
+                self.assertEqual((r.returncode, r.stdout), (0, ""))
+                note = _one_line(r.stderr)
+                self.assertIn("timed out after 1s", note)
+                self.assertNotIn("Terminated", r.stderr)
+                self.assertEqual(tc.probe_calls(), ["<default>"])
+                self.assertEqual(tc.leftover_probe_dirs(), [])
+
+
+@unittest.skipUnless(sys.platform == "darwin", "build-app.sh/swift-test.sh are macOS-only")
+class SdkProbeWatchdogTests(unittest.TestCase):
+    """_swiftui_macro_probe's bash 3.2 watchdog, run many times through
+    $(...) under /bin/bash: it must not stall the caller, print anything on
+    stderr, or leave a process behind once its `sleep 1` tick runs out."""
+
+    # Plain (script, capture) pairs: each test opens its own subTest, so one
+    # failing case is reported once and the remaining cases still run.
+    def _cases(self):
+        return [(script, capture) for script in _SDK_HELPER_SCRIPTS for capture in (True, False)]
+
+    def _assert_no_process_left(self, tc, within=3):
+        # A watchdog killed mid-tick may orphan one `sleep 1` by design; give
+        # it a moment, but nothing may outlive that (the old trap-based
+        # watchdog could leave its `sleep <limit>` for the full limit).
+        deadline = time.monotonic() + within
+        while tc.leftover_processes() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(tc.leftover_processes(), [])
+
+    def test_fast_probes_leave_no_process_and_nothing_on_stderr(self):
+        for script, capture in self._cases():
+            with self.subTest(script=script.name, capture=capture):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"))
+                tc.flag("xcrun_swiftc_fail")
+                started = time.monotonic()
+                r = tc.run_probe_loop(script, 20, capture, AGENTBOARD_SDK_PROBE_TIMEOUT="97")
+                elapsed = time.monotonic() - started
+                self.assertEqual(r.returncode, 0, r.stderr)
+                # No "Terminated: 15" from reaping the killed watchdog.
+                self.assertEqual(r.stderr, "")
+                rcs = [line.split("\t")[0] for line in r.stdout.splitlines()]
+                self.assertEqual(rcs, ["2"] * 20)
+                # A watchdog writing into the $(...) pipe would hold each call
+                # open for its 1 s tick.
+                self.assertLess(elapsed, 10, "the watchdog must not hold the caller's pipe")
+                # The caller reaps its watchdog before returning: right after the
+                # run, at most orphaned `sleep 1` ticks remain.
+                self.assertEqual([p for p in tc.leftover_processes() if "marked-sleep" not in p],
+                                 [])
+                self._assert_no_process_left(tc)
+                self.assertEqual(tc.leftover_probe_dirs(), [])
+
+    def test_timed_out_probes_kill_the_stub_and_leave_nothing(self):
+        for script, capture in self._cases():
+            with self.subTest(script=script.name, capture=capture):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"))
+                tc.flag("sleep", "30")  # the stub swiftc outlives the 1 s limit
+                started = time.monotonic()
+                r = tc.run_probe_loop(script, 3, capture, AGENTBOARD_SDK_PROBE_TIMEOUT="1")
+                elapsed = time.monotonic() - started
+                self.assertEqual(r.returncode, 0, r.stderr)
+                # No "Terminated: 15" from reaping the killed stub.
+                self.assertEqual(r.stderr, "")
+                self.assertEqual(r.stdout.splitlines(), ["2\ttimed out after 1s"] * 3)
+                self.assertLess(elapsed, 10)
+                self._assert_no_process_left(tc)
+                self.assertEqual(tc.leftover_probe_dirs(), [])
+
+    def test_watchdog_leaves_once_a_stub_outliving_its_caller_exits(self):
+        # The caller is killed mid-probe, so only the watchdog's own check can
+        # end it: it must leave within a tick of the stub exiting, not stay
+        # for the 97 s limit.
+        for script, capture in self._cases():
+            with self.subTest(script=script.name, capture=capture):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"))
+                tc.flag("sleep", "2")
+                loop = tc.probe_loop_script(script, 1, capture)
+                proc = subprocess.Popen(["/bin/bash", str(loop)],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        env=tc.env(AGENTBOARD_SDK_PROBE_TIMEOUT="97"), cwd=tc.tmp)
+                time.sleep(0.5)
+                proc.kill()
+                proc.wait()
+                self.assertTrue(tc.leftover_processes(), "the stub should still be running")
+                self._assert_no_process_left(tc, within=5)
+
+    def test_a_timeout_that_is_not_a_positive_integer_means_the_default(self):
+        # A 1.5 s probe must neither time out at once (1.5 and 0 used to)
+        # nor run without a watchdog (abc used to kill it before its first
+        # tick): the 60 s default applies, so the watchdog ticks and the
+        # probe finishes on its own.
+        for script in _SDK_HELPER_SCRIPTS:
+            for value in ("abc", "1.5", "0", "08", ""):
+                with self.subTest(script=script.name, value=value):
+                    tc = _FakeToolchain(_tmpdir(self, "agentboard-sdk-test-"))
+                    tc.flag("sleep", "1.5")
+                    r = tc.run_probe_loop(script, 1, AGENTBOARD_SDK_PROBE_TIMEOUT=value)
+                    self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "0\t\n", ""))
+                    self.assertIn("1", tc.sleep_calls(), "the watchdog never ticked")
+                    self._assert_no_process_left(tc)
+
+
+class SdkHelpersAreIdenticalTests(unittest.TestCase):
+    """build-app.sh and swift-test.sh each carry their own copy of the SDK
+    helpers (so each works standalone); the copies must not drift."""
+
+    def test_copies_match(self):
+        for name in _SDK_HELPERS:
+            with self.subTest(name=name):
+                self.assertEqual(_extract_function(name, source=BUILD_APP_SH),
+                                 _extract_function(name, source=SWIFT_TEST_SH))
+
+    def test_install_and_uninstall_carry_no_copy(self):
+        # install.sh builds only through build-app.sh, uninstall.sh never builds.
+        for script in (INSTALL_SH, UNINSTALL_SH):
+            for name in _SDK_HELPERS:
+                self.assertNotIn(f"{name}() {{", script.read_text())
+
+
+@unittest.skipUnless(sys.platform == "darwin", "swift-test.sh is macOS-only")
+class SwiftTestFlagsTests(unittest.TestCase):
+    """swift_test_flags adds each flag group only when its directory exists
+    and plain `swift test` wouldn't find it."""
+
+    def _flags(self, tc):
+        body = "set -euo pipefail\n" + _extract_function("swift_test_flags", source=SWIFT_TEST_SH)
+        body += "swift_test_flags\n"
+        func_file = tc.tmp / "run-flags.sh"
+        func_file.write_text(body)
+        r = subprocess.run(["/bin/bash", str(func_file)], capture_output=True, text=True,
+                           env=tc.env(), timeout=30)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        return r.stdout.splitlines()
+
+    def test_both_groups_when_both_dirs_exist(self):
+        tc = _FakeToolchain(_tmpdir(self, "agentboard-flags-test-"), testing_framework=True,
+                            plugin="testing")
+        fw = str(tc.dev / "Library" / "Developer" / "Frameworks")
+        self.assertEqual(self._flags(tc), [
+            "-Xswiftc", "-F", "-Xswiftc", fw, "-Xlinker", "-rpath", "-Xlinker", fw,
+            "-Xswiftc", "-plugin-path", "-Xswiftc", str(tc.plugins / "testing"),
+        ])
+
+    def test_nothing_without_them(self):
+        tc = _FakeToolchain(_tmpdir(self, "agentboard-flags-test-"))
+        self.assertEqual(self._flags(tc), [])
+
+    def test_no_plugin_path_when_the_default_dir_has_the_plugin(self):
+        tc = _FakeToolchain(_tmpdir(self, "agentboard-flags-test-"), plugin="both")
+        self.assertEqual(self._flags(tc), [])
+
+
+@unittest.skipUnless(sys.platform == "darwin", "build-app.sh/swift-test.sh are macOS-only")
+class ToolchainLayoutCompatibilityTests(unittest.TestCase):
+    """The approval condition: the same scripts must behave on a macOS 26
+    toolchain whose default SDK works, on a full-Xcode layout, and on a
+    Command Line Tools 27 layout whose default SDK can't expand SwiftUI
+    macros -- deciding only by probing, never by OS or Swift version."""
+
+    def _assert_no_version_branching(self, tc):
+        self.assertFalse(tc.sw_vers_called(), "sw_vers must never be consulted")
+
+    def _swift_test(self, tc, co, *args, **env):
+        tc.flag("test-output", _PASSING_RUN)
+        return tc.run_script(co, "swift-test.sh", *args, **env)
+
+    def test_a_macos26_default_sdk_works(self):
+        tc = _FakeToolchain(_tmpdir(self, "agentboard-layout-test-"), sdks=("MacOSX26.5.sdk",),
+                            aliases={"MacOSX.sdk": "MacOSX26.5.sdk"}, working=("MacOSX26.5.sdk",),
+                            testing_framework=True)
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                (tc.state / "probe-calls").unlink(missing_ok=True)
+                r = tc.run_pick(script)
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+                self.assertEqual(tc.probe_calls(), ["<default>"])
+        co = tc.make_checkout()
+        r = tc.run_script(co, "build-app.sh", "--no-install", merge=True)
+        self.assertEqual((r.returncode, r.stdout), (0, "built app/build/AgentBoard.app\n"))
+        self.assertEqual(tc.swift_sdkroot(), "<unset>")
+        r = self._swift_test(tc, co)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, "")
+        self.assertEqual(tc.swift_sdkroot(), "<unset>")
+        self._assert_no_version_branching(tc)
+
+    def test_b_macos26_clt_layout_flag_variants(self):
+        variants = {
+            "frameworks and plugins/testing": dict(testing_framework=True, plugin="testing"),
+            "frameworks only": dict(testing_framework=True, plugin="default"),
+            "neither": dict(),
+        }
+        for label, kw in variants.items():
+            with self.subTest(variant=label):
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-layout-test-"),
+                                    sdks=("MacOSX26.5.sdk",),
+                                    aliases={"MacOSX.sdk": "MacOSX26.5.sdk"},
+                                    working=("MacOSX26.5.sdk",), **kw)
+                co = tc.make_checkout()
+                r = self._swift_test(tc, co)
+                self.assertEqual((r.returncode, r.stderr), (0, ""))
+                fw = str(tc.dev / "Library" / "Developer" / "Frameworks")
+                expected = ["test"]
+                if kw.get("testing_framework"):
+                    expected += ["-Xswiftc", "-F", "-Xswiftc", fw, "-Xlinker", "-rpath",
+                                 "-Xlinker", fw]
+                if kw.get("plugin") == "testing":
+                    expected += ["-Xswiftc", "-plugin-path", "-Xswiftc",
+                                 str(tc.plugins / "testing")]
+                self.assertEqual(tc.swift_argv(), expected)
+                self.assertEqual(tc.swift_sdkroot(), "<unset>")
+                self._assert_no_version_branching(tc)
+
+    def test_c_full_xcode_layout_is_a_noop(self):
+        tc = _FakeToolchain(_tmpdir(self, "agentboard-layout-test-"), layout="xcode",
+                            sdks=("MacOSX.sdk",), aliases={"MacOSX27.sdk": "MacOSX.sdk"},
+                            working=("MacOSX.sdk",), plugin="default")
+        self.assertFalse((tc.dev / "Library" / "Developer" / "Frameworks").exists())
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                r = tc.run_pick(script)
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        co = tc.make_checkout()
+        r = self._swift_test(tc, co)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(tc.swift_argv(), ["test"])
+        self.assertEqual(tc.swift_sdkroot(), "<unset>")
+        r = tc.run_script(co, "build-app.sh", "--no-install", merge=True)
+        self.assertEqual((r.returncode, r.stdout), (0, "built app/build/AgentBoard.app\n"))
+        self.assertEqual(tc.swift_sdkroot(), "<unset>")
+        self._assert_no_version_branching(tc)
+
+    def test_c_xcode_never_borrows_a_command_line_tools_sdk(self):
+        tmp = _tmpdir(self, "agentboard-layout-test-")
+        clt_sdks = tmp / "CommandLineTools" / "SDKs"
+        (clt_sdks / "MacOSX26.5.sdk").mkdir(parents=True)
+        (clt_sdks / "MacOSX26.5.sdk" / "VERSION").write_text("26.5\n")
+        tc = _FakeToolchain(tmp, layout="xcode", sdks=("MacOSX.sdk",),
+                            aliases={"MacOSX27.sdk": "MacOSX.sdk"}, plugin="default")
+        (tc.state / "working").write_text(os.path.realpath(clt_sdks / "MacOSX26.5.sdk") + "\n")
+        for script in _SDK_HELPER_SCRIPTS:
+            with self.subTest(script=script.name):
+                (tc.state / "probe-calls").unlink(missing_ok=True)
+                r = tc.run_pick(script)
+                self.assertEqual((r.returncode, r.stdout), (0, ""))
+                self.assertTrue(_one_line(r.stderr).startswith("warning: the default macOS SDK (27.0)"))
+                self.assertEqual(tc.probe_calls(), ["<default>"])
+        self._assert_no_version_branching(tc)
+
+    def test_d_clt27_falls_back_and_exports_sdkroot(self):
+        tc = _clt27(self, testing_framework=True, plugin="testing")
+        co = tc.make_checkout()
+        r = self._swift_test(tc, co)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("building with MacOSX26.5.sdk (26.5)", _one_line(r.stderr))
+        self.assertEqual(tc.swift_sdkroot(), tc.sdk("MacOSX26.5.sdk"))
+        self.assertIn("-plugin-path", tc.swift_argv())
+        r = tc.run_script(co, "build-app.sh", "--no-install", merge=True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        lines = r.stdout.splitlines()
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn("building with MacOSX26.5.sdk", lines[0])
+        self.assertEqual(lines[1], "built app/build/AgentBoard.app")
+        self.assertEqual(tc.swift_sdkroot(), tc.sdk("MacOSX26.5.sdk"))
+        self._assert_no_version_branching(tc)
+
+    def test_scripts_never_read_os_or_swift_versions(self):
+        for script in _SDK_HELPER_SCRIPTS:
+            text = script.read_text()
+            for needle in ("sw_vers", "ProductVersion", "swift --version"):
+                self.assertNotIn(needle, text, f"{script.name} must decide by probing only")
+
+
+@unittest.skipUnless(sys.platform == "darwin", "swift-test.sh is macOS-only")
+class SwiftTestScriptQuietTests(unittest.TestCase):
+    """swift-test.sh follows the quiet-runner rule: one summary line on
+    success; the failing lines plus the log path on failure."""
+
+    def setUp(self):
+        self.tc = _FakeToolchain(_tmpdir(self, "agentboard-swifttest-test-"),
+                                 working=("MacOSX27.0.sdk",), testing_framework=True,
+                                 plugin="testing")
+        self.co = self.tc.make_checkout()
+        self.log = self.co / "app" / "build" / "swift-test.log"
+
+    def _run(self, output, rc=0, *args, **env):
+        self.tc.flag("test-output", output)
+        self.tc.flag("test-rc", str(rc))
+        return self.tc.run_script(self.co, "swift-test.sh", *args, **env)
+
+    def test_success_prints_only_the_summary(self):
+        r = self._run(_PASSING_RUN)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(r.stdout,
+                         "✔ Test run with 3 tests in 2 suites passed after 0.01 seconds.\n")
+        self.assertEqual(self.log.read_text(), _PASSING_RUN)
+
+    def test_private_use_glyphs_are_recognized(self):
+        glyph = "\U000F0000"
+        r = self._run(_PASSING_RUN.replace("✔", glyph))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Test run with 3 tests", _one_line(r.stdout))
+        r = self._run(_FAILING_RUN.replace("✘", glyph), 1)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("recorded an issue", r.stderr)
+
+    def test_singular_summary(self):
+        r = self._run("✔ Test run with 1 test in 1 suite passed after 0.01 seconds.\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "✔ Test run with 1 test in 1 suite passed after 0.01 seconds.\n")
+
+    def test_ansi_colors_are_stripped(self):
+        r = self._run("\x1b[1;32m✔\x1b[0m Test run with 3 tests in 2 suites "
+                      "\x1b[1mpassed\x1b[0m after 0.01 seconds.\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("\x1b", r.stdout)
+        self.assertIn("Test run with 3 tests in 2 suites passed", r.stdout)
+
+    def test_failure_prints_failing_lines_and_the_log_path(self):
+        r = self._run(_FAILING_RUN, 1)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        lines = r.stderr.splitlines()
+        self.assertIn("recorded an issue at T.swift:4:21", lines[0])
+        self.assertIn("Test bad() failed after", lines[1])
+        self.assertIn("Test run with 2 tests in 1 suite failed", lines[2])
+        self.assertEqual(lines[-1], f"full log: {self.log}")
+        self.assertNotIn("Test ok() passed", r.stderr)
+        self.assertTrue(self.log.is_file())
+
+    def test_zero_tests_is_a_failure(self):
+        r = self._run("Building for debugging...\nBuild complete!\n")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("error: swift test ran no Swift Testing tests", r.stderr)
+        self.assertIn(str(self.log), r.stderr)
+
+    def test_a_filter_matching_nothing_is_named_in_the_zero_tests_error(self):
+        r = self._run("Building for debugging...\nBuild complete!\n", 0,
+                      "--", "--filter", "NoSuchTestXyz")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(_one_line(r.stderr),
+                         "error: swift test ran no Swift Testing tests (Testing.framework not "
+                         "found, or a --filter/--skip matched nothing?); full log: "
+                         f"{self.log}")
+
+    def test_list_tests_skips_the_zero_tests_guard(self):
+        for flag in ("--list-tests", "-l"):
+            with self.subTest(flag=flag):
+                r = self._run("AgentBoardTests.HelpTests/x()\n", 0, "--", flag)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("HelpTests/x()", r.stdout)
+    def test_xcode_layout_runs_plain_swift_test(self):
+        tc = _FakeToolchain(_tmpdir(self, "agentboard-swifttest-test-"), layout="xcode",
+                            sdks=("MacOSX.sdk",), aliases={}, working=("MacOSX.sdk",),
+                            plugin="default")
+        co = tc.make_checkout()
+        tc.flag("test-output", _PASSING_RUN)
+        r = tc.run_script(co, "swift-test.sh")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(tc.swift_argv(), ["test"])
+
+    def test_verbose_streams_everything(self):
+        for how in ({"AGENTBOARD_VERBOSE": "1"}, {"args": ("--verbose",)}, {"args": ("-v",)}):
+            with self.subTest(how=how):
+                how = dict(how)
+                args = how.pop("args", ())
+                r = self._run(_PASSING_RUN, 0, *args, **how)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout, _PASSING_RUN)
+
+    def test_passthrough_args_flags_and_fallback_sdkroot(self):
+        tc = _clt27(self, testing_framework=True, plugin="testing")
+        co = tc.make_checkout()
+        tc.flag("test-output", _PASSING_RUN)
+        r = tc.run_script(co, "swift-test.sh", "--", "--filter", "HelpTests")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        argv = tc.swift_argv()
+        self.assertEqual(argv[0], "test")
+        self.assertEqual(argv[-2:], ["--filter", "HelpTests"])
+        self.assertIn("-plugin-path", argv)
+        self.assertIn("-rpath", argv)
+        self.assertEqual(tc.swift_sdkroot(), tc.sdk("MacOSX26.5.sdk"))
+
+    def test_help(self):
+        r = self.tc.run_script(self.co, "swift-test.sh", "--help")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("Usage:", r.stdout)
+        # It says what the zero-tests guard catches and what skips it.
+        self.assertIn("a --filter/--skip matched nothing", r.stdout)
+        self.assertIn("Only -- --list-tests\n(or -l) skips that check", r.stdout)
+        self.assertFalse((self.tc.state / "swift-argv").exists())
+
+
+@unittest.skipUnless(sys.platform == "darwin", "build-app.sh is macOS-only")
+class BuildAppQuietTests(unittest.TestCase):
+    """build-app.sh follows the quiet-runner rule: everything goes to
+    app/build/build-app.log, the terminal gets one summary line (after the
+    SDK note when a fallback is used), or the error lines plus the log path."""
+
+    def _setup(self, tc):
+        co = tc.make_checkout()
+        return co, co / "app" / "build" / "build-app.log"
+
+    def test_no_install_success_is_one_line(self):
+        tc = _FakeToolchain(_tmpdir(self, "agentboard-buildapp-quiet-"), working=("MacOSX27.0.sdk",))
+        co, log = self._setup(tc)
+        r = tc.run_script(co, "build-app.sh", "--no-install", merge=True)
+        self.assertEqual((r.returncode, r.stdout), (0, "built app/build/AgentBoard.app\n"))
+        text = log.read_text()
+        self.assertIn("replacing existing signature", text)
+        self.assertIn("Build complete!", text)
+        self.assertIn("==> ad-hoc codesign", text)
+        self.assertTrue((co / "app" / "build" / "AgentBoard.app" / "Contents" / "Info.plist").is_file())
+
+    def test_fallback_note_plus_one_line(self):
+        tc = _clt27(self)
+        co, _ = self._setup(tc)
+        r = tc.run_script(co, "build-app.sh", "--no-install", merge=True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        lines = r.stdout.splitlines()
+        self.assertEqual(len(lines), 2, lines)
+        self.assertTrue(lines[0].startswith("note: the default macOS SDK (27.0)"), lines[0])
+        self.assertEqual(lines[1], "built app/build/AgentBoard.app")
+
+    def test_build_failure_prints_errors_and_the_log_path(self):
+        tc = _FakeToolchain(_tmpdir(self, "agentboard-buildapp-quiet-"), working=("MacOSX27.0.sdk",))
+        co, log = self._setup(tc)
+        tc.flag("swift_build_fail")
+        r = tc.run_script(co, "build-app.sh", "--no-install", merge=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.splitlines(), [
+            "/x/Foo.swift:1:1: error: something broke",
+            "error: Build failed",
+            f"full log: {log}",
+        ])
+
+    def test_verbose_shows_the_steps(self):
+        for how in ({"args": ("--verbose",)}, {"AGENTBOARD_VERBOSE": "1"}):
+            with self.subTest(how=how):
+                how = dict(how)
+                args = how.pop("args", ())
+                tc = _FakeToolchain(_tmpdir(self, "agentboard-buildapp-quiet-"),
+                                    working=("MacOSX27.0.sdk",))
+                co, log = self._setup(tc)
+                r = tc.run_script(co, "build-app.sh", "--no-install", *args, merge=True, **how)
+                self.assertEqual(r.returncode, 0, r.stdout)
+                for line in ("==> swift build -c release", "Build complete!", "==> ad-hoc codesign",
+                             "replacing existing signature", "==> built "):
+                    self.assertIn(line, r.stdout)
+                self.assertIn("Build complete!", log.read_text())
+
+    def test_refusal_message_still_reaches_the_terminal(self):
+        tc = _FakeToolchain(_tmpdir(self, "agentboard-buildapp-quiet-"), working=("MacOSX27.0.sdk",))
+        co, _ = self._setup(tc)
+        prefix = tc.tmp / "apps"
+        (prefix / "AgentBoard.app").mkdir(parents=True)
+        (prefix / "AgentBoard.app" / "Contents").mkdir()
+        r = tc.run_script(co, "build-app.sh", "--prefix", str(prefix), merge=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("doesn't look like AgentBoard", r.stdout)
+        self.assertNotIn("built and installed", r.stdout)
+
+    def test_install_success_is_one_line(self):
+        tc = _FakeToolchain(_tmpdir(self, "agentboard-buildapp-quiet-"), working=("MacOSX27.0.sdk",))
+        co, _ = self._setup(tc)
+        prefix = tc.tmp / "apps"
+        r = tc.run_script(co, "build-app.sh", "--prefix", str(prefix), merge=True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(r.stdout, f"built and installed {prefix}/AgentBoard.app\n")
+        self.assertTrue((prefix / "AgentBoard.app" / "Contents" / "Info.plist").is_file())
 
 
 if __name__ == "__main__":

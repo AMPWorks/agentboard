@@ -321,3 +321,34 @@ requires every CLI subcommand and option in the reference's CLI section.
 
 This log starts here, backfilled from the commits and pull requests on main, and from now on each
 task appends its entry before opening its PR.
+
+## 2026-10-30 21:31:51 UTC — The build and test scripts probe the toolchain instead of trusting it
+
+A macOS upgrade brought a Command Line Tools release whose default SDK declares SwiftUI's
+`@State` and `@AppStorage` as macros from a SwiftUIMacros compiler plugin that the same release
+does not ship, so `swift build` failed for every SwiftUI view. The same release also moved the
+TestingMacros plugin into a `host/plugins/testing/` subdirectory the compiler does not search.
+The SDK fallback probes instead of matching versions: `build-app.sh` typechecks a five-line
+SwiftUI view against the default SDK, and only when that fails with the SwiftUIMacros error does
+it pick the newest older `MacOSX*.sdk` beside the default that passes the same probe, exporting
+`SDKROOT` and printing one note. A version table would have needed an update for every toolchain
+release and would have kept firing after a fixed one shipped; the probe makes itself a no-op once
+Xcode is selected or the plugin appears. Discovery stays in the default SDK's own directory, so
+an Xcode build never borrows a Command Line Tools SDK.
+
+Any other probe outcome (a timeout, no compiler, a module-cache or sandbox error) counts as
+inconclusive and keeps the default SDK with one note, so an unrelated failure can never pass for
+a missing plugin and silently switch SDKs. The probe is bounded by a bash 3.2 watchdog, since
+`timeout(1)` is missing on older macOS, and uses only the builtin `kill`. `AGENTBOARD_SDKROOT`
+skips the check or forces an SDK, and a preset `SDKROOT` wins. The cost is one typecheck per
+build, about ten seconds on a cold module cache and a fraction of a second warm.
+
+A new `scripts/swift-test.sh` replaces the hand-typed `swift test` flags. It carries
+byte-identical copies of the two SDK helpers (each script stays standalone, and a test keeps the
+copies equal) and adds the Testing framework and plugin flags only when their directories exist
+where plain `swift test` does not look. It also fails a run that executes zero tests, the silent
+pass the framework flags exist to prevent. Both scripts now follow the quiet-runner rule: one
+summary line, or the failing lines plus a log path under `app/build/`, with `--verbose` for
+everything. That shortens `install.sh`'s build step to a line or two, and `AGENTBOARD_VERBOSE=1`
+brings the full output back. Stub-toolchain tests cover a working default SDK, a full Xcode
+layout and the fallback layout; only the last was exercised on real hardware.

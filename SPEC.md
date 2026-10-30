@@ -33,6 +33,8 @@ agentboard/
                             optionally enables launch at login. Flags: --no-hooks, --no-app,
                             --dry-run, --prefix. Idempotent; safe to re-run to upgrade.
   scripts/uninstall.sh      removes its own hooks (other hooks stay), app, optionally data dir
+  scripts/swift-test.sh     swift test for the app's Swift Testing suite, adding the Testing
+                            framework/plugin flags and the SDK fallback the toolchain needs
   docs/
     REFERENCE.md            the full reference: install, hooks, state, config, CLI, diagnostics
     DEVELOPMENT.md          components and tests
