@@ -394,3 +394,36 @@ click, double-click, menu item, action bar, notification) opens the dashboard on
 the jump fails, since the popover has closed and the terminal may be in front by then. Tests use
 injected window probes, `defaults` runners and clocks; a guard in the shared test base refuses any
 unmocked probe, and only a read-only smoke test lists real windows.
+
+## 2026-10-31 04:48:34 UTC — Permission denials in the dashboard
+
+The hook had been recording every `PermissionDenied` event (auto mode's classifier blocked a tool
+call) as activity, deliberately with no state change and no update, so nothing showed them. The
+dashboard now has a **Denials** sidebar row below Done that replaces the session list with the open
+denials, newest first, and the session detail lists a session's own. Clearing is per row, per
+session or for everything the filters keep, like Updates.
+
+The data travels the way notes do: each snapshot session carries its newest 20 open denials and an
+uncapped `denials_count`, and `counts.denials` sums them over the emitted sessions; a new
+`agentboard denials` subcommand lists and clears them. A separate `denials --json` poll was the
+alternative, but it would need its own refresh timing, error banner and fixture path, while the
+app's search and badges already run over the one polled snapshot. The cost is one query per poll,
+kept off a full scan of `events` by a partial index on `PermissionDenied` rows; the query writes
+the event name as a literal because whether SQLite matches a partial index against a bound value
+depends on its version. Only the tool name, the reason (Claude Code's own category wording) and
+the MCP server are shown; the reason comes from the hook-capped `text` column, never from the
+uncapped copy in `extra`. The tool's input is still never stored.
+
+Clearing adds `events.dismissed_at` (one new migration, with a partial index on the
+`PermissionDenied` rows) instead of deleting the row or adding a table.
+The state's event-derived inputs never filter on that column and no row disappears, so clearing
+cannot move a session's state; a test pins the session row byte for byte across one and all
+clears. Retention stays with the existing `compact_days` compaction, which already listed
+`PermissionDenied`: a denial is reviewable for 7 days whether cleared or not, and the compaction
+comment and docs no longer claim nothing reads those rows after the turn.
+
+In the Denials view a plain search word also matches a denial's tool, reason and MCP server, but
+denial text is kept out of the session's own search haystack: otherwise a word from a reason would
+list the session under All and move the state badges, which count sessions, not denials. The
+Denials badge therefore counts from the picker-filtered sessions with the query applied denial by
+denial, rather than from the query-filtered session list the state badges use.

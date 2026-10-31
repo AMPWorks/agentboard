@@ -54,6 +54,12 @@ struct SessionSearch: Sendable, Equatable {
     var isEmpty: Bool { terms.isEmpty }
 
     func matches(_ session: Session) -> Bool {
+        matches(session, extra: [])
+    }
+
+    /// `extra` joins the plain-term haystack only (field terms keep their
+    /// meaning), for matching one item of a session such as a denial.
+    private func matches(_ session: Session, extra: [String]) -> Bool {
         guard !terms.isEmpty else { return true }
         // Built at most once per session per query, and only if a plain
         // term needs it.
@@ -63,11 +69,21 @@ struct SessionSearch: Sendable, Equatable {
                 guard Self.values(field, of: session).contains(where: { Self.fold($0).contains(term.text) })
                 else { return false }
             } else {
-                if plain == nil { plain = Self.plainHaystack(session) }
+                if plain == nil { plain = Self.plainHaystack(session, extra: extra) }
                 guard plain!.contains(term.text) else { return false }
             }
         }
         return true
+    }
+
+    /// One permission denial of `session` matches when every term hits the
+    /// session (as `matches(_:)` reads it) or, for a plain term, this
+    /// denial's tool, reason or MCP server. Denial text is never part of
+    /// the session's own haystack, so the session list and the state
+    /// badges never match it; only the dashboard's Denials view does.
+    func matches(_ denial: Denial, in session: Session) -> Bool {
+        matches(session, extra: [denial.toolName, denial.toolLabel, denial.reason,
+                                 denial.mcpServer ?? ""])
     }
 
     /// One note of `session` matches when the query matches the session
@@ -115,7 +131,7 @@ struct SessionSearch: Sendable, Equatable {
     /// a phrase never matches across two fields.
     private static let separator = "\u{1F}"
 
-    private static func plainHaystack(_ session: Session) -> String {
+    private static func plainHaystack(_ session: Session, extra: [String] = []) -> String {
         var parts: [String] = [
             session.title,
             session.firstPrompt ?? "",
@@ -141,6 +157,7 @@ struct SessionSearch: Sendable, Equatable {
         for note in session.notes {
             parts.append(note.text)
         }
+        parts += extra
         return fold(parts.joined(separator: separator))
     }
 
@@ -269,6 +286,10 @@ struct FilteredCounts: Sendable, Equatable {
             }
         }
         counts.notes = UpdatesFeed.total(from: sessions, query: query)
+        // The dashboard's Denials badge does not read this (see
+        // `DenialFeed.total`); it keeps the no-filter counts equal to the
+        // snapshot's.
+        counts.denials = DenialFeed.total(from: sessions, query: query)
     }
 
     func count(for state: SessionState) -> Int { counts.count(for: state) }

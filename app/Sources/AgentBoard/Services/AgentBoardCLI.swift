@@ -203,6 +203,45 @@ struct AgentBoardCLI: Sendable {
         }
     }
 
+    /// `agentboard denials --dismiss ID...`: clears those permission denials
+    /// from the Denials list. Never changes a session's state.
+    func dismissDenials(ids: [Int]) async throws {
+        guard !ids.isEmpty else { return }
+        try await runDenials(["denials", "--dismiss"] + ids.map(String.init))
+    }
+
+    /// `agentboard denials --dismiss-all --session TOOL:ID`: every open
+    /// denial of one session, including ones past the snapshot's cap.
+    func dismissDenials(tool: String, sessionId: String) async throws {
+        try await runDenials(["denials", "--dismiss-all", "--session", "\(tool):\(sessionId)"])
+    }
+
+    /// `agentboard denials --dismiss-all`: every open denial of every session.
+    func dismissAllDenials() async throws {
+        try await runDenials(["denials", "--dismiss-all"])
+    }
+
+    /// Runs one denial dismissal (a row's x, or a step of Clear all).
+    func dismiss(_ dismissal: DenialDismissal) async throws {
+        switch dismissal {
+        case .all:
+            try await dismissAllDenials()
+        case let .session(tool, sessionId):
+            try await dismissDenials(tool: tool, sessionId: sessionId)
+        case let .ids(ids):
+            try await dismissDenials(ids: ids)
+        }
+    }
+
+    private func runDenials(_ arguments: [String]) async throws {
+        if isFixtureMode {
+            log.notice("fixture mode: skipping \(arguments.joined(separator: " "), privacy: .public)")
+            return
+        }
+        guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
+        _ = try await runner.run(executable: executablePath, arguments: arguments)
+    }
+
     func refreshLinks() async throws {
         if isFixtureMode { return }
         guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }

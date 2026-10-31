@@ -8,7 +8,8 @@
     "unconcluded": 2,
     "snoozed": 2,
     "done": 2,
-    "notes": 4
+    "notes": 4,
+    "denials": 3
   },
   "sessions": [
     {
@@ -220,7 +221,26 @@
           "title": "AgentBoard: SwiftUI menu bar app"
         }
       ],
-      "triage": { "status": "open", "until": null, "note": null }
+      "triage": { "status": "open", "until": null, "note": null },
+      "denials": [
+        {
+          "id": 501,
+          "ts": "2026-10-12T19:28:10.000000Z",
+          "tool_name": "Bash",
+          "reason": "[Irreversible Local Destruction]",
+          "mcp_server": null,
+          "subagent": false
+        },
+        {
+          "id": 498,
+          "ts": "2026-10-12T19:21:45.000000Z",
+          "tool_name": "mcp__tracker__close_issue",
+          "reason": "[External System Writes]",
+          "mcp_server": "tracker",
+          "subagent": false
+        }
+      ],
+      "denials_count": 2
     },
     {
       "key": "codex:sess-running-2",
@@ -331,7 +351,18 @@
           "source": "stop"
         }
       ],
-      "notes_count": 1
+      "notes_count": 1,
+      "denials": [
+        {
+          "id": 476,
+          "ts": "2026-10-12T17:01:30.000000Z",
+          "tool_name": "Bash",
+          "reason": "[Interfere With Workloads]",
+          "mcp_server": null,
+          "subagent": true
+        }
+      ],
+      "denials_count": 1
     },
     {
       "key": "claude:sess-review-2",

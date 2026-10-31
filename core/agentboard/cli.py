@@ -177,6 +177,72 @@ def _open_notes_by_session(conn) -> dict:
     return by_key
 
 
+SNAPSHOT_DENIALS_PER_SESSION = 20
+SNAPSHOT_DENIAL_REASON_CHARS = 300
+
+# Open (not cleared) permission denials. The event name is a literal, never a
+# bound parameter, so SQLite can match the partial index idx_events_denials
+# on every version (with a bound value that depends on the version).
+_OPEN_DENIALS_SQL = (
+    "SELECT id, ts, tool, session_id, agent_id, tool_name, text, extra FROM events"
+    " WHERE event = 'PermissionDenied' AND dismissed_at IS NULL"
+)
+
+
+def _denial_mcp_server(extra):
+    """The MCP server a denial's `extra` JSON names: a non-empty string or
+    None. Malformed JSON gives None, never an exception."""
+    try:
+        value = json.loads(extra) if extra else None
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    server = value.get("mcp_server")
+    return server if isinstance(server, str) and server else None
+
+
+def _denial_fields(row) -> dict:
+    """The fields a snapshot and `agentboard denials` show for one denial.
+    The reason is the row's `text` (the hook caps it), never `extra["reason"]`,
+    which holds the payload value uncapped; only the MCP server comes from
+    `extra`."""
+    return {
+        "id": row["id"],
+        "ts": row["ts"],
+        "tool_name": row["tool_name"],
+        "reason": row["text"],
+        "mcp_server": _denial_mcp_server(row["extra"]),
+        "subagent": row["agent_id"] is not None,
+    }
+
+
+def _open_denials_by_session(conn) -> dict:
+    """{(tool, session_id): [open denial rows, newest ts first, then id]}."""
+    by_key = {}
+    for row in conn.execute(_OPEN_DENIALS_SQL).fetchall():
+        by_key.setdefault((row["tool"], row["session_id"]), []).append(dict(row))
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+
+    def newest_first(denial):
+        ts = reconcile.parse_ts(denial["ts"])
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (ts or oldest, denial["id"])
+
+    for rows in by_key.values():
+        rows.sort(key=newest_first, reverse=True)
+    return by_key
+
+
+def _snapshot_denial(row) -> dict:
+    fields = _denial_fields(row)
+    reason = fields["reason"]
+    if isinstance(reason, str):
+        fields["reason"] = reason[:SNAPSHOT_DENIAL_REASON_CHARS]
+    return fields
+
+
 def _registry_entry_for(session, claude_registry):
     """The ~/.claude/sessions/<pid>.json entry for a Claude session, or
     None. Consulted even when the hook knows the pid (it breaks ties, see
@@ -249,11 +315,14 @@ def _turn_fields(session, key, last_turn_start_at, turn_maps):
 
 def _build_session_entry(conn, session, triage_by_key, claude_registry, config, now,
                          notes_by_key=None, prompt_times=None, turn_start_times=None,
-                         turn_maps=None):
+                         turn_maps=None, denials_by_key=None):
     session = dict(session)
     tool = session["tool"]
     session_id = session["session_id"]
     session_notes = (notes_by_key or {}).get((tool, session_id), [])
+    # Like notes_by_key: the caller passes the map from one grouped query
+    # (build_snapshot does); omitted means none, never a query per session.
+    session_denials = (denials_by_key or {}).get((tool, session_id), [])
     triage = triage_by_key.get((tool, session_id))
     session_link_rows = _session_links(conn, session, config)
 
@@ -378,6 +447,11 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
             for note in _listed_notes(session_notes)
         ],
         "notes_count": len(session_notes),
+        "denials": [
+            _snapshot_denial(denial)
+            for denial in session_denials[:SNAPSHOT_DENIALS_PER_SESSION]
+        ],
+        "denials_count": len(session_denials),
         **turn,
     }
 
@@ -396,6 +470,7 @@ def build_snapshot(conn, include_all=False, now=None):
     )
     config = links.load_config(home)
     notes_by_key = _open_notes_by_session(conn)
+    denials_by_key = _open_denials_by_session(conn)
     # One grouped query, not one per session on every 3 s poll.
     prompt_times = links.last_parent_prompt_times(conn)
     newest_prompts = links.newest_parent_prompts(conn)
@@ -404,7 +479,8 @@ def build_snapshot(conn, include_all=False, now=None):
 
     entries = [
         _build_session_entry(conn, session, triage_by_key, claude_registry, config, now,
-                             notes_by_key, prompt_times, turn_start_times, turn_maps)
+                             notes_by_key, prompt_times, turn_start_times, turn_maps,
+                             denials_by_key)
         for session in sessions
     ]
 
@@ -445,6 +521,7 @@ def build_snapshot(conn, include_all=False, now=None):
     # Only the notes of sessions this snapshot emits, so the total matches
     # what the app can show.
     counts["notes"] = sum(entry["notes_count"] for entry in entries)
+    counts["denials"] = sum(entry["denials_count"] for entry in entries)
 
     return {
         "generated_at": _now_iso(now),
@@ -823,6 +900,93 @@ def cmd_notes(args):
         print(
             f"{item['id']:>5} {item['kind']:<9} {item['key']:<44} {item['last_ts']}"
             f"{times}{dismissed}  {notes_mod.first_line(item['text'])[:120]}"
+        )
+    return 0
+
+
+# -- denials -------------------------------------------------------------------
+
+def _denial_dict(row) -> dict:
+    return {
+        "id": row["id"],
+        "key": f"{row['tool']}:{row['session_id']}",
+        "tool": row["tool"],
+        "session_id": row["session_id"],
+        **{k: v for k, v in _denial_fields(row).items() if k != "id"},
+        "dismissed_at": row["dismissed_at"],
+    }
+
+
+def _dismiss_denials(conn, now_iso, ids=None, session=None) -> int:
+    """Set dismissed_at on open denials: the given ids, else every one (only
+    `session`'s with a session). Touches only events.dismissed_at, and only
+    PermissionDenied rows, so an id of another event changes nothing."""
+    query = ("UPDATE events SET dismissed_at=?"
+             " WHERE event = 'PermissionDenied' AND dismissed_at IS NULL")
+    params = [now_iso]
+    if ids is not None:
+        query += f" AND id IN ({','.join('?' for _ in ids)})"
+        params.extend(ids)
+    elif session is not None:
+        query += " AND tool=? AND session_id=?"
+        params.extend(session)
+    return conn.execute(query, params).rowcount
+
+
+def cmd_denials(args):
+    session = None
+    if args.session:
+        session = _explicit_session(args.session)
+        if session is None:
+            _report("error", "denials",
+                    f"agentboard denials: --session must be TOOL:ID, got {args.session!r}")
+            return 2
+
+    conn = db.connect()
+    try:
+        if args.dismiss is not None or args.dismiss_all:
+            now_iso = _now_iso()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if args.dismiss is not None:
+                    count = _dismiss_denials(conn, now_iso, ids=args.dismiss)
+                else:
+                    count = _dismiss_denials(conn, now_iso, session=session)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            diag.info("cli", "denials_dismiss", ids=args.dismiss, all=args.dismiss_all,
+                      session=args.session, dismissed=count)
+            if args.json:
+                print(json.dumps({"dismissed": count}))
+            else:
+                print(f"dismissed {count} denial(s)")
+            return 0
+
+        query = ("SELECT id, ts, tool, session_id, agent_id, tool_name, text, extra, dismissed_at"
+                 " FROM events WHERE event = 'PermissionDenied'")
+        params = []
+        if not args.all:
+            query += " AND dismissed_at IS NULL"
+        if session is not None:
+            query += " AND tool=? AND session_id=?"
+            params.extend(session)
+        query += " ORDER BY ts DESC, id DESC"
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    items = [_denial_dict(row) for row in rows]
+    if args.json:
+        print(json.dumps({"denials": items}))
+        return 0
+    for item in items:
+        dismissed = " (dismissed)" if item["dismissed_at"] else ""
+        reason = (item["reason"] or "").strip().splitlines()
+        print(
+            f"{item['id']:>6} {item['key']:<44} {item['ts']} {item['tool_name'] or '?'}"
+            f"{dismissed}  {(reason[0] if reason else '')[:120]}"
         )
     return 0
 
@@ -2746,8 +2910,10 @@ PRUNE_AUTO_INTERVAL_SECS = 24 * 3600
 VACUUM_AUTO_INTERVAL_SECS = 7 * 24 * 3600
 VACUUM_MIN_FREE_BYTES = 8 * 1024 * 1024
 VACUUM_MIN_FREE_FRACTION = 0.25
-# Tool-use and subagent rows: nothing reads them once the turn is over (the
-# session row carries `last_event`), and they are most of the table.
+# Tool-use and subagent rows: they are not read for state once the turn is
+# over (the session row carries `last_event`), and they are most of the table.
+# PermissionDenied rows also back the dashboard's Denials list; this
+# compaction is its retention.
 COMPACTED_EVENTS = (
     "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart",
     "SubagentStop", "PreCompact", "PostCompact", "CwdChanged", "ElicitationResult",
@@ -3233,6 +3399,17 @@ def build_parser():
     p.add_argument("--reset", action="store_true",
                    help="with --rebuild: drop open stop/backfill notes and replay every event")
     p.set_defaults(func=cmd_notes)
+
+    p = sub.add_parser("denials", help="list or dismiss recorded permission denials")
+    p.add_argument("--session", default=None, help="TOOL:ID: only this session's denials")
+    p.add_argument("--all", action="store_true", help="include dismissed denials")
+    p.add_argument("--json", action="store_true")
+    action = p.add_mutually_exclusive_group()
+    action.add_argument("--dismiss", nargs="+", type=int, metavar="ID", default=None,
+                        help="dismiss these denials")
+    action.add_argument("--dismiss-all", action="store_true",
+                        help="dismiss every open denial (only --session's with --session)")
+    p.set_defaults(func=cmd_denials)
 
     p = sub.add_parser("install-hooks")
     p.add_argument("--claude", action="store_true")

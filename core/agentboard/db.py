@@ -6,7 +6,7 @@ from pathlib import Path
 
 DB_FILENAME = "agentboard.db"
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _MIGRATIONS = {
     1: """
@@ -160,6 +160,15 @@ _MIGRATIONS = {
     """,
     9: """
     ALTER TABLE sessions ADD COLUMN permission_mode TEXT;
+    """,
+    # Permission denials in the dashboard: clearing a denial sets
+    # dismissed_at and keeps its row (compaction still removes it after
+    # compact_days). The partial index keeps the snapshot's open-denials
+    # query (cli._OPEN_DENIALS_SQL) off a full scan of events.
+    10: """
+    ALTER TABLE events ADD COLUMN dismissed_at TEXT;
+    CREATE INDEX idx_events_denials ON events(tool, session_id, ts)
+        WHERE event = 'PermissionDenied';
     """,
 }
 

@@ -203,6 +203,7 @@ enum HelpContent {
                 "The search box in the toolbar filters the session list together with the state sidebar and the **Tool** (All Tools, Claude, Codex) and **Project** pickers.",
                 "The sidebar badges, including **All**, count the sessions left after the pickers and the query, so they always match the list.",
                 "When the filters hide a session or update that needs you, a red line under the sidebar says how many, with a **Clear** button that resets the search and both pickers and selects **All**.",
+                "In the **Denials** view a plain word also matches each permission denial's tool, reason and MCP server. The session list and the state badges never match denial text.",
             ]),
         ])
 
@@ -216,6 +217,7 @@ enum HelpContent {
             .bullets([
                 "**All** and one entry per state (Needs you, Interrupted, Review, Running, Unconcluded, Snoozed, Done), each with a count of the sessions the filters keep. Select one to list only that state.",
                 "**Updates** shows how many open updates the filters keep.",
+                "**Denials**, below Done, counts the permission denials the filters keep (see below).",
                 "A red warning with **Clear** appears when the filters hide something that needs you.",
                 "At the bottom, the color key for the row dots, and under it the **plan usage** lines (the same as the popover footer's, one per source that has numbers).",
             ]),
@@ -240,7 +242,15 @@ enum HelpContent {
                 "**Action bar**: **Focus** brings the terminal tab to the front, switching to its desktop (verified with iTerm2; expected, not yet verified, for Apple Terminal); **Resume** opens a new terminal tab running `claude --resume <id>` or `codex resume <id>` in the session's directory (shown once its process has exited); **Copy Resume Command** copies that command; **Mark Done** hides the session (**Reopen** brings a done one back); **Snooze 1d** hides it for 24 hours.",
                 "**Metadata**: project, directory, branch, when it started, last updated and ended, whether its process is alive, and **Permissions** (the Claude Code permission mode as reported, such as `plan` or `acceptEdits`; a dash when none is known, as for Codex); then, once known, **Model** (the full model id) and **Context** (the tokens its latest request sent, and how long ago that was measured). Both refresh when a turn finishes.",
                 "**Links**: every PR, ticket and URL with its state, including merged and closed PRs the row buttons hide, and **awaits you** on a PR waiting for your review. Click one to open it.",
-                "**First prompt**, **Last prompt**, the session's **Updates** (each with Dismiss), and the **Last assistant message**.",
+                "**First prompt**, **Last prompt**, the session's **Updates** (each with Dismiss), its **Permission denials** (each with an x, and **Dismiss All** when there are several), and the **Last assistant message**.",
+            ]),
+            .heading("Permission denials"),
+            .paragraph("When Claude Code's auto mode blocks a tool call, the hook records a permission denial. Select **Denials** in the sidebar to list the open ones, newest first, in place of the session list: each row shows the session's project and title, the blocked tool (an MCP tool as `server › tool`), the reason Claude Code gave (usually a category such as Irreversible Local Destruction), a **subagent** tag when a subagent made the call, and how long ago. The search box and the pickers narrow the list."),
+            .bullets([
+                "**Click** a denial to show its session in the detail column; **double-click** (or Return) focuses a live session's terminal; **right-click** gives the session's action menu.",
+                "The **x** on a row (**Dismiss this denial**) clears it. The header's **Clear all** clears every open denial, including ones of hidden sessions; with a search or a picker set it reads **Clear matching** and clears only what the filters keep. A session's detail has **Dismiss All** for its own.",
+                "Denials are kept for 7 days (`compact_days`), cleared or not. They never change a session's state, never add an update, and never show in the popover or the menu bar icon.",
+                "From a script: `agentboard denials` lists them and `agentboard denials --dismiss ID` clears one.",
             ]),
         ])
 
@@ -343,7 +353,7 @@ enum HelpContent {
                 HelpRow(key: "`retitle_min_prompts`", value: "Integer ≥ 1, default `5`. New prompts since the last retitle before a session is retitled again."),
                 HelpRow(key: "`retitle_max_per_run`", value: "Integer ≥ 0, default `5`. At most this many sessions retitled per `refresh-links`; `0` turns it off."),
                 HelpRow(key: "`prune_days`", value: "Integer ≥ 0, default `90`. The daily `prune` deletes sessions idle this many days, with their events, links and updates, and dismissed updates older than this. A session with an open needs_you update, a PR awaiting you, an active snooze or a live process is never deleted. `0` never deletes."),
-                HelpRow(key: "`compact_days`", value: "Integer ≥ 0, default `7`. The daily `prune` deletes tool-use and subagent events older than this many days (prompts, replies and session start and end are kept). `0` never compacts."),
+                HelpRow(key: "`compact_days`", value: "Integer ≥ 0, default `7`. The daily `prune` deletes tool-use and subagent events, and permission denials, older than this many days (prompts, replies and session start and end are kept). `0` never compacts."),
                 HelpRow(key: "`log_level`", value: "`debug`, `info`, `warn` or `error`, default `info`. The diagnostic log's level; the `AGENTBOARD_LOG_LEVEL` environment variable wins over it."),
             ]),
             .heading("Example"),
@@ -395,6 +405,7 @@ enum HelpContent {
                 HelpRow(key: "`agentboard notes --dismiss ID ...`", value: "Dismiss these updates."),
                 HelpRow(key: "`agentboard notes --dismiss-all`", value: "Dismiss every open update; `--session` and `--kind` narrow it."),
                 HelpRow(key: "`agentboard notes --rebuild`", value: "Classify recorded messages the hook has not seen. `--days N` limits it to recent ones; `--reset` drops the updates it made itself and re-applies the current rules (never reopens a dismissed one)."),
+                HelpRow(key: "`agentboard denials`", value: "List open permission denials, newest first. `--session TOOL:ID`, `--all` (include dismissed), `--json`. `--dismiss ID ...` clears these; `--dismiss-all` clears every open one (`--session` narrows it). Clearing never changes a session's state."),
             ]),
             .heading("Data and links"),
             .keyValue([
@@ -464,8 +475,9 @@ enum HelpContent {
                 HelpRow(key: "Hooks", value: "Entries in `~/.claude/settings.json` and `~/.codex/hooks.json`, backed up before every change."),
                 HelpRow(key: "App settings", value: "The macOS defaults domain `io.github.agentboard`."),
             ]),
+            .paragraph("For a permission denial AgentBoard keeps the tool name, the MCP server and the reason Claude Code gives (its own wording, usually a category label, which can mention what was blocked). It never stores the tool's input."),
             .heading("How long it is kept"),
-            .paragraph("Once a day the app runs `agentboard prune --auto`. It deletes sessions idle for 90 days (`prune_days`) together with their events, links and updates, but never one that still has an open needs_you update, a PR awaiting you, an active snooze or a live process. Tool-use and subagent events, most of the database, are deleted after 7 days (`compact_days`) from every session; prompts, replies and session start and end stay. Dismissed updates go after `prune_days`. When enough space is free the database is vacuumed, at most once a week. Set either value to `0` in config.json to keep everything."),
+            .paragraph("Once a day the app runs `agentboard prune --auto`. It deletes sessions idle for 90 days (`prune_days`) together with their events, links and updates, but never one that still has an open needs_you update, a PR awaiting you, an active snooze or a live process. Tool-use and subagent events, most of the database, are deleted after 7 days (`compact_days`) from every session, and so are permission denials; prompts, replies and session start and end stay. Dismissed updates go after `prune_days`. When enough space is free the database is vacuumed, at most once a week. Set either value to `0` in config.json to keep everything."),
             .paragraph("Besides its own data directory, AgentBoard reads only Claude Code's and Codex's files under `~/.claude` and `~/.codex` (transcripts and rollouts, the session registry, and Claude Code's plan-usage cache `rate-limits.json`) and each session's git branch."),
             .heading("Network"),
             .paragraph("Only `agentboard refresh-links` uses the network, and only through tools you set up: the GitHub CLI `gh` (PRs and their reviews), the provider commands in config.json, and the retitle command (by default the local `claude` CLI, which sends a short summary of a session's recent prompts and replies to the model). The snapshot the app polls never touches the network. Set `\"retitle_command\": null` to turn retitling off."),

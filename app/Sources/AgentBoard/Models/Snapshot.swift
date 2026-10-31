@@ -54,6 +54,8 @@ struct Counts: Codable, Sendable, Equatable {
     var done: Int = 0
     /// Open retained notes across the sessions the snapshot emits.
     var notes: Int = 0
+    /// Open permission denials across the sessions the snapshot emits.
+    var denials: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case needsYou = "needs_you"
@@ -64,6 +66,7 @@ struct Counts: Codable, Sendable, Equatable {
         case snoozed
         case done
         case notes
+        case denials
     }
 
     init() {}
@@ -82,6 +85,7 @@ struct Counts: Codable, Sendable, Equatable {
         snoozed = try c.decodeIfPresent(Int.self, forKey: .snoozed) ?? 0
         done = try c.decodeIfPresent(Int.self, forKey: .done) ?? 0
         notes = try c.decodeIfPresent(Int.self, forKey: .notes) ?? 0
+        denials = try c.decodeIfPresent(Int.self, forKey: .denials) ?? 0
     }
 }
 
@@ -155,6 +159,72 @@ struct Note: Codable, Sendable, Identifiable, Equatable, Hashable {
     var hasMore: Bool {
         text.split(whereSeparator: \.isNewline)
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count > 1
+    }
+}
+
+/// A recorded permission denial: auto mode's classifier blocked a tool
+/// call. Never a state or an update; listed in the dashboard's Denials row.
+/// See `agentboard denials`.
+struct Denial: Codable, Sendable, Identifiable, Equatable, Hashable {
+    var id: Int
+    var ts: String
+    var toolName: String
+    var reason: String
+    var mcpServer: String?
+    var subagent: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, ts
+        case toolName = "tool_name"
+        case reason
+        case mcpServer = "mcp_server"
+        case subagent
+    }
+
+    init(id: Int, ts: String, toolName: String, reason: String, mcpServer: String? = nil,
+         subagent: Bool = false) {
+        self.id = id
+        self.ts = ts
+        self.toolName = toolName
+        self.reason = reason
+        self.mcpServer = mcpServer
+        self.subagent = subagent
+    }
+
+    /// Only `id` is required; every other field degrades to a default.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        ts = ((try? c.decodeIfPresent(String.self, forKey: .ts)) ?? nil) ?? ""
+        toolName = ((try? c.decodeIfPresent(String.self, forKey: .toolName)) ?? nil) ?? ""
+        reason = ((try? c.decodeIfPresent(String.self, forKey: .reason)) ?? nil) ?? ""
+        let server = (try? c.decodeIfPresent(String.self, forKey: .mcpServer)) ?? nil
+        mcpServer = server?.isEmpty == false ? server : nil
+        subagent = ((try? c.decodeIfPresent(Bool.self, forKey: .subagent)) ?? nil) ?? false
+    }
+
+    var date: Date? { ISO8601DateParsing.date(from: ts) }
+
+    /// `mcp__srv__delete_issue` from server `srv` reads `srv › delete_issue`;
+    /// anything else as recorded.
+    var toolLabel: String {
+        if let server = mcpServer {
+            let prefix = "mcp__\(server)__"
+            if toolName.hasPrefix(prefix), toolName.count > prefix.count {
+                return "\(server) › \(toolName.dropFirst(prefix.count))"
+            }
+        }
+        return toolName.isEmpty ? "Unknown tool" : toolName
+    }
+
+    /// The reason without one pair of surrounding brackets (Claude Code
+    /// writes categories as `[External System Writes]`); "Denied" when empty.
+    var reasonLabel: String {
+        var text = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("["), text.hasSuffix("]"), text.count >= 2 {
+            text = String(text.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text.isEmpty ? "Denied" : text
     }
 }
 
@@ -277,6 +347,10 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     /// `bypassPermissions`, or a newer one). Nil for Codex, older CLIs and
     /// rows no hook has touched since the upgrade.
     var permissionMode: String?
+    /// Open permission denials, newest first (the CLI caps the list at 20).
+    var denials: [Denial] = []
+    /// Open permission denials, uncapped.
+    var denialsCount: Int = 0
 
     var id: String { key }
 
@@ -309,6 +383,8 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         case contextTokens = "context_tokens"
         case contextAt = "context_at"
         case permissionMode = "permission_mode"
+        case denials
+        case denialsCount = "denials_count"
     }
 
     /// The CLI emits `null` for cwd/project/resume_command when a session's
@@ -357,6 +433,10 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         contextTokens = (try? c.decodeIfPresent(Int.self, forKey: .contextTokens)) ?? nil
         contextAt = (try? c.decodeIfPresent(String.self, forKey: .contextAt)) ?? nil
         permissionMode = (try? c.decodeIfPresent(String.self, forKey: .permissionMode)) ?? nil
+        // One bad denial drops only itself; a bad count falls back to the list.
+        denials = (try? c.decodeIfPresent(LenientList<Denial>.self, forKey: .denials))?.items ?? []
+        denialsCount = ((try? c.decodeIfPresent(Int.self, forKey: .denialsCount)) ?? nil)
+            ?? denials.count
     }
 
     static func == (lhs: Session, rhs: Session) -> Bool {
@@ -369,6 +449,7 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
             && lhs.model == rhs.model && lhs.contextTokens == rhs.contextTokens
             && lhs.contextAt == rhs.contextAt
             && lhs.permissionMode == rhs.permissionMode
+            && lhs.denialsCount == rhs.denialsCount && lhs.denials == rhs.denials
     }
     func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
