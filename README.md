@@ -196,8 +196,10 @@ the model the session last ran and its context size. [More](docs/REFERENCE.md#pl
 request, a PR awaiting you, an active snooze or a live process, and it compacts tool-use events
 older than a week. [More](docs/REFERENCE.md#data)
 
-**Jump to the terminal.** Clicking a row focuses its tab in iTerm2 or Apple Terminal. For other
-terminals AgentBoard brings the terminal app to the front.
+**Jump to the terminal.** Clicking a row focuses its tab in iTerm2 or Apple Terminal, switching to
+the desktop (Space) its window is on (verified with iTerm2 so far); when that doesn't happen, the
+dashboard opens with the reason and a button for the setting that fixes it. For other terminals AgentBoard brings the terminal app
+to the front.
 [More](docs/REFERENCE.md#links--integrations)
 
 ## Hooking in your own tools
@@ -232,7 +234,7 @@ model. Set `"retitle_command": null` in
 
 - The app has a built-in guide: gear menu → **AgentBoard Help**. Its **Diagnostics and
   troubleshooting** topic covers the common problems (no sessions, missing Codex sessions, no PR
-  buttons, the wrong tab focused).
+  buttons, the wrong tab focused, focus staying on this desktop).
 - A banner under the popover's search field says when something is wrong, with **Open log**.
 - `agentboard logs` prints the diagnostic log; `agentboard logs --grep cli.focus` explains a
   click that focused the wrong tab.

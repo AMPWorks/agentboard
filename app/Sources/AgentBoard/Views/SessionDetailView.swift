@@ -98,7 +98,7 @@ struct SessionDetailView: View {
     private var actionBar: some View {
         HStack {
             if session.isFocusable {
-                Button("Focus") { Task { await store.focus(session) } }
+                Button("Focus") { Task { await store.focusOrShowDashboard(session) } }
                     .help(SessionActionHelp.focus)
             }
             if session.resumeAvailable {

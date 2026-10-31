@@ -219,7 +219,8 @@ final class SnapshotStore: ObservableObject {
     /// Shows a failed action in the banner; it clears itself after
     /// `StoreStatus.actionErrorLifetime` unless a newer one replaced it.
     private func recordActionError(_ action: String, _ error: Error) {
-        let entry = ActionError(action: action, message: error.localizedDescription, at: Date())
+        let entry = ActionError(action: action, message: error.localizedDescription, at: Date(),
+                                remedy: (error as? FocusError)?.remedy)
         lastActionError = entry
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(StoreStatus.actionErrorLifetime))
@@ -286,6 +287,23 @@ final class SnapshotStore: ObservableObject {
     @discardableResult
     func focus(_ session: Session) async -> Bool {
         await perform("focus", session) { try await cli.focus(tool: session.tool, sessionId: session.sessionId) }
+    }
+
+    /// Focus from a click (popover row, dashboard double-click/Return, the
+    /// Focus menu item and button, a notification). On failure the terminal
+    /// may already be in front (it is still brought forward when the tab is
+    /// missing or macOS stayed on this desktop), so open the dashboard on the
+    /// session in front of it: its banner says what went wrong.
+    func focusOrShowDashboard(_ session: Session) async {
+        guard await !focus(session) else { return }
+        requestSelection(session.key)
+        DashboardWindowController.show()
+    }
+
+    /// The banner's settings button for a failed focus.
+    func openSettings(for remedy: FocusRemedy) {
+        log.notice("open settings remedy=\(String(describing: remedy), privacy: .public)")
+        NSWorkspace.shared.open(remedy.settingsURL)
     }
 
     /// Actually resumes the session (opens a new terminal tab running the resume command).

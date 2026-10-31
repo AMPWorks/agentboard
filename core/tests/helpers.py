@@ -6,10 +6,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agentboard import db  # noqa: E402
+from agentboard import spaces  # noqa: E402
 
 
 class AgentBoardTestCase(unittest.TestCase):
@@ -36,6 +38,14 @@ class AgentBoardTestCase(unittest.TestCase):
             os.environ.pop(key, None)
         os.environ["AGENTBOARD_HOME"] = str(self.agentboard_home)
         os.environ["HOME"] = str(self.fake_home)
+
+        # No test may read the real window list, process list or Dock defaults:
+        # `agentboard focus` tests inject fakes, and anything that forgets
+        # to fails loudly here instead of probing this Mac.
+        for name in ("window_states", "_run_defaults", "_run_ps"):
+            patcher = mock.patch.object(spaces, name, side_effect=AssertionError(f"unmocked {name}"))
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
         self.conn = db.connect()
         self.addCleanup(self.conn.close)

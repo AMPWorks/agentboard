@@ -5,7 +5,7 @@ import AppKit
 /// detail view's action bar and the row hover buttons, so each action is
 /// described the same way everywhere.
 enum SessionActionHelp {
-    static let focus = "Bring this session's terminal tab to the front"
+    static let focus = "Bring this session's terminal tab to the front, switching to its desktop"
     static let resume = "Open a new terminal tab that resumes this session"
     static let copyResume = "Copy the command that resumes this session"
     static let markDone = "Mark this session done and hide it; a new prompt reopens it"
@@ -25,7 +25,7 @@ struct SessionContextMenu: View {
     var body: some View {
         Group {
             if session.isFocusable {
-                Button("Focus") { Task { await store.focus(session) } }
+                Button("Focus") { Task { await store.focusOrShowDashboard(session) } }
                     .help(SessionActionHelp.focus)
             }
             if session.resumeAvailable {

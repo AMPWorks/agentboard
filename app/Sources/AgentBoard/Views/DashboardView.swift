@@ -197,7 +197,7 @@ struct DashboardView: View {
             }
         } primaryAction: { keys in
             guard let session = singleSelectedSession(in: keys), session.isFocusable else { return }
-            Task { await store.focus(session) }
+            Task { await store.focusOrShowDashboard(session) }
         }
     }
 

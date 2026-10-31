@@ -352,3 +352,45 @@ summary line, or the failing lines plus a log path under `app/build/`, with `--v
 everything. That shortens `install.sh`'s build step to a line or two, and `AGENTBOARD_VERBOSE=1`
 brings the full output back. Stub-toolchain tests cover a working default SDK, a full Xcode
 layout and the fallback layout; only the last was exercised on real hardware.
+
+## 2026-10-31 01:35:24 UTC — Focus follows the window to its desktop, and says when it can't
+
+"Jump to the session" could leave the user on the current desktop (Space) while the terminal
+window holding the session sat on another one. The focus AppleScripts selected the tab, session
+and window, then activated the app. Run from inside the terminal's own process tree that order
+switches desktops, which made the bug look intermittent; run from another process (the app, a
+notification click) it brings the app forward and leaves the window where it is. The script still
+answered `found`, so the CLI exited 0 and the log recorded a match for a jump that never happened.
+A pre-implementation experiment compared the candidate approaches. Activating first, waiting until
+the app is frontmost and only then selecting the window reached a window on another desktop, a
+minimized window and a fullscreen window, with no new permission (tried with iTerm2 on one display,
+with the Desktop & Dock "switch to a Space with open windows" setting on; Apple Terminal, a second
+display and the setting off are expected to behave the same but were not tried). Accessibility-based raising, the
+minimize-and-restore trick and private window-server calls were therefore not built.
+
+Both scripts now remember the matched window by its id and address it as `window id N` after
+activation: the window list is ordered front to back, so a positional reference silently points at
+another window once activation reorders it, which could also focus the wrong tab. Tabs and sessions
+are still addressed by position, so each select first checks that the position still holds the
+matched session and is skipped if a tab was closed or moved meanwhile. The reply carries
+the window id, and a new `spaces.py` reads the public CoreGraphics window list (window numbers,
+owner pids, layers, bounds; no titles, so no Screen Recording permission) to tell where the window
+was before (`space_before`) and whether it came on screen within 1.5 s (`onscreen_after`). A probe
+that can't tell is "unknown" and never a failure. The "before" read runs on a thread alongside the
+script, so a click doesn't wait for a cold CoreGraphics load up front, and every read is
+time-bounded, so a slow or wedged window server gives "unknown" instead of a hang. A window counts
+only when the list says the terminal app's own process (found with `ps`) owns it: the window id
+from Apple Terminal's scripting was never checked against the CoreGraphics one, and a collision
+with another app's window must not decide the outcome. A window still off screen becomes
+`space_not_reached` (exit 5), and only then is the Dock's "switch to a Space with open windows"
+default read, to pick the advice. A refused Apple event (-1743) is `needs_automation` (exit 4)
+instead of a silent `open -a` fallback, and a missed tab now exits 1 even though the terminal still
+comes forward. Every failure prints one stderr line that is also the `msg=` of its single warn-level
+`cli.focus` line.
+
+In the app, a focus failure's stderr becomes the banner text (without "Exited N:"), exit codes 4
+and 5 add a button that opens the matching System Settings pane, and every focus entry point (row
+click, double-click, menu item, action bar, notification) opens the dashboard on the session when
+the jump fails, since the popover has closed and the terminal may be in front by then. Tests use
+injected window probes, `defaults` runners and clocks; a guard in the shared test base refuses any
+unmocked probe, and only a read-only smoke test lists real windows.

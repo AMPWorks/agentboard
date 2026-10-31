@@ -308,7 +308,13 @@ the .app's Resources, then PATH, then UserDefaults override).
 
 Terminal focus: support iTerm2 (ITERM_SESSION_ID) and Apple Terminal (TERM_SESSION_ID / tty via
 AppleScript); for other terminals just activate the app by TERM_PROGRAM / bundle; report
-`can_focus` accordingly. Resume opens in the same terminal app the session used when possible.
+`can_focus` accordingly. Focus is meant to follow the window to its desktop (Space): the script
+activates the app first and only then selects the matched window by its id, and the CLI then
+checks with the public CoreGraphics window list that the window really came on screen, reporting
+`space_not_reached` when it didn't (added after the original spec; no Accessibility or Screen
+Recording permission). Verified with iTerm2 on one display with the Desktop & Dock "switch to a
+Space with open windows" setting on; Apple Terminal, a second display and the setting off are
+expected to work but not verified. Resume opens in the same terminal app the session used when possible.
 
 ## Backfill (`agentboard backfill --days 30`)
 
@@ -380,7 +386,7 @@ agentboard status [--text T] [--ttl MIN] [--model ID] [--context-tokens N] [--se
 agentboard title --text T [--session TOOL:ID]   name a session (a user's custom title is kept)
 agentboard install-hooks [--claude] [--codex] [--dry-run]
 agentboard uninstall-hooks [--claude] [--codex]
-agentboard focus <tool> <session_id>         activate iTerm2 tab by ITERM_SESSION_ID (osascript)
+agentboard focus <tool> <session_id>         focus the iTerm2/Terminal tab, on another desktop too if it can (exit 0/1/4/5)
 agentboard resume <tool> <session_id> [--print]  open new iTerm2 tab running resume cmd
 agentboard prune [--days N] [--compact-days N] [--dry-run] [--auto] [--vacuum]   retention
 agentboard logs [--since 1h] [--grep T] [--lines N] [--app]   print the diagnostic log
@@ -398,9 +404,14 @@ Diagnostic log (added after the original spec): every subcommand, hook and app a
 (level from `AGENTBOARD_LOG_LEVEL`, else `config.json` `log_level`, else `info`). It rotates
 once to `agentboard.log.1` at 2 MB (never a `.2`), never raises, and `snapshot`/`paths` stay at
 debug unless they fail or run over 1 s. `focus` logs an `outcome` (`matched_uuid`, `matched_tty`,
-`matched_unknown`, `activated_only`, `activate_failed`, `not_found`, `timeout`, `no_terminal`,
-`unsupported_terminal`; osascript/`open -a` calls are bounded at 10 s, and a timeout exits 1); its other
-exit codes are unchanged. `hook-errors.log` is still written as described under Hook.
+`matched_unknown`, `activated_only`, `activate_failed`, `not_found`, `needs_automation`,
+`space_not_reached`, `timeout`, `no_terminal`, `unsupported_terminal`; osascript/`open -a` calls are
+bounded at 10 s) plus `window_id`, `app_pid`, `space_before`, `onscreen_after`, `onscreen_ms`, `reselect_skipped` when
+a tab moved before it could be selected, and, on
+`space_not_reached`, `swoosh`. It exits 0 when the window reached the screen (or that can't be
+checked), 1 for a failure (tab not found and only the app brought forward, `not_found`, `timeout`,
+no terminal), 4 for `needs_automation` and 5 for `space_not_reached`; a failure's stderr line is
+the `msg=` of its one warn-level `cli.focus` line. The generic `open -a` path still exits 0. `hook-errors.log` is still written as described under Hook.
 
 install-hooks: back up the file first (`<file>.agentboard-bak-<ts>`), then append one matcher
 group `{"hooks":[{"type":"command","command":"<abs path>/bin/agentboard hook --tool claude",
@@ -432,7 +443,7 @@ approval within 1 s of the prompt leaves the row needs-you until that tool's `Po
 
 Resume commands: Claude `cd <cwd> && claude --resume <id>`; Codex `cd <cwd> && codex resume <id>`.
 Focus: iTerm `ITERM_SESSION_ID` is `w0t1p0:<UUID>`; match `unique id` of iTerm sessions to UUID,
-then select the tab/window and activate iTerm. Exit non-zero with message if not found.
+activate iTerm, then select that window (by id), tab and session. Exit non-zero with message if not found.
 
 ## Snapshot JSON contract (consumed by the Swift app)
 
