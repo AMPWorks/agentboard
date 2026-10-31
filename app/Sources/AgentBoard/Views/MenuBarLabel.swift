@@ -108,19 +108,15 @@ struct MenuBarLabel: View {
     /// A clicked notification: focus the session's terminal when it has
     /// one, otherwise open the dashboard with the session selected (it
     /// selects a key a later snapshot brings in, too). A focus that fails
-    /// at runtime (the tab was closed, the terminal quit) falls back to
-    /// the dashboard too, so the click never looks dead.
+    /// at runtime (the tab was closed, the terminal quit, macOS stayed on
+    /// this desktop) opens the dashboard too, with the reason in its banner,
+    /// so the click never looks dead.
     private static func openSession(_ key: String, store: SnapshotStore) {
-        let showInDashboard = {
+        if let session = store.snapshot.sessions.first(where: { $0.key == key }), session.isFocusable {
+            Task { await store.focusOrShowDashboard(session) }
+        } else {
             store.requestSelection(key)
             DashboardWindowController.show()
-        }
-        if let session = store.snapshot.sessions.first(where: { $0.key == key }), session.isFocusable {
-            Task {
-                if await !store.focus(session) { showInDashboard() }
-            }
-        } else {
-            showInDashboard()
         }
     }
 

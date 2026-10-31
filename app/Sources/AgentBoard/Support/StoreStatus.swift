@@ -7,6 +7,8 @@ struct ActionError: Equatable, Sendable {
     let action: String
     let message: String
     let at: Date
+    /// The settings pane that fixes it (a failed focus only).
+    var remedy: FocusRemedy? = nil
 }
 
 /// The one-line banner the popover and the dashboard show when the CLI or
@@ -25,6 +27,8 @@ enum StoreStatus {
         let detail: String?
         /// True for an action error, which the user can dismiss.
         let isActionError: Bool
+        /// A settings pane the banner offers a button for.
+        var remedy: FocusRemedy? = nil
     }
 
     /// A `refresh()` still in flight after this long means the CLI hangs.
@@ -65,7 +69,7 @@ enum StoreStatus {
         }
         if let error = lastActionError, isLive(error, now: now) {
             return Banner(text: "\(error.action) failed: \(oneLine(error.message))", severity: .warning,
-                          detail: error.message, isActionError: true)
+                          detail: error.message, isActionError: true, remedy: error.remedy)
         }
         return nil
     }

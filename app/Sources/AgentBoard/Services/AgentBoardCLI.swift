@@ -112,7 +112,13 @@ struct AgentBoardCLI: Sendable {
             return
         }
         guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
-        _ = try await runner.run(executable: executablePath, arguments: ["focus", tool, sessionId])
+        do {
+            _ = try await runner.run(executable: executablePath, arguments: ["focus", tool, sessionId])
+        } catch {
+            // The CLI's stderr is already a sentence for the banner; its exit
+            // code says which settings pane (if any) fixes it.
+            throw FocusError.from(error)
+        }
     }
 
     @discardableResult

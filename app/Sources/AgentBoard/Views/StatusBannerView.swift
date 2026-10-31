@@ -30,6 +30,11 @@ struct StatusBannerView: View {
                 .truncationMode(.middle)
                 .help(banner.detail ?? banner.text)
             Spacer(minLength: 0)
+            if let remedy = banner.remedy {
+                Button(remedy.buttonTitle) { store.openSettings(for: remedy) }
+                    .controlSize(.small)
+                    .help(remedy.help)
+            }
             Button("Open log") { store.revealLog() }
                 .controlSize(.small)
                 .disabled(!store.logFileExists)

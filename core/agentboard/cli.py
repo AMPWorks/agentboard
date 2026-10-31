@@ -12,6 +12,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from . import backfill as backfill_mod
 from . import codexmap
@@ -2084,49 +2085,128 @@ def cmd_map_codex(args):
 
 # -- focus / resume -------------------------------------------------------------
 
+# Both focus scripts follow one order, which is what makes a window on
+# another desktop (Space) come forward when `agentboard focus` runs outside
+# the terminal's own process tree (the app, a notification click): find the
+# session and remember its window by id, `activate` the app, wait until it is
+# frontmost, and only then select that window, its tab and its session. A
+# window selected before `activate` stays on its desktop. Windows are always
+# addressed as `window id N`, never by position: the window list is ordered
+# front to back, so a positional reference points at another window once
+# `activate` reorders it. The reply is `found:<how> <window id>`, plus `min`
+# when the window was minimized, or `found:<how> hotkey` for an iTerm2 hotkey
+# window (it floats over every desktop, so there is nothing to check).
+# Tabs and sessions are still addressed by position, and up to about a
+# second passes between the scan and the selects (the frontmost wait), so
+# each select first checks that the position still holds the matched
+# session (its unique id; Terminal: its tty) and is skipped if a tab was
+# closed or moved meanwhile, rather than selecting a neighbour; the reply
+# then ends in `moved`, so the log shows the tab may not be selected.
 _ITERM_FOCUS_APPLESCRIPT = """
 on run argv
   set targetId to item 1 of argv
   set targetTty to item 2 of argv
   tell application "iTerm2"
-    repeat with w in windows
-      repeat with t in tabs of w
-        repeat with s in sessions of t
-          if targetId is not "" and (unique id of s) is equal to targetId then
-            tell t to select
-            tell s to select
-            tell w to select
-            activate
-            delay 0.15
-            tell t to select
-            tell s to select
-            return "found:uuid"
-          end if
-        end repeat
-      end repeat
-    end repeat
-    if targetTty is not "" then
+    set how to ""
+    set wid to 0
+    set kk to 0
+    set jj to 0
+    set sid to ""
+    set skipped to false
+    if targetId is not "" then
       repeat with w in windows
+        set k to 0
         repeat with t in tabs of w
+          set k to k + 1
+          set j to 0
           repeat with s in sessions of t
+            set j to j + 1
+            if how is "" and (unique id of s) is equal to targetId then
+              set how to "uuid"
+              set wid to id of w
+              set kk to k
+              set jj to j
+              set sid to unique id of s
+            end if
+          end repeat
+        end repeat
+        if how is not "" then exit repeat
+      end repeat
+    end if
+    if how is "" and targetTty is not "" then
+      repeat with w in windows
+        set k to 0
+        repeat with t in tabs of w
+          set k to k + 1
+          set j to 0
+          repeat with s in sessions of t
+            set j to j + 1
             try
-              if (tty of s) is equal to targetTty then
-                tell t to select
-                tell s to select
-                tell w to select
-                activate
-                delay 0.15
-                tell t to select
-                tell s to select
-                return "found:tty"
+              if how is "" and (tty of s) is equal to targetTty then
+                set how to "tty"
+                set wid to id of w
+                set kk to k
+                set jj to j
+                set sid to unique id of s
               end if
             end try
           end repeat
         end repeat
+        if how is not "" then exit repeat
       end repeat
     end if
+    if how is "" then return "not_found"
+    set w to window id wid
+    set wasMin to false
+    try
+      set wasMin to miniaturized of w
+    end try
+    set isHotkey to false
+    try
+      set isHotkey to is hotkey window of w
+    end try
+    activate
+    set waited to 0
+    repeat while frontmost is false and waited < 20
+      delay 0.05
+      set waited to waited + 1
+    end repeat
+    tell w to select
+    set stillThere to false
+    try
+      set stillThere to (unique id of session jj of tab kk of w) is sid
+    end try
+    if stillThere then
+      tell tab kk of w to select
+      tell session jj of tab kk of w to select
+    else
+      set skipped to true
+    end if
+    if wasMin then
+      try
+        if miniaturized of w then set miniaturized of w to false
+      end try
+    end if
+    delay 0.15
+    set stillThere to false
+    try
+      set stillThere to (unique id of session jj of tab kk of w) is sid
+    end try
+    if stillThere then
+      tell tab kk of w to select
+      tell session jj of tab kk of w to select
+    else
+      set skipped to true
+    end if
   end tell
-  return "not_found"
+  if isHotkey then
+    set reply to "found:" & how & " hotkey"
+  else
+    set reply to "found:" & how & " " & (wid as text)
+    if wasMin then set reply to reply & " min"
+  end if
+  if skipped then set reply to reply & " moved"
+  return reply
 end run
 """
 
@@ -2152,24 +2232,60 @@ _TERMINAL_FOCUS_APPLESCRIPT = """
 on run argv
   set targetTty to item 1 of argv
   tell application "Terminal"
+    set wid to 0
+    set kk to 0
+    set skipped to false
     if targetTty is not "" then
       repeat with w in windows
+        set k to 0
         repeat with t in tabs of w
+          set k to k + 1
           try
-            if (tty of t) is equal to targetTty then
-              set selected of t to true
-              set frontmost of w to true
-              activate
-              set selected of t to true
-              return "found"
+            if wid is 0 and (tty of t) is equal to targetTty then
+              set wid to id of w
+              set kk to k
             end if
           end try
         end repeat
+        if wid is not 0 then exit repeat
       end repeat
     end if
+    if wid is 0 then
+      activate
+      return "activated"
+    end if
+    set w to window id wid
+    set wasMin to false
+    try
+      set wasMin to miniaturized of w
+    end try
     activate
-    return "activated"
+    set waited to 0
+    repeat while frontmost is false and waited < 20
+      delay 0.05
+      set waited to waited + 1
+    end repeat
+    set index of w to 1
+    set frontmost of w to true
+    set stillThere to false
+    try
+      set stillThere to (tty of tab kk of w) is targetTty
+    end try
+    if stillThere then
+      set selected of tab kk of w to true
+    else
+      set skipped to true
+    end if
+    if wasMin then
+      try
+        if miniaturized of w then set miniaturized of w to false
+      end try
+    end if
   end tell
+  set reply to "found " & (wid as text)
+  if wasMin then set reply to reply & " min"
+  if skipped then set reply to reply & " moved"
+  return reply
 end run
 """
 
@@ -2254,9 +2370,9 @@ def _activate_app(term_program, run_osascript):
     return _run_bounded(run_osascript, ["open", "-a", app_name])
 
 
-# What the focus AppleScripts print, mapped to the logged `outcome`. A bare
-# "found" is what the iTerm script returned before it said which strategy
-# matched; an older script can't misreport which one ran.
+# What the focus AppleScripts print first, mapped to the logged `outcome`. A
+# bare "found" is what the iTerm script returned before it said which
+# strategy matched; an older script can't misreport which one ran.
 _ITERM_FOCUS_RESULTS = {
     "found:uuid": "matched_uuid",
     "found:tty": "matched_tty",
@@ -2266,6 +2382,96 @@ _TERMINAL_FOCUS_RESULTS = {
     "found": "matched_tty",
     "activated": "activated_only",
 }
+
+# How long a matched window gets to show up on screen after the focus script
+# returns (a desktop switch animates for a few hundred ms). Separate from,
+# and never added to, OSASCRIPT_TIMEOUT_SECS.
+FOCUS_ONSCREEN_WAIT_SECS = 1.5
+# The pre-probe behind `space_before` runs on a thread while the focus
+# script does (the script takes a few hundred ms; a cold probe about 100).
+# Once the script has matched, its answer is waited for at most this long;
+# a probe still running by then gives `space_before=unknown`.
+FOCUS_PRE_PROBE_JOIN_SECS = 0.5
+
+
+class _PreProbe:
+    """What the onscreen check needs, read on daemon threads while the focus
+    script runs: the terminal app's pids (`ps`) and the window list (for
+    space_before). `join` waits for both at most FOCUS_PRE_PROBE_JOIN_SECS
+    in all; whatever hasn't answered by then is None (unknown)."""
+
+    def __init__(self, app_name, probe, find_app_pids, thread_factory):
+        from . import spaces
+
+        self.pids = spaces.Background(lambda: find_app_pids(app_name), thread_factory)
+        self.windows = spaces.Background(probe, thread_factory)
+
+    def join(self, clock):
+        deadline = clock() + FOCUS_PRE_PROBE_JOIN_SECS
+        pids = self.pids.result(deadline - clock())
+        before = self.windows.result(deadline - clock())
+        return pids, before
+
+# Exit codes of `agentboard focus` beyond 0 (reached, or can't tell) and 1
+# (any other failure). 2 is argparse's.
+FOCUS_EXIT_NEEDS_AUTOMATION = 4
+FOCUS_EXIT_SPACE_NOT_REACHED = 5
+
+
+class _FocusReply(NamedTuple):
+    outcome: str
+    window_id: int | None = None
+    minimized: bool = False
+    hotkey: bool = False
+    reselect_skipped: bool = False
+
+
+def _parse_focus_reply(out, table):
+    """A focus script's reply (`found:uuid 12345 min`, `found:tty hotkey`,
+    `found 678 moved`, `activated`, a legacy bare `found`/`found:uuid`) as a
+    `_FocusReply`, or None when the first word isn't in `table`."""
+    words = out.split() if isinstance(out, str) else []
+    outcome = table.get(words[0]) if words else None
+    if not outcome:
+        return None
+    window_id = next((int(word) for word in words[1:] if word.isdigit()), None)
+    flags = words[1:]
+    return _FocusReply(outcome, window_id, "min" in flags, "hotkey" in flags, "moved" in flags)
+
+
+def _space_before(reply, before, pids):
+    """Where the matched window was before the script ran: `minimized` (the
+    script said so), `current` (on screen), `other` (listed, off screen:
+    another desktop, a fullscreen Space, or hidden), or `unknown`, which
+    includes a window number that one of the terminal's `pids` doesn't own."""
+    if reply.minimized:
+        return "minimized"
+    state = before.get(reply.window_id) if before is not None else None
+    if state is None or not pids or state.pid not in pids:
+        return "unknown"
+    return "current" if state.onscreen else "other"
+
+
+def _space_not_reached_message(swoosh):
+    if swoosh is False:
+        return ("Found the session's tab, but macOS stayed on this desktop. Turn on "
+                "System Settings > Desktop & Dock > 'When switching to an application, "
+                "switch to a Space with open windows'.")
+    return ("Found the session's tab, but macOS didn't switch to the desktop holding it; "
+            "open it from Mission Control.")
+
+
+def _automation_message(app_name):
+    return (f"AgentBoard isn't allowed to control {app_name}: "
+            "System Settings > Privacy & Security > Automation")
+
+
+def _tab_missed_message(app_name, outcome, script_failed):
+    if outcome == "activate_failed":
+        return f"Couldn't find this session's tab in {app_name}, and couldn't bring {app_name} to the front."
+    if script_failed:
+        return f"Couldn't select this session's tab in {app_name} (its AppleScript failed). Brought {app_name} to the front."
+    return f"Couldn't find this session's tab in {app_name}; it may have been closed. Brought {app_name} to the front."
 
 
 class _FocusTrace:
@@ -2303,12 +2509,22 @@ class _FocusTrace:
             self.fields["open_rc"] = rc
         return rc, out
 
-    def finish(self, outcome, level="info"):
-        diag.log(
-            level, "cli", "focus", **self.fields,
-            strategy=",".join(self.strategies) or None, outcome=outcome,
+    def finish(self, outcome, level="info", message=None):
+        """Write the one `cli.focus` line. With `message` (a failure), the
+        same text goes to stderr and into the line's `msg=` (`_report`)."""
+        summary = dict(
+            self.fields, strategy=",".join(self.strategies) or None, outcome=outcome,
             ms=diag.ms_since(self.started),
         )
+        if message:
+            _report(level, "focus", message, **summary)
+        else:
+            diag.log(level, "cli", "focus", **summary)
+
+    def failed(self, outcome, code, message):
+        """Finish a failed attempt at warn and return its exit code."""
+        self.finish(outcome, level="warn", message=message)
+        return code
 
 
 def _open_a_outcome(result):
@@ -2319,15 +2535,64 @@ def _open_a_outcome(result):
 
 
 def _focus_timed_out(trace, key):
-    # The summary line (outcome=timeout, osa_err) is the log record; the
-    # stderr text is for the app.
-    trace.finish("timeout", level="warn")
-    print(f"focusing the terminal for {key} timed out after {OSASCRIPT_TIMEOUT_SECS}s",
-          file=sys.stderr)
-    return 1
+    return trace.failed(
+        "timeout", 1,
+        f"focusing the terminal for {key} timed out after {OSASCRIPT_TIMEOUT_SECS}s",
+    )
 
 
-def cmd_focus(args, run_osascript=subprocess.run):
+def _focus_matched(trace, reply, pre_probe, probe, run_defaults, sleep, clock, thread_factory):
+    """The script matched the tab: check its window really came on screen.
+    0 when it did or when that can't be told, 5 (`space_not_reached`) when
+    it is still off screen after FOCUS_ONSCREEN_WAIT_SECS. `pre_probe` is
+    the `_PreProbe` read while the script ran. A window is only judged when
+    the window list says the terminal app owns it; otherwise, or when its
+    pid can't be found, the check reports unknown (0)."""
+    from . import spaces
+
+    if reply.reselect_skipped:  # the tab moved or closed before it was selected
+        trace.fields["reselect_skipped"] = 1
+    if reply.hotkey:
+        trace.fields["window_id"] = "hotkey"
+        trace.finish(reply.outcome)
+        return 0
+    if reply.window_id is None:  # an older script: nothing to check
+        trace.finish(reply.outcome)
+        return 0
+    pids, before = pre_probe.join(clock or time.monotonic)
+    trace.fields.update(
+        window_id=reply.window_id, app_pid=",".join(map(str, sorted(pids))) if pids else None,
+        space_before=_space_before(reply, before, pids),
+    )
+    if not pids:  # nothing to tell whose window that id is
+        trace.fields.update(onscreen_after=None, onscreen_ms=None)
+        trace.finish(reply.outcome)
+        return 0
+    onscreen, waited_ms = spaces.wait_onscreen(
+        reply.window_id, lambda: probe(pids=pids), FOCUS_ONSCREEN_WAIT_SECS,
+        sleep=sleep, clock=clock,
+        bounded=lambda fn, secs: spaces.bounded_call(fn, secs, thread_factory),
+    )
+    trace.fields.update(onscreen_after=onscreen, onscreen_ms=waited_ms)
+    if onscreen is not False:
+        trace.finish(reply.outcome)
+        return 0
+    swoosh = spaces.auto_swoosh(run_defaults)
+    trace.fields["swoosh"] = {True: "on", False: "off"}.get(swoosh, "unknown")
+    return trace.failed(
+        "space_not_reached", FOCUS_EXIT_SPACE_NOT_REACHED, _space_not_reached_message(swoosh),
+    )
+
+
+def cmd_focus(args, run_osascript=subprocess.run, window_probe=None, run_defaults=None,
+              sleep=None, clock=None, thread_factory=None, find_app_pids=None):
+    """Exit codes: 0 reached (or the window check couldn't tell), 1 failed
+    (tab not found, timeout, no terminal), 4 `needs_automation`, 5
+    `space_not_reached`. `window_probe`, `run_defaults`, `sleep`, `clock`,
+    `thread_factory` and `find_app_pids` replace spaces.window_states, the
+    `defaults` runner, time, threading.Thread and spaces.app_pids in tests."""
+    from . import spaces
+
     key = f"{args.tool}:{args.session_id}"
     trace = _FocusTrace(key)
     conn = db.connect()
@@ -2342,63 +2607,84 @@ def cmd_focus(args, run_osascript=subprocess.run):
     trace.identity(row)
     if not row or row["term_program"] not in TERM_PROGRAM_APP_NAMES:
         outcome = "unsupported_terminal" if row and row["term_program"] else "no_terminal"
-        trace.finish(outcome)
-        print(f"no terminal recorded for {key}", file=sys.stderr)
-        return 1
+        return trace.failed(outcome, 1, f"no terminal recorded for {key}")
 
     term_program = row["term_program"]
+    app_name = TERM_PROGRAM_APP_NAMES[term_program]
     tty = _tty_path(row["tty"])
+    probe = window_probe if window_probe is not None else spaces.window_states
     # Logged before the first osascript/open call, so a click whose
     # AppleScript hangs still leaves a line at the default level.
     diag.info("cli", "focus.begin", **trace.fields)
 
+    def matched(reply, pre_probe):
+        return _focus_matched(
+            trace, reply, pre_probe, probe, run_defaults, sleep, clock, thread_factory,
+        )
+
+    def start_pre_probe():
+        # Read alongside the script, so a click never waits for it up front.
+        return _PreProbe(app_name, probe, find_app_pids or spaces.app_pids, thread_factory)
+
     if term_program == "iTerm.app":
         unique_id = _iterm_unique_id(row["iterm_session_id"]) or ""
+        pre_probe = start_pre_probe()
         result = _run_bounded(
             run_osascript, ["osascript", "-e", _ITERM_FOCUS_APPLESCRIPT, unique_id, tty or ""],
         )
         rc, out = trace.tried("iterm_script", result, unique_id=unique_id or None, tty=tty)
         if isinstance(result, _TimedOut):
             return _focus_timed_out(trace, key)
-        outcome = _ITERM_FOCUS_RESULTS.get(out) if rc in (None, 0) else None
-        if outcome:
-            trace.finish(outcome)
-            return 0
+        reply = _parse_focus_reply(out, _ITERM_FOCUS_RESULTS) if rc in (None, 0) else None
+        if reply:
+            return matched(reply, pre_probe)
+        script_failed = rc not in (None, 0)
+        denied = script_failed and spaces.classify_osa_error(_stderr_text(result)) == "automation"
+        # Still bring the app forward, so the click visibly did something.
         fallback = _activate_app(term_program, run_osascript)
-        if fallback is not None:
-            trace.tried("open_a", fallback, app=TERM_PROGRAM_APP_NAMES[term_program])
-            if isinstance(fallback, _TimedOut):
-                return _focus_timed_out(trace, key)
-            trace.finish(_open_a_outcome(fallback))
-            return 0
-        trace.finish("unsupported_terminal")
-        print(f"iTerm session for {key} not found", file=sys.stderr)
-        return 1
+        trace.tried("open_a", fallback, app=app_name)
+        if isinstance(fallback, _TimedOut):
+            return _focus_timed_out(trace, key)
+        if denied:
+            return trace.failed(
+                "needs_automation", FOCUS_EXIT_NEEDS_AUTOMATION, _automation_message(app_name),
+            )
+        outcome = _open_a_outcome(fallback)
+        return trace.failed(outcome, 1, _tab_missed_message(app_name, outcome, script_failed))
 
     if term_program == "Apple_Terminal":
+        pre_probe = start_pre_probe()
         result = _run_bounded(
             run_osascript, ["osascript", "-e", _TERMINAL_FOCUS_APPLESCRIPT, tty or ""],
         )
         rc, out = trace.tried("terminal_script", result, tty=tty)
         if isinstance(result, _TimedOut):
             return _focus_timed_out(trace, key)
-        outcome = _TERMINAL_FOCUS_RESULTS.get(out) if rc in (None, 0) else None
-        if not outcome:
+        if rc not in (None, 0):
+            if spaces.classify_osa_error(_stderr_text(result)) == "automation":
+                return trace.failed(
+                    "needs_automation", FOCUS_EXIT_NEEDS_AUTOMATION, _automation_message(app_name),
+                )
+            return trace.failed(
+                "not_found", 1,
+                f"Couldn't focus this session's tab in {app_name}: its AppleScript failed.",
+            )
+        reply = _parse_focus_reply(out, _TERMINAL_FOCUS_RESULTS)
+        if reply is None:
             # rc 0 with an answer the CLI does not recognise is not a failure.
-            outcome = "not_found" if rc not in (None, 0) else "matched_unknown"
-        trace.finish(outcome)
-        return 0
+            trace.finish("matched_unknown")
+            return 0
+        if reply.outcome == "activated_only":
+            return trace.failed("activated_only", 1, _tab_missed_message(app_name, "activated_only", False))
+        return matched(reply, pre_probe)
 
+    # Any other terminal: `open -a` is all there is, and it can't miss a tab.
     fallback = _activate_app(term_program, run_osascript)
-    if fallback is not None:
-        trace.tried("open_a", fallback, app=TERM_PROGRAM_APP_NAMES[term_program])
-        if isinstance(fallback, _TimedOut):
-            return _focus_timed_out(trace, key)
-        trace.finish(_open_a_outcome(fallback))
-        return 0
-    trace.finish("unsupported_terminal")
-    print(f"no way to focus terminal for {key}", file=sys.stderr)
-    return 1
+    trace.tried("open_a", fallback, app=app_name)
+    if isinstance(fallback, _TimedOut):
+        return _focus_timed_out(trace, key)
+    trace.finish(_open_a_outcome(fallback))
+    return 0
 
 
 def cmd_resume(args, run_osascript=subprocess.run):

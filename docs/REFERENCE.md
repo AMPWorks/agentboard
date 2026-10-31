@@ -639,6 +639,25 @@ Terminal focus/resume support iTerm2 (`ITERM_SESSION_ID`) and Apple Terminal
 (`TERM_SESSION_ID`); for anything else, `agentboard focus`/`resume` just activates the app by
 `TERM_PROGRAM`.
 
+**Focus across desktops (Spaces).** For iTerm2 and Apple Terminal, `agentboard focus` finds the
+session's tab, activates the terminal, waits until it is frontmost, and only then brings that
+exact window forward (by its window id) and selects the tab; a minimized window is restored. The
+CLI then checks, with the public CoreGraphics window list, that the window really came on screen
+within 1.5 s. Nothing new is needed beyond the Automation permission focus already used: no
+Accessibility, no Screen Recording (window titles are never read), no private APIs.
+
+What has been verified: iTerm2 on one display, with System Settings → Desktop & Dock → "When
+switching to an application, switch to a Space with open windows" on. There this order reached a
+window on another desktop, a minimized window and a fullscreen window's Space. Apple Terminal, a
+second display and that setting turned off are expected to behave the same but have not been
+verified. Either way the check keeps focus honest: when macOS stays on the current desktop, focus
+reports `space_not_reached` (exit 5) and the app's banner offers **Open Desktop & Dock Settings**.
+A missing Automation permission is `needs_automation` (exit 4, with **Open Automation
+Settings**). When the tab is gone, the terminal still comes forward but focus exits 1 and the
+dashboard opens with "Couldn't find this session's tab". iTerm2 hotkey windows float over every
+desktop and are not checked. Known limit: with Stage Manager on, a window in the side strip may
+count as off screen.
+
 ## Updates (retained notes)
 
 Sessions that run unattended print a final message every turn, and most of it is noise ("Quiet
@@ -912,8 +931,9 @@ A newer turn of the same session replaces its delivered notification instead of 
 your next prompt in that session removes it, as does the session ending (quitting it, or
 `SessionEnd`); this cleanup still runs after you turn the toggle off. Notifications are grouped per session in
 Notification Center. Clicking either kind brings the session's terminal tab to the front (iTerm2
-and Terminal, via `agentboard focus`); when the session has no focusable terminal, the dashboard
-opens with it selected. A click on an earlier notification while AgentBoard is not running
+and Terminal, via `agentboard focus`), switching to the desktop its window is on; when the session
+has no focusable terminal, or the jump fails (the tab was closed, macOS stayed on this desktop, a
+missing permission), the dashboard opens with it selected and the reason in its banner. A click on an earlier notification while AgentBoard is not running
 launches it and does the same once the first snapshot loads.
 
 ## Search
@@ -1061,6 +1081,11 @@ counts and changes nothing (with `--auto` it ignores the daily gate, so it previ
 run). `install-hooks --bin-path` only previews a different hook path for `install.sh
 --dry-run`.
 
+`focus` exits 0 when the session's window is on screen (or that can't be checked), 1 for any other
+failure (tab not found, timeout, no terminal), 4 when it may not control the terminal
+(`needs_automation`) and 5 when macOS stayed on this desktop (`space_not_reached`); see
+[Focus across desktops](#links--integrations) and [Diagnostics](#diagnostics).
+
 ## Diagnostics
 
 Everything AgentBoard does is recorded in one plain-text log, so a misbehaving click or a
@@ -1073,7 +1098,7 @@ skipped hook can be explained after the fact:
 One line per event, `key=value` pairs, UTC timestamps, greppable and `tail -f` friendly:
 
 ```
-2026-10-17T05:40:12.123Z INFO cli.focus key=claude:abc123 term=iTerm.app tty=ttys016 iterm_id=w0t1p0:9F2C... strategy=iterm_script osa_rc=0 osa_out=found:tty osa_err="" outcome=matched_tty ms=412
+2026-10-17T05:40:12.123Z INFO cli.focus key=claude:abc123 term=iTerm.app tty=ttys016 iterm_id=w0t1p0:9F2C... osa_rc=0 osa_out="found:tty 4711" osa_err="" window_id=4711 space_before=other onscreen_after=true onscreen_ms=312 strategy=iterm_script outcome=matched_tty ms=780
 ```
 
 **What is logged.** Every CLI subcommand (`cli.start` at debug, `cli.end cmd= exit= ms=` at info,
@@ -1130,11 +1155,33 @@ lines while something is streaming them (`log stream --level debug --predicate '
 to `notice` and passes `AGENTBOARD_LOG_LEVEL=debug` to every CLI call: one switch turns on both
 sides. **Open log** in the same section reveals `agentboard.log` in Finder.
 
-**Debugging a click that focused the wrong tab.** Click the row, then run
-`agentboard logs --grep cli.focus --lines 5`. Each click writes a `cli.focus.begin` line (the
+**Debugging a click that focused the wrong tab or stayed on this desktop.** Click the row, then
+run `agentboard logs --grep cli.focus --lines 5`. Each click writes a `cli.focus.begin` line (the
 recorded term, tty and iTerm id) before any AppleScript runs, then one `cli.focus` line whose
 `outcome` says what happened; a `begin` with no matching `cli.focus` line means the process
-died mid-attempt:
+died mid-attempt. A failure (any non-zero exit) is logged at warn, and its `msg=` is exactly the
+text the CLI printed to stderr and the app shows in its banner.
+
+After a match, the line also says where the window was and whether it arrived:
+
+- `window_id`: the matched window's id (the CGWindowID), or `hotkey` for an iTerm2 hotkey window,
+  which is not checked.
+- `app_pid`: the terminal app's process ids, read with `ps`. A window counts only when one of
+  them owns it, so a window id that names another app's window is never judged.
+- `space_before`: `current` (already on screen), `other` (another desktop, a fullscreen Space, or
+  hidden), `minimized`, or `unknown` (the window list could not be read in time, or the window
+  isn't the terminal app's).
+- `onscreen_after`: `true` once the window was on screen, `false` if it still was not after
+  1.5 s, `-` when that could not be told (no `app_pid`, a window the app doesn't own, or a window
+  list that didn't answer within its 1 s bound), which never counts as a failure. `onscreen_ms`
+  is how long it took.
+- `swoosh` (only on `space_not_reached`): the Desktop & Dock "switch to a Space with open
+  windows" setting, `on`, `off` or `unknown`.
+- `reselect_skipped=1` (only when it happened): between finding the tab and selecting it, the
+  tab was closed or moved, so the script skipped selecting it rather than pick a neighbour. The
+  window still came forward, but the tab shown may not be the session's.
+
+Outcomes:
 
 - `matched_uuid`: iTerm found the session by its recorded unique id. A wrong tab here means the
   recorded `iterm_id` is stale.
@@ -1142,15 +1189,23 @@ died mid-attempt:
   tty reused by a newer tab is the usual cause of a wrong tab.
 - `matched_unknown`: the focus script exited 0 but did not say how it matched (an older iTerm
   script's bare `found`, or an Apple Terminal answer the CLI did not recognise; see `osa_out`).
-- `activated_only`: nothing matched; the terminal app was only brought to the front (exit code is
-  still 0). `osa_out`/`osa_err` show what the AppleScript said, e.g. a missing Automation
-  permission.
-- `activate_failed`: the `open -a` fallback itself exited non-zero (see `open_rc`).
+- `activated_only`: nothing matched; the terminal app was only brought to the front. For iTerm2
+  and Apple Terminal this exits 1 ("Couldn't find this session's tab"); for other terminals,
+  where `open -a` is the whole strategy, it exits 0. `osa_out`/`osa_err` show what the
+  AppleScript said.
+- `activate_failed`: the `open -a` fallback itself exited non-zero (see `open_rc`); exits 1 for
+  iTerm2, 0 for other terminals.
 - `not_found`: the Apple Terminal focus script failed outright (non-zero `osa_rc`, see
-  `osa_err`). A failing iTerm script falls back to `open -a` instead, so it ends in
-  `activated_only` or `activate_failed`.
+  `osa_err`); exits 1. A failing iTerm script falls back to `open -a` instead, so it ends in
+  `activated_only`, `activate_failed` or `needs_automation`.
+- `needs_automation`: the script was refused with error -1743, so AgentBoard (or the terminal you
+  ran `agentboard focus` from) may not control the terminal; allow it in System Settings →
+  Privacy & Security → Automation. Exits 4. For iTerm2 the app is still brought forward.
+- `space_not_reached`: the tab was found and selected, but its window did not come on screen, so
+  macOS stayed on this desktop. Exits 5. With `swoosh=off`, turn on the Desktop & Dock setting
+  above; otherwise open the window from Mission Control.
 - `timeout`: an AppleScript or `open -a` call did not finish within 10 seconds (often a pending
-  Automation permission prompt) and was killed; logged at warn and `focus` exits 1. `resume`
+  Automation permission prompt) and was killed; `focus` exits 1. `resume`
   does the same and logs `outcome=timeout`.
 - `no_terminal` / `unsupported_terminal`: the session has no recorded terminal, or one AgentBoard
   cannot drive.

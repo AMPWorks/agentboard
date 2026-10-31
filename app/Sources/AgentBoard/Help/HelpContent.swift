@@ -104,7 +104,7 @@ enum HelpContent {
             ]),
             .paragraph("Within a section the most recently updated session comes first."),
             .heading("Status banner"),
-            .paragraph("A colored line under the search field (and at the top of the dashboard's session list) appears only when something is wrong. **Snapshot failed** (red) means the `agentboard` CLI or its database could not be read; the board keeps showing the last good snapshot until the next one succeeds. **Waiting on the CLI for N s** means a snapshot has been running for over 30 seconds; **No snapshot yet; the CLI is not answering** means nothing has come back since launch. **<action> failed** reports a click that did not work (mark, focus, dismiss) and goes away after 15 seconds or with its x. **Open log** reveals `agentboard.log`, which has the details. The banner never changes the menu bar icon."),
+            .paragraph("A colored line under the search field (and at the top of the dashboard's session list) appears only when something is wrong. **Snapshot failed** (red) means the `agentboard` CLI or its database could not be read; the board keeps showing the last good snapshot until the next one succeeds. **Waiting on the CLI for N s** means a snapshot has been running for over 30 seconds; **No snapshot yet; the CLI is not answering** means nothing has come back since launch. **<action> failed** reports a click that did not work (mark, focus, dismiss) and goes away after 15 seconds or with its x; a failed focus that a setting fixes adds **Open Automation Settings** or **Open Desktop & Dock Settings**. **Open log** reveals `agentboard.log`, which has the details. The banner never changes the menu bar icon."),
             .heading("A session row"),
             .bullets([
                 "The **dot** is the state color (hover for the color key), and the round **C** or **X** badge is the tool (Claude Code or Codex).",
@@ -116,7 +116,7 @@ enum HelpContent {
             ]),
             .heading("Clicking a row"),
             .bullets([
-                "**Click** a live session to bring its terminal tab to the front (iTerm2 and Apple Terminal; other terminals are just activated). A session with no live terminal opens in the dashboard instead.",
+                "**Click** a live session to bring its terminal tab to the front (iTerm2 and Apple Terminal; other terminals are just activated), switching to the desktop (Space) its window is on, a fullscreen window's Space, or restoring it when minimized (verified with iTerm2; expected, not yet verified, for Apple Terminal). A session with no live terminal opens in the dashboard instead. When the jump doesn't happen (the tab was closed, macOS stayed on this desktop, a missing permission), the dashboard opens on the session with the reason in its banner.",
                 "**Hover** to show quick buttons: copy the resume command, and mark the session done.",
                 "**Right-click** for every action: **Focus**, **Resume** (once the process has exited), **Copy Resume Command**, **Mark Done** (or **Reopen** for a done session), **Snooze 1 Day**, and **Open** for each of its links.",
             ]),
@@ -231,13 +231,13 @@ enum HelpContent {
             .heading("Session list"),
             .bullets([
                 "Rows are sorted by state (most urgent first), then by last update. They show the same dot, badges, titles and PR buttons as the popover.",
-                "**Double-click** (or press Return on) a live session to focus its terminal. **Right-click** for the full action menu.",
+                "**Double-click** (or press Return on) a live session to focus its terminal, switching to its desktop (verified with iTerm2; expected, not yet verified, for Apple Terminal); a failed jump shows why in the banner. **Right-click** for the full action menu.",
                 "**Hover** for quick buttons: Resume (once the process has exited), copy the resume command, mark done, snooze for a day, and open its first non-PR link (a ticket or URL).",
             ]),
             .heading("Detail"),
             .bullets([
                 "**Header**: tool badge, title (and the session's own title under a status text), state, the waiting reason in orange, and the done reason.",
-                "**Action bar**: **Focus** brings the terminal tab to the front; **Resume** opens a new terminal tab running `claude --resume <id>` or `codex resume <id>` in the session's directory (shown once its process has exited); **Copy Resume Command** copies that command; **Mark Done** hides the session (**Reopen** brings a done one back); **Snooze 1d** hides it for 24 hours.",
+                "**Action bar**: **Focus** brings the terminal tab to the front, switching to its desktop (verified with iTerm2; expected, not yet verified, for Apple Terminal); **Resume** opens a new terminal tab running `claude --resume <id>` or `codex resume <id>` in the session's directory (shown once its process has exited); **Copy Resume Command** copies that command; **Mark Done** hides the session (**Reopen** brings a done one back); **Snooze 1d** hides it for 24 hours.",
                 "**Metadata**: project, directory, branch, when it started, last updated and ended, whether its process is alive, and **Permissions** (the Claude Code permission mode as reported, such as `plan` or `acceptEdits`; a dash when none is known, as for Codex); then, once known, **Model** (the full model id) and **Context** (the tokens its latest request sent, and how long ago that was measured). Both refresh when a turn finishes.",
                 "**Links**: every PR, ticket and URL with its state, including merged and closed PRs the row buttons hide, and **awaits you** on a PR waiting for your review. Click one to open it.",
                 "**First prompt**, **Last prompt**, the session's **Updates** (each with Dismiss), and the **Last assistant message**.",
@@ -379,7 +379,7 @@ enum HelpContent {
             .heading("Acting on a session"),
             .keyValue([
                 HelpRow(key: "`agentboard mark <tool> <id> done|open|snooze`", value: "Set your own triage. `--hours N` for how long to snooze; `--note TEXT` to attach a note."),
-                HelpRow(key: "`agentboard focus <tool> <id>`", value: "Bring the session's terminal tab to the front."),
+                HelpRow(key: "`agentboard focus <tool> <id>`", value: "Bring the session's terminal tab to the front, switching to its desktop (verified with iTerm2 on one display with the Desktop & Dock setting on; Apple Terminal, a second display and the setting off are expected to work but not verified). Exits 0 when the window is on screen (or that can't be checked), 1 when it failed (tab not found, timeout, no terminal), 4 when AgentBoard may not control the terminal (Automation), 5 when macOS stayed on this desktop."),
                 HelpRow(key: "`agentboard resume <tool> <id>`", value: "Open a new terminal tab that resumes the session. `--print` only prints the command."),
             ]),
             .heading("Reporting from inside a session"),
@@ -445,7 +445,7 @@ enum HelpContent {
                 HelpRow(key: "No PR buttons", value: "Rows show buttons only for PRs that are not merged or closed, unless Settings → General → **Show closed and merged PRs** is on; the detail view's Links section lists every PR either way. PR detection needs the GitHub CLI: install `gh` and run `gh auth login`. PRs appear after the next `refresh-links` (at launch and every 10 minutes). `agentboard logs --grep gh` shows each lookup."),
                 HelpRow(key: "A PR still “awaits your review”", value: "Only a review or comment by someone other than automation counts. If a bot account of yours is answering, it is ignored only when it is a GitHub bot or listed in `automation_logins`; if you share one account with the session, respond while the session is idle."),
                 HelpRow(key: "Stale titles", value: "Titles are refreshed by `refresh-links` after 5 new prompts or a branch change, if the `claude` CLI is installed. Name a session yourself with `/rename` or `agentboard title --text`."),
-                HelpRow(key: "Clicking a row focuses the wrong tab", value: "Run `agentboard logs --grep cli.focus --lines 5` and read the `outcome`. Focus works with iTerm2 and Apple Terminal and may need the Automation permission for them (System Settings → Privacy & Security → Automation)."),
+                HelpRow(key: "Focus picks the wrong tab or stays on this desktop", value: "Run `agentboard logs --grep cli.focus --lines 5` and read the `outcome`. Focus works with iTerm2 and Apple Terminal and needs the Automation permission for them (System Settings → Privacy & Security → Automation; `needs_automation`). Reaching a window on another desktop, a fullscreen window or a minimized one needs nothing more: AgentBoard activates the terminal, then brings that exact window forward, and checks it really came on screen. That was verified with iTerm2 on one display with the Desktop & Dock setting below on; Apple Terminal, a second display and the setting off are expected to work but not verified. `space_not_reached` means macOS stayed on this desktop: turn on System Settings → Desktop & Dock → “When switching to an application, switch to a Space with open windows”, or open the window from Mission Control. No Accessibility or Screen Recording permission is used."),
                 HelpRow(key: "Too many or too few updates", value: "Adjust `note_markers`, `note_unattended_prefixes` and `prompt_injected_prefixes` in config.json, then run `agentboard notes --rebuild --reset`."),
                 HelpRow(key: "Menu bar icon stays red", value: "A session still needs you, or an open needs_you update has not been answered by a newer prompt. Open the popover, then answer the session or dismiss the update."),
             ]),

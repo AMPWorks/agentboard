@@ -130,7 +130,7 @@ struct SessionRowView: View {
     private func handlePopoverTap() {
         let popoverWindow = NSApp.keyWindow
         if session.isFocusable {
-            Task { await store.focus(session) }
+            Task { await store.focusOrShowDashboard(session) }
         } else {
             store.requestSelection(session.key)
             DashboardWindowController.show()

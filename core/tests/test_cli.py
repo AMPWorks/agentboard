@@ -16,7 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentboard import cli, hook, reconcile
+from agentboard import cli, hook, reconcile, spaces
 from tests.helpers import AgentBoardTestCase
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -3091,6 +3091,17 @@ class FocusResumeTests(AgentBoardTestCase):
         super().setUp()
         self._old_level = os.environ.get("AGENTBOARD_LOG_LEVEL")
         os.environ["AGENTBOARD_LOG_LEVEL"] = "debug"
+        # These tests are about the scripts' answers, not the onscreen check
+        # (test_focus_spaces.py): the window list reads as "unknown".
+        for name in ("window_states", "app_pids"):
+            patcher = mock.patch.object(spaces, name, return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        # Failures print their message; keep it out of the test output.
+        self.stderr = io.StringIO()
+        patcher = mock.patch("sys.stderr", self.stderr)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         if self._old_level is None:
@@ -3106,10 +3117,10 @@ class FocusResumeTests(AgentBoardTestCase):
     def _focus_lines(self):
         return [line for line in self._log_text().splitlines() if " cli.focus " in line]
 
-    def _assert_outcome(self, outcome):
+    def _assert_outcome(self, outcome, level="INFO"):
         lines = self._focus_lines()
         self.assertEqual(len(lines), 1, self._log_text())
-        self.assertIn(" INFO cli.focus ", lines[0])
+        self.assertIn(f" {level} cli.focus ", lines[0])
         self.assertIn(f"outcome={outcome}", lines[0])
         return lines[0]
 
@@ -3134,12 +3145,14 @@ class FocusResumeTests(AgentBoardTestCase):
         fake = mock.Mock(side_effect=[_completed("not_found\n"), _completed("", args=["open"])])
         args = cli.build_parser().parse_args(["focus", "claude", "s1"])
         result = cli.cmd_focus(args, run_osascript=fake)
-        self.assertEqual(result, 0)
+        # A missed tab is a failure (exit 1) even though iTerm still came forward.
+        self.assertEqual(result, 1)
         self.assertEqual(fake.call_count, 2)
         self.assertEqual(fake.call_args_list[-1][0][0], ["open", "-a", "iTerm"])
-        line = self._assert_outcome("activated_only")
+        line = self._assert_outcome("activated_only", level="WARN")
         self.assertIn("strategy=iterm_script,open_a", line)
         self.assertIn("osa_out=not_found", line)
+        self.assertIn("Couldn't find this session's tab in iTerm", self.stderr.getvalue())
 
     def test_focus_iterm_script_error_is_logged_and_falls_back(self):
         insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
@@ -3148,8 +3161,10 @@ class FocusResumeTests(AgentBoardTestCase):
             _completed("", args=["open"]),
         ])
         args = cli.build_parser().parse_args(["focus", "claude", "s1"])
-        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
-        line = self._assert_outcome("activated_only")
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), cli.FOCUS_EXIT_NEEDS_AUTOMATION)
+        # The open -a fallback still runs, so iTerm comes forward.
+        self.assertEqual(fake.call_args_list[-1][0][0], ["open", "-a", "iTerm"])
+        line = self._assert_outcome("needs_automation", level="WARN")
         self.assertIn("osa_rc=1", line)
         self.assertIn("Not authorized", line)
 
@@ -3191,8 +3206,8 @@ class FocusResumeTests(AgentBoardTestCase):
         insert_session(self.conn, session_id="s1", term_program="Apple_Terminal", tty="ttys009")
         fake = mock.Mock(return_value=_completed("", returncode=1, stderr="execution error"))
         args = cli.build_parser().parse_args(["focus", "claude", "s1"])
-        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
-        line = self._assert_outcome("not_found")
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 1)
+        line = self._assert_outcome("not_found", level="WARN")
         self.assertIn("osa_rc=1", line)
 
     def test_focus_apple_terminal_found_is_matched_tty(self):
@@ -3208,8 +3223,9 @@ class FocusResumeTests(AgentBoardTestCase):
         insert_session(self.conn, session_id="s1", term_program="Apple_Terminal", tty="ttys009")
         fake = mock.Mock(return_value=_completed("activated\n"))
         args = cli.build_parser().parse_args(["focus", "claude", "s1"])
-        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
-        self._assert_outcome("activated_only")
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 1)
+        self._assert_outcome("activated_only", level="WARN")
+        self.assertIn("Couldn't find this session's tab in Terminal", self.stderr.getvalue())
 
     def test_focus_generic_terminal_activates_app(self):
         insert_session(self.conn, session_id="s1", term_program="WarpTerminal")
@@ -3240,8 +3256,8 @@ class FocusResumeTests(AgentBoardTestCase):
             _completed("", returncode=1, args=["open"]),
         ])
         args = cli.build_parser().parse_args(["focus", "claude", "s1"])
-        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 0)
-        self._assert_outcome("activate_failed")
+        self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 1)
+        self._assert_outcome("activate_failed", level="WARN")
 
     def test_focus_every_call_is_bounded_by_a_timeout(self):
         insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
@@ -3296,7 +3312,7 @@ class FocusResumeTests(AgentBoardTestCase):
         result = cli.cmd_focus(args, run_osascript=fake)
         self.assertEqual(result, 1)
         fake.assert_not_called()
-        line = self._assert_outcome("unsupported_terminal")
+        line = self._assert_outcome("unsupported_terminal", level="WARN")
         self.assertIn("term=SomeRandomTerminal", line)
 
     def test_focus_no_terminal_recorded(self):
@@ -3306,14 +3322,14 @@ class FocusResumeTests(AgentBoardTestCase):
         result = cli.cmd_focus(args, run_osascript=fake)
         self.assertEqual(result, 1)
         fake.assert_not_called()
-        self._assert_outcome("no_terminal")
+        self._assert_outcome("no_terminal", level="WARN")
 
     def test_focus_unknown_session_is_no_terminal(self):
         fake = mock.Mock()
         args = cli.build_parser().parse_args(["focus", "claude", "nope"])
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cli.cmd_focus(args, run_osascript=fake), 1)
-        self._assert_outcome("no_terminal")
+        self._assert_outcome("no_terminal", level="WARN")
 
     def test_focus_logs_each_strategy_at_debug(self):
         insert_session(self.conn, session_id="s1", iterm_session_id="w0t1p0:ABCD", term_program="iTerm.app")
@@ -3336,46 +3352,100 @@ class FocusResumeTests(AgentBoardTestCase):
                 count += 1
         return count
 
-    def test_iterm_focus_reasserts_tab_and_session_after_activate(self):
-        # Selecting the window alone (what the old script did last) raises
-        # it but activation is async, so a following `select t`/`select s`
-        # on the still-background window is lost. The fix: select tab then
-        # session (sets the current tab/session even while backgrounded),
-        # then the window, activate, delay, and reassert tab+session once
-        # the window is actually frontmost. Must apply to both the
-        # unique-id match and the tty-fallback match.
-        expected = [
-            "tell t to select",
-            "tell s to select",
-            "tell w to select",
-            "activate",
-            "delay 0.15",
-            "tell t to select",
-            "tell s to select",
-        ]
-        lines = self._ordered_lines(cli._ITERM_FOCUS_APPLESCRIPT)
-        # Once for the unique-id path and once for the tty fallback, each
-        # reporting which strategy matched.
-        self.assertEqual(
-            self._count_contiguous_runs(lines, expected + ['return "found:uuid"']), 1,
-            "expected this exact sequence once for the unique-id path",
-        )
-        self.assertEqual(
-            self._count_contiguous_runs(lines, expected + ['return "found:tty"']), 1,
-            "expected this exact sequence once for the tty fallback",
-        )
-        self.assertNotIn('return "found"', lines)
+    # Each tab/session select after the frontmost wait first checks that the
+    # positions found by the scan still hold the matched session.
+    ITERM_GUARDED_SELECT = [
+        "set stillThere to false",
+        "try",
+        "set stillThere to (unique id of session jj of tab kk of w) is sid",
+        "end try",
+        "if stillThere then",
+        "tell tab kk of w to select",
+        "tell session jj of tab kk of w to select",
+        "else",
+        "set skipped to true",
+        "end if",
+    ]
+    TERMINAL_GUARDED_SELECT = [
+        "set stillThere to false",
+        "try",
+        "set stillThere to (tty of tab kk of w) is targetTty",
+        "end try",
+        "if stillThere then",
+        "set selected of tab kk of w to true",
+        "else",
+        "set skipped to true",
+        "end if",
+    ]
 
-    def test_apple_terminal_focus_reasserts_selected_after_activate(self):
+    def test_iterm_focus_reselects_a_tab_only_while_it_still_holds_the_session(self):
+        # A tab closed or dragged during the frontmost wait must not make a
+        # select land on its neighbour.
+        lines = self._ordered_lines(cli._ITERM_FOCUS_APPLESCRIPT)
+        self.assertEqual(self._count_contiguous_runs(lines, self.ITERM_GUARDED_SELECT), 2)
+        self.assertEqual(lines.count("tell tab kk of w to select"), 2)
+        self.assertEqual(lines.count("tell session jj of tab kk of w to select"), 2)
+        # Both matches (unique id and tty) remember the session's unique id.
+        self.assertEqual(lines.count("set sid to unique id of s"), 2)
+
+    def test_apple_terminal_focus_reselects_a_tab_only_while_it_still_holds_the_tty(self):
+        lines = self._ordered_lines(cli._TERMINAL_FOCUS_APPLESCRIPT)
+        self.assertEqual(self._count_contiguous_runs(lines, self.TERMINAL_GUARDED_SELECT), 1)
+        self.assertEqual(sum("set selected of tab kk of w to true" in line for line in lines), 1)
+
+    def test_iterm_focus_activates_before_selecting_the_window_by_id(self):
+        # Selecting the window before `activate` leaves it on its desktop
+        # when focus runs outside iTerm's own process tree (the app). The
+        # order that reaches another desktop: activate, wait for frontmost,
+        # then select the window (by id, never by position: activation
+        # reorders the window list), its tab and session, then reassert the
+        # tab and session once the window is in front.
         expected = [
-            "set selected of t to true",
-            "set frontmost of w to true",
             "activate",
-            "set selected of t to true",
-            'return "found"',
-        ]
+            "set waited to 0",
+            "repeat while frontmost is false and waited < 20",
+            "delay 0.05",
+            "set waited to waited + 1",
+            "end repeat",
+            "tell w to select",
+        ] + self.ITERM_GUARDED_SELECT
+        reassert = ["delay 0.15"] + self.ITERM_GUARDED_SELECT
+        script = cli._ITERM_FOCUS_APPLESCRIPT
+        lines = self._ordered_lines(script)
+        # One shared tail for the unique-id and the tty match.
+        self.assertEqual(self._count_contiguous_runs(lines, expected), 1)
+        self.assertEqual(self._count_contiguous_runs(lines, reassert), 1)
+        self.assertLess(lines.index(expected[-1]), lines.index(reassert[0]))
+        self.assertIn("set w to window id wid", lines)
+        self.assertLess(lines.index("set w to window id wid"), lines.index("activate"))
+        self.assertEqual(lines.count("activate"), 1)
+        # Matching never selects anything: no select before activate.
+        self.assertNotIn("select", " ".join(lines[:lines.index("activate")]))
+        # uuid first, then tty, each reporting which matched plus the window.
+        self.assertLess(script.index('set how to "uuid"'), script.index('set how to "tty"'))
+        self.assertIn('set reply to "found:" & how & " hotkey"', lines)
+        self.assertIn('set reply to "found:" & how & " " & (wid as text)', lines)
+        self.assertIn('if wasMin then set reply to reply & " min"', lines)
+        self.assertIn('if skipped then set reply to reply & " moved"', lines)
+
+    def test_apple_terminal_focus_activates_before_fronting_the_window_by_id(self):
+        expected = [
+            "activate",
+            "set waited to 0",
+            "repeat while frontmost is false and waited < 20",
+            "delay 0.05",
+            "set waited to waited + 1",
+            "end repeat",
+            "set index of w to 1",
+            "set frontmost of w to true",
+        ] + self.TERMINAL_GUARDED_SELECT
         lines = self._ordered_lines(cli._TERMINAL_FOCUS_APPLESCRIPT)
         self.assertEqual(self._count_contiguous_runs(lines, expected), 1)
+        self.assertIn("set w to window id wid", lines)
+        self.assertIn('set reply to "found " & (wid as text)', lines)
+        self.assertIn('if skipped then set reply to reply & " moved"', lines)
+        # A tty miss still activates Terminal and says so.
+        self.assertEqual(self._count_contiguous_runs(lines, ["activate", 'return "activated"']), 1)
 
     @unittest.skipUnless(shutil.which("osacompile"), "requires macOS osacompile")
     def test_iterm_focus_script_compiles(self):
