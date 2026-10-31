@@ -18,9 +18,13 @@ struct SidebarFilterTests {
         #expect(SidebarFilter.state(for: nil) == nil)
     }
 
+    @Test func theDenialsRowIsNotAState() {
+        #expect(SidebarFilter.state(for: .denials) == nil)
+    }
+
     @Test func allIsDistinctFromEveryStateRow() {
         let states: [SessionState] = [.needsYou, .interrupted, .review, .running, .unconcluded, .snoozed, .done]
-        let tags = Set([SidebarFilter.all] + states.map(SidebarFilter.state))
-        #expect(tags.count == states.count + 1)
+        let tags = Set([SidebarFilter.all, SidebarFilter.denials] + states.map(SidebarFilter.state))
+        #expect(tags.count == states.count + 2)
     }
 }

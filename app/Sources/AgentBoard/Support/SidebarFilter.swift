@@ -4,9 +4,12 @@
 enum SidebarFilter: Hashable, Sendable {
     case all
     case state(SessionState)
+    /// The permission denials list, which replaces the session list.
+    case denials
 
     /// The state the session list narrows to, or nil for every state. An
-    /// empty selection (a ⌘-click deselect) also lists every state.
+    /// empty selection (a ⌘-click deselect) also lists every state; the
+    /// Denials row is not a state.
     static func state(for selection: SidebarFilter?) -> SessionState? {
         guard case .state(let state)? = selection else { return nil }
         return state

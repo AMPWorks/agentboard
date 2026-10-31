@@ -231,6 +231,14 @@ struct DashboardCountsTests {
         #expect(FilteredCounts.hiddenAttentionNotice(1, notes: 1) == "Filters hide 1 session and 1 update that need you")
     }
 
+    @Test func fixtureListsItsDenials() {
+        #expect(Self.fixture.counts.denials == 3)
+        #expect(badges("").counts.denials == 3)
+        let rows = DenialFeed.rows(from: sessions, query: SessionSearch(""))
+        #expect(rows.count == 3)
+        #expect(DenialFeed.total(from: sessions, query: SessionSearch("")) == 3)
+    }
+
     @Test func fixtureNotesTotalMatchesTheSnapshot() {
         #expect(badges("").counts.notes == Self.fixture.counts.notes)
         #expect(Self.fixture.counts.notes > 0)

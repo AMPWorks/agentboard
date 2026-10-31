@@ -74,7 +74,7 @@ class SnapshotTests(AgentBoardTestCase):
         snapshot = cli.build_snapshot(self.conn, include_all=True)
         self.assertIn("generated_at", snapshot)
         self.assertIn("counts", snapshot)
-        self.assertEqual(set(snapshot["counts"].keys()), set(cli.STATES) | {"notes"})
+        self.assertEqual(set(snapshot["counts"].keys()), set(cli.STATES) | {"notes", "denials"})
         entry = snapshot["sessions"][0]
         for key in (
             "key", "tool", "session_id", "state", "waiting_reason", "title", "cwd",
@@ -82,7 +82,7 @@ class SnapshotTests(AgentBoardTestCase):
             "started_at", "updated_at", "ended_at", "alive", "interactive",
             "can_focus", "resume_command", "status_text", "links", "triage",
             "notes", "notes_count", "model", "context_tokens", "context_at",
-            "permission_mode",
+            "permission_mode", "denials", "denials_count",
         ):
             self.assertIn(key, entry)
         self.assertEqual(entry["key"], "claude:s1")
@@ -4406,6 +4406,304 @@ class SnapshotTurnFieldsTests(AgentBoardTestCase):
             and "<> 'injected'" not in sql
         ]
         self.assertEqual(len(grouped_any_prompt), 1, grouped_any_prompt)
+
+
+class _DenialHookMixin:
+    """Feed hook payloads through hook.process_payload at distinct,
+    increasing timestamps a few minutes before self.now."""
+
+    def setUp(self):
+        super().setUp()
+        self.now = datetime.now(timezone.utc)
+        self._tick = 0
+
+    def send(self, event, session_id="s1", **fields):
+        self._tick += 1
+        ts = (self.now - timedelta(minutes=30) + timedelta(seconds=self._tick)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ")
+        payload = {"session_id": session_id, "hook_event_name": event, "cwd": "/tmp",
+                   **fields}
+        with mock.patch("agentboard.hook.subprocess.run",
+                        return_value=mock.Mock(returncode=0, stdout="")), \
+             mock.patch("agentboard.hook.subprocess.Popen"), \
+             mock.patch("agentboard.hook._now_iso", return_value=ts):
+            hook.process_payload(self.conn, "claude", payload)
+        return ts
+
+    def deny(self, session_id="s1", tool_name="Bash", reason="[Test Reason]", **fields):
+        self.send("PermissionDenied", session_id=session_id, tool_name=tool_name,
+                  reason=reason, **fields)
+        return self.conn.execute("SELECT MAX(id) FROM events").fetchone()[0]
+
+    def snapshot(self, include_all=True):
+        return cli.build_snapshot(self.conn, include_all=include_all, now=self.now)
+
+    def entry(self, key="claude:s1", include_all=True):
+        return next(e for e in self.snapshot(include_all)["sessions"] if e["key"] == key)
+
+
+class SnapshotDenialTests(_DenialHookMixin, AgentBoardTestCase):
+    def test_denials_newest_first_with_their_fields(self):
+        self.send("UserPromptSubmit", prompt="go")
+        plain = self.deny(reason="[Irreversible Local Destruction]")
+        mcp = self.deny(tool_name="mcp__tracker__close_issue", mcp_server="tracker",
+                        reason="[External System Writes]")
+        sub = self.deny(agent_id="agent-1", reason="x" * 400)
+        broken = self.deny(tool_name="Write", mcp_server="tracker")
+        self.conn.execute("UPDATE events SET extra='{not json' WHERE id=?", (broken,))
+        self.send("Stop", last_assistant_message="done")
+        self.send("UserPromptSubmit", session_id="s2", prompt="other")
+        other = self.deny(session_id="s2", reason="[Interfere With Workloads]")
+
+        entry = self.entry()
+        self.assertEqual(entry["denials_count"], 4)
+        self.assertEqual([d["id"] for d in entry["denials"]], [broken, sub, mcp, plain])
+        for denial in entry["denials"]:
+            self.assertEqual(set(denial),
+                             {"id", "ts", "tool_name", "reason", "mcp_server", "subagent"})
+        by_id = {d["id"]: d for d in entry["denials"]}
+        self.assertEqual(
+            (by_id[plain]["tool_name"], by_id[plain]["reason"], by_id[plain]["mcp_server"],
+             by_id[plain]["subagent"]),
+            ("Bash", "[Irreversible Local Destruction]", None, False))
+        self.assertEqual(
+            (by_id[mcp]["tool_name"], by_id[mcp]["mcp_server"], by_id[mcp]["reason"]),
+            ("mcp__tracker__close_issue", "tracker", "[External System Writes]"))
+        self.assertTrue(by_id[sub]["subagent"])
+        self.assertEqual(by_id[sub]["reason"], "x" * cli.SNAPSHOT_DENIAL_REASON_CHARS)
+        self.assertIsNone(by_id[broken]["mcp_server"])
+        other_entry = self.entry("claude:s2")
+        self.assertEqual([d["id"] for d in other_entry["denials"]], [other])
+        self.assertEqual(self.snapshot()["counts"]["denials"], 5)
+
+    def test_count_is_uncapped_while_the_list_is_capped(self):
+        self.send("UserPromptSubmit", prompt="go")
+        ids = [self.deny(reason=f"[R{i}]") for i in range(25)]
+        entry = self.entry()
+        self.assertEqual(entry["denials_count"], 25)
+        self.assertEqual(len(entry["denials"]), cli.SNAPSHOT_DENIALS_PER_SESSION)
+        self.assertEqual([d["id"] for d in entry["denials"]],
+                         list(reversed(ids))[:cli.SNAPSHOT_DENIALS_PER_SESSION])
+
+    def test_cleared_denial_leaves_list_and_count(self):
+        self.send("UserPromptSubmit", prompt="go")
+        first = self.deny()
+        second = self.deny()
+        rc, _, _ = _run_cmd(["denials", "--dismiss", str(first)])
+        self.assertEqual(rc, 0)
+        entry = self.entry()
+        self.assertEqual([d["id"] for d in entry["denials"]], [second])
+        self.assertEqual(entry["denials_count"], 1)
+        self.assertEqual(self.snapshot()["counts"]["denials"], 1)
+
+    def test_counts_sum_only_emitted_sessions(self):
+        self.send("UserPromptSubmit", prompt="go")
+        self.deny()
+        self.send("UserPromptSubmit", session_id="bg", prompt="batch")
+        self.deny(session_id="bg")
+        self.deny(session_id="bg")
+        self.conn.execute("UPDATE sessions SET interactive=0 WHERE session_id='bg'")
+        visible = self.snapshot(include_all=False)
+        self.assertEqual([e["key"] for e in visible["sessions"]], ["claude:s1"])
+        self.assertEqual(visible["counts"]["denials"], 1)
+        self.assertEqual(self.snapshot(include_all=True)["counts"]["denials"], 3)
+
+    def test_entry_builder_without_a_denial_map_runs_no_query(self):
+        # build_snapshot passes the map from one grouped query; an omitted map
+        # means none (like notes_by_key), never a hidden query per session.
+        self.send("UserPromptSubmit", prompt="go")
+        self.deny()
+        session = self.conn.execute(
+            "SELECT * FROM sessions WHERE session_id='s1'").fetchone()
+        config = cli.links.load_config(cli.db.home_dir())
+        with mock.patch.object(cli, "_open_denials_by_session",
+                               side_effect=AssertionError("queried")) as query:
+            entry = cli._build_session_entry(self.conn, session, {}, {}, config, self.now)
+        query.assert_not_called()
+        self.assertEqual((entry["denials"], entry["denials_count"]), ([], 0))
+        # The snapshot itself still passes the map, so nothing is lost there.
+        self.assertEqual(self.entry()["denials_count"], 1)
+
+    def test_session_without_denials_has_empty_list_and_zero(self):
+        self.send("UserPromptSubmit", prompt="go")
+        self.send("Stop", last_assistant_message="done")
+        entry = self.entry()
+        self.assertEqual((entry["denials"], entry["denials_count"]), ([], 0))
+        self.assertEqual(self.snapshot()["counts"]["denials"], 0)
+
+
+class DenialsCommandTests(_LogLevelMixin, _DenialHookMixin, AgentBoardTestCase):
+    def test_listing_json_text_and_session_filter(self):
+        self.send("UserPromptSubmit", prompt="go")
+        first = self.deny(tool_name="mcp__tracker__close_issue", mcp_server="tracker",
+                          reason="[External System Writes]")
+        self.send("UserPromptSubmit", session_id="s2", prompt="go")
+        second = self.deny(session_id="s2", agent_id="agent-1",
+                           reason="[Interfere With Workloads]")
+        rc, out, _ = _run_cmd(["denials", "--json"])
+        self.assertEqual(rc, 0)
+        items = json.loads(out)["denials"]
+        self.assertEqual([d["id"] for d in items], [second, first])
+        self.assertEqual(set(items[0]), {"id", "key", "tool", "session_id", "ts", "tool_name",
+                                         "reason", "mcp_server", "subagent", "dismissed_at"})
+        self.assertEqual(
+            (items[1]["key"], items[1]["tool_name"], items[1]["mcp_server"],
+             items[1]["subagent"], items[1]["dismissed_at"]),
+            ("claude:s1", "mcp__tracker__close_issue", "tracker", False, None))
+        self.assertTrue(items[0]["subagent"])
+
+        rc, out, _ = _run_cmd(["denials"])
+        lines = out.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("claude:s2", lines[0])
+        self.assertIn("[Interfere With Workloads]", lines[0])
+        self.assertIn("mcp__tracker__close_issue", lines[1])
+
+        rc, out, _ = _run_cmd(["denials", "--json", "--session", "claude:s1"])
+        self.assertEqual([d["id"] for d in json.loads(out)["denials"]], [first])
+
+    def test_all_shows_dismissed_with_their_time(self):
+        self.send("UserPromptSubmit", prompt="go")
+        first = self.deny()
+        self.deny()
+        _run_cmd(["denials", "--dismiss", str(first)])
+        open_items = json.loads(_run_cmd(["denials", "--json"])[1])["denials"]
+        self.assertNotIn(first, [d["id"] for d in open_items])
+        everything = json.loads(_run_cmd(["denials", "--json", "--all"])[1])["denials"]
+        self.assertEqual(len(everything), 2)
+        self.assertIsNotNone(next(d for d in everything if d["id"] == first)["dismissed_at"])
+        self.assertIn("(dismissed)", _run_cmd(["denials", "--all"])[1])
+
+    def test_dismiss_by_id_ignores_other_events(self):
+        self.send("UserPromptSubmit", prompt="go")
+        denial = self.deny()
+        self.send("Stop", last_assistant_message="done")
+        stop_id = self.conn.execute(
+            "SELECT id FROM events WHERE event='Stop'").fetchone()[0]
+        rc, out, _ = _run_cmd(["denials", "--dismiss", str(stop_id), "--json"])
+        self.assertEqual((rc, json.loads(out)), (0, {"dismissed": 0}))
+        self.assertIsNone(self.conn.execute(
+            "SELECT dismissed_at FROM events WHERE id=?", (stop_id,)).fetchone()[0])
+        rc, out, _ = _run_cmd(["denials", "--dismiss", str(denial)])
+        self.assertEqual((rc, out.strip()), (0, "dismissed 1 denial(s)"))
+        rc, out, _ = _run_cmd(["denials", "--dismiss", str(denial), "--json"])
+        self.assertEqual(json.loads(out), {"dismissed": 0})
+
+    def test_dismiss_all_and_scoped_to_a_session(self):
+        self.send("UserPromptSubmit", prompt="go")
+        self.deny()
+        self.deny()
+        self.send("UserPromptSubmit", session_id="s2", prompt="go")
+        self.deny(session_id="s2")
+        rc, out, _ = _run_cmd(["denials", "--dismiss-all", "--session", "claude:s1"])
+        self.assertEqual(out.strip(), "dismissed 2 denial(s)")
+        remaining = json.loads(_run_cmd(["denials", "--json"])[1])["denials"]
+        self.assertEqual([d["key"] for d in remaining], ["claude:s2"])
+        rc, out, _ = _run_cmd(["denials", "--dismiss-all", "--json"])
+        self.assertEqual(json.loads(out), {"dismissed": 1})
+        self.assertEqual(json.loads(_run_cmd(["denials", "--json"])[1])["denials"], [])
+
+    def test_bad_session_exits_2(self):
+        rc, out, err = _run_cmd(["denials", "--session", "nocolon"])
+        self.assertEqual((rc, out), (2, ""))
+        self.assertIn("--session must be TOOL:ID", err)
+
+    def test_dismiss_log_line_has_the_count_and_no_reason(self):
+        self.send("UserPromptSubmit", prompt="go")
+        self.deny(reason="[Secret Category Words]")
+        self.deny(reason="[Secret Category Words]")
+        _run_cmd(["denials", "--json"])
+        self.assertEqual([l for l in self._log_lines() if "denials" in l], [])
+        _run_cmd(["denials", "--dismiss-all"])
+        lines = [l for l in self._log_lines() if " cli.denials_dismiss " in l]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("dismissed=2", lines[0])
+        self.assertNotIn("Secret Category", "\n".join(self._log_lines()))
+
+
+class DenialStateNeutralityTests(_DenialHookMixin, AgentBoardTestCase):
+    """Denials never change a session's state, and clearing them touches
+    only events.dismissed_at."""
+
+    def _session_row(self):
+        return tuple(self.conn.execute(
+            "SELECT * FROM sessions WHERE tool='claude' AND session_id='s1'").fetchone())
+
+    def _state(self):
+        entry = self.entry()
+        return entry["state"], entry["waiting_reason"]
+
+    def test_clearing_denials_changes_no_session_state_or_note(self):
+        self.send("UserPromptSubmit", prompt="go")
+        first = self.deny(reason="[Irreversible Local Destruction]")
+        self.deny(reason="[External System Writes]")
+        self.send("Stop", last_assistant_message="finished the work")
+        row = self._session_row()
+        state = self._state()
+        notes_before = self.conn.execute("SELECT * FROM notes ORDER BY id").fetchall()
+        denial_ids = [r[0] for r in self.conn.execute(
+            "SELECT id FROM events WHERE event='PermissionDenied'")]
+        for note in notes_before:
+            self.assertNotIn(note["event_id"], denial_ids)
+            self.assertNotIn(note["last_event_id"], denial_ids)
+
+        _run_cmd(["denials", "--dismiss", str(first)])
+        self.assertEqual(self._session_row(), row)
+        self.assertEqual(self._state(), state)
+        _run_cmd(["denials", "--dismiss-all"])
+        self.assertEqual(self._session_row(), row)
+        self.assertEqual(self._state(), state)
+        self.assertEqual(
+            [tuple(n) for n in self.conn.execute("SELECT * FROM notes ORDER BY id")],
+            [tuple(n) for n in notes_before])
+        self.assertEqual(self.entry()["denials_count"], 0)
+
+    def _triage_row(self):
+        row = self.conn.execute(
+            "SELECT * FROM triage WHERE tool='claude' AND session_id='s1'").fetchone()
+        return tuple(row) if row is not None else None
+
+    def _clear_one_then_all(self, first, row, state, triage=None):
+        _run_cmd(["denials", "--dismiss", str(first)])
+        self.assertEqual(self._session_row(), row)
+        self.assertEqual(self._state(), state)
+        self.assertEqual(self._triage_row(), triage)
+        _run_cmd(["denials", "--dismiss-all"])
+        self.assertEqual(self._session_row(), row)
+        self.assertEqual(self._state(), state)
+        self.assertEqual(self._triage_row(), triage)
+        self.assertEqual(self.entry()["denials_count"], 0)
+
+    def test_clearing_mid_turn_denials_keeps_the_session_running(self):
+        # The denials are the session's newest events: no Stop yet.
+        self.send("UserPromptSubmit", prompt="go")
+        first = self.deny(reason="[Irreversible Local Destruction]")
+        self.deny(reason="[External System Writes]")
+        # Read the board a minute after the events, while the turn is fresh.
+        self.now -= timedelta(minutes=29)
+        row = self._session_row()
+        state = self._state()
+        self.assertEqual(state[0], "running")
+        self.assertEqual(self.conn.execute(
+            "SELECT event FROM events ORDER BY id DESC LIMIT 1").fetchone()[0],
+            "PermissionDenied")
+        self._clear_one_then_all(first, row, state)
+
+    def test_clearing_denials_leaves_triage_alone(self):
+        for status in ("snooze", "done"):
+            with self.subTest(status=status):
+                self.conn.execute("DELETE FROM triage")
+                self.send("UserPromptSubmit", prompt="go")
+                first = self.deny(reason="[Irreversible Local Destruction]")
+                self.deny(reason="[External System Writes]")
+                self.send("Stop", last_assistant_message="finished the work")
+                cli.cmd_mark(cli.build_parser().parse_args(["mark", "claude", "s1", status]))
+                row = self._session_row()
+                state = self._state()
+                triage = self._triage_row()
+                self.assertEqual(state[0], {"snooze": "snoozed", "done": "done"}[status])
+                self.assertIsNotNone(triage)
+                self._clear_one_then_all(first, row, state, triage)
 
 
 if __name__ == "__main__":

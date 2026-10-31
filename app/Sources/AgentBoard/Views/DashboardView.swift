@@ -7,6 +7,9 @@ struct DashboardView: View {
     @State private var projectFilter: String = "all"
     @State private var searchText: String = ""
     @State private var selectedSessionKey: String?
+    /// The Denials list's selected row (`DenialFeed.Row.id`); selecting one
+    /// selects its session for the detail column.
+    @State private var selectedDenialRowID: String?
 
     private static let sidebarStates: [SessionState] = [
         .needsYou, .interrupted, .review, .running, .unconcluded, .snoozed, .done
@@ -53,14 +56,26 @@ struct DashboardView: View {
         let matched = matchedSessions
         let counts = FilteredCounts(matched, query: SessionSearch(searchText))
         let all = FilteredCounts(store.snapshot.sessions)
+        // Denials start from the picker-filtered sessions, not `matched`: a
+        // query that only hits a denial's reason keeps that denial although
+        // its session does not match on its own.
+        let query = SessionSearch(searchText)
+        let pickerSessions = DenialFeed.pickerFiltered(store.snapshot.sessions, tool: toolFilter,
+                                                       project: projectFilter)
+        let denialTotal = DenialFeed.total(from: pickerSessions, query: query)
         NavigationSplitView {
             sidebar(
                 counts: counts,
+                denialTotal: denialTotal,
                 hiddenNeedingAttention: counts.hiddenNeedingAttention(from: all),
                 hiddenNeedsYouNotes: counts.hiddenNeedsYouNotes(from: all)
             )
         } content: {
-            list(listedSessions(from: matched))
+            if sidebarSelection == .denials {
+                denialList(total: denialTotal, query: query)
+            } else {
+                list(listedSessions(from: matched))
+            }
         } detail: {
             if let session = selectedSession {
                 SessionDetailView(session: session, store: store)
@@ -75,7 +90,18 @@ struct DashboardView: View {
         }
         .onDisappear { store.dashboardSelection = nil }
         .onChange(of: store.pendingSelection) { _, _ in consumePendingSelection() }
-        .onChange(of: selectedSessionKey) { _, newValue in store.dashboardSelection = newValue }
+        .onChange(of: selectedSessionKey) { _, newValue in
+            store.dashboardSelection = newValue
+            // A session picked elsewhere (All, the popover) drops a Denials
+            // row of another session, so its highlight is never stale and a
+            // click on it changes the selection again.
+            let kept = DenialFeed.rowSelection(selectedDenialRowID, afterSessionKeyChangedTo: newValue)
+            if kept != selectedDenialRowID { selectedDenialRowID = kept }
+        }
+        .onChange(of: selectedDenialRowID) { _, newValue in
+            guard let newValue, let key = DenialFeed.sessionKey(ofRowID: newValue) else { return }
+            selectedSessionKey = key
+        }
         .toolbar {
             ToolbarItemGroup {
                 Picker("Tool", selection: $toolFilter) {
@@ -117,7 +143,7 @@ struct DashboardView: View {
         searchText = ""
     }
 
-    private func sidebar(counts: FilteredCounts, hiddenNeedingAttention: Int,
+    private func sidebar(counts: FilteredCounts, denialTotal: Int, hiddenNeedingAttention: Int,
                          hiddenNeedsYouNotes: Int) -> some View {
         VStack(spacing: 0) {
             List(selection: $sidebarSelection) {
@@ -130,6 +156,13 @@ struct DashboardView: View {
                         .badge(counts.count(for: state))
                         .tag(SidebarFilter.state(state))
                         .help("List only \(state.displayName) sessions")
+                }
+                // Its own section, so its badge does not read as a session count.
+                Section {
+                    Label("Denials", systemImage: "hand.raised")
+                        .badge(denialTotal)
+                        .tag(SidebarFilter.denials)
+                        .help("List tool calls auto mode blocked, newest first; they are kept for 7 days")
                 }
             }
             // Open notes the filters keep, counted note by note like the
@@ -182,6 +215,24 @@ struct DashboardView: View {
             // CLI or database failures, at the top of the session list.
             StatusBannerView(store: store, insets: EdgeInsets(top: 8, leading: 8, bottom: 4, trailing: 8))
             sessionList(sessions)
+        }
+        .navigationSplitViewColumnWidth(min: 280, ideal: 340)
+    }
+
+    private func denialList(total: Int, query: SessionSearch) -> some View {
+        let sessions = store.snapshot.sessions
+        return VStack(spacing: 0) {
+            StatusBannerView(store: store, insets: EdgeInsets(top: 8, leading: 8, bottom: 4, trailing: 8))
+            DenialListView(
+                rows: DenialFeed.rows(from: sessions, tool: toolFilter, project: projectFilter, query: query),
+                total: total,
+                clearPlan: DenialFeed.clearPlan(from: sessions, tool: toolFilter, project: projectFilter,
+                                                query: query),
+                hasAnyDenials: sessions.contains { $0.denialsCount > 0 || !$0.denials.isEmpty },
+                searchText: searchText,
+                selection: $selectedDenialRowID,
+                store: store
+            )
         }
         .navigationSplitViewColumnWidth(min: 280, ideal: 340)
     }

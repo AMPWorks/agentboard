@@ -56,7 +56,8 @@ or were interrupted, then (dimmer) the ones in Review.
 
 The popover (click the icon) lists the sessions that matter now. The dashboard (⌃⌥⌘A, or **Open
 Dashboard** in the popover) is a full window with every session, filters by state, tool and
-project, and a detail pane for the selected session.
+project, and a detail pane for the selected session. Its **Denials** row lists the tool calls
+Claude Code's auto mode blocked over the last 7 days.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">

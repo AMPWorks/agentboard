@@ -330,11 +330,35 @@ final class SnapshotStore: ObservableObject {
     /// (`UpdatesFeed.clearPlan`): runs each dismissal in order, then
     /// refreshes once.
     func dismiss(_ dismissals: [NoteDismissal], action name: String) async {
-        guard !dismissals.isEmpty else { return }
-        log.notice("action \(name, privacy: .public) steps=\(dismissals.count, privacy: .public)")
+        await runSteps(dismissals, action: name) { try await cli.dismiss($0) }
+    }
+
+    /// Clears one permission denial (a Denials row's or the detail's x).
+    func dismissDenial(_ denial: Denial, of session: Session) async {
+        await perform("dismiss denial \(denial.id)", session) { try await cli.dismissDenials(ids: [denial.id]) }
+    }
+
+    /// Clears every open denial of one session.
+    func dismissDenials(for session: Session) async {
+        await perform("dismiss denials", session) {
+            try await cli.dismissDenials(tool: session.tool, sessionId: session.sessionId)
+        }
+    }
+
+    /// The Denials header's "Clear all"/"Clear matching"
+    /// (`DenialFeed.clearPlan`): runs each dismissal in order, then
+    /// refreshes once.
+    func dismissDenials(_ dismissals: [DenialDismissal], action name: String) async {
+        await runSteps(dismissals, action: name) { try await cli.dismiss($0) }
+    }
+
+    private func runSteps<Step: Sendable>(_ steps: [Step], action name: String,
+                                          _ run: (Step) async throws -> Void) async {
+        guard !steps.isEmpty else { return }
+        log.notice("action \(name, privacy: .public) steps=\(steps.count, privacy: .public)")
         do {
-            for dismissal in dismissals {
-                try await cli.dismiss(dismissal)
+            for step in steps {
+                try await run(step)
             }
             lastActionError = nil
             await refresh()

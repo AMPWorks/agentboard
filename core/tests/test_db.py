@@ -197,7 +197,7 @@ class DbTests(AgentBoardTestCase):
         old.close()
         conn = db.connect(path)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 9)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
             session = conn.execute("SELECT * FROM sessions").fetchone()
             self.assertEqual(session["model"], "kept")
             self.assertIn("permission_mode", session.keys())
@@ -206,7 +206,7 @@ class DbTests(AgentBoardTestCase):
             conn.close()
 
     def test_fresh_database_has_usage_columns(self):
-        self.assertEqual(db.SCHEMA_VERSION, 9)
+        self.assertGreaterEqual(db.SCHEMA_VERSION, 9)
         cols = {row["name"]: row["type"]
                 for row in self.conn.execute("PRAGMA table_info(sessions)")}
         self.assertEqual(cols.get("model"), "TEXT")
@@ -215,12 +215,60 @@ class DbTests(AgentBoardTestCase):
 
     def test_existing_migrations_are_unchanged(self):
         # Migrations already applied in the field are never edited.
-        self.assertEqual(sorted(db._MIGRATIONS), [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(sorted(db._MIGRATIONS)[:9], [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(max(db._MIGRATIONS), db.SCHEMA_VERSION)
         self.assertIn("ALTER TABLE sessions ADD COLUMN retitle_branch TEXT;", db._MIGRATIONS[6])
         self.assertNotIn("prompt_kind", db._MIGRATIONS[6])
         self.assertNotIn("context_tokens", db._MIGRATIONS[7])
         self.assertIn("ALTER TABLE sessions ADD COLUMN permission_mode TEXT;", db._MIGRATIONS[9])
         self.assertNotIn("permission_mode", db._MIGRATIONS[8])
+
+    def test_fresh_database_has_denial_column_and_index(self):
+        cols = {row["name"]: row["type"]
+                for row in self.conn.execute("PRAGMA table_info(events)")}
+        self.assertEqual(cols.get("dismissed_at"), "TEXT")
+        index = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_events_denials'"
+        ).fetchone()
+        self.assertIsNotNone(index)
+        self.assertIn("WHERE event = 'PermissionDenied'", index["sql"])
+
+    def test_denial_migration_upgrades_a_v9_database_in_place(self):
+        path = self.tmp_path / "v9.db"
+        old = sqlite3.connect(str(path), isolation_level=None)
+        for version in range(1, 10):
+            old.executescript(db._MIGRATIONS[version])
+        old.execute("PRAGMA user_version = 9")
+        old.execute(
+            "INSERT INTO events(ts, tool, session_id, event, tool_name, text) "
+            "VALUES ('t1', 'claude', 's1', 'PermissionDenied', 'Bash', '[Reason]')"
+        )
+        old.execute(
+            "INSERT INTO events(ts, tool, session_id, event) VALUES ('t2', 'claude', 's1', 'Stop')"
+        )
+        old.close()
+        conn = db.connect(path)
+        try:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
+            rows = conn.execute(
+                "SELECT event, tool_name, text, dismissed_at FROM events ORDER BY id"
+            ).fetchall()
+            self.assertEqual([tuple(row) for row in rows], [
+                ("PermissionDenied", "Bash", "[Reason]", None),
+                ("Stop", None, None, None),
+            ])
+            self.assertIsNotNone(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='idx_events_denials'"
+            ).fetchone())
+        finally:
+            conn.close()
+
+    def test_open_denials_query_uses_the_partial_index(self):
+        from agentboard import cli
+        plan = " ".join(
+            row[-1] for row in self.conn.execute("EXPLAIN QUERY PLAN " + cli._OPEN_DENIALS_SQL)
+        )
+        self.assertIn("idx_events_denials", plan)
 
     def test_db_file_created_under_agentboard_home(self):
         self.assertTrue((self.agentboard_home / "agentboard.db").exists())

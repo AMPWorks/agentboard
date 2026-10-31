@@ -451,7 +451,7 @@ activate iTerm, then select that window (by id), tab and session. Exit non-zero 
 {
   "generated_at": "ISO8601",
   "counts": {"needs_you": 0, "interrupted": 0, "running": 0, "review": 0,
-             "unconcluded": 0, "snoozed": 0, "done": 0, "notes": 0},
+             "unconcluded": 0, "snoozed": 0, "done": 0, "notes": 0, "denials": 0},
   "sessions": [
     {
       "key": "claude:<session_id>",
@@ -477,7 +477,10 @@ activate iTerm, then select that window (by id), tab and session. Exit non-zero 
       "turn_finished_at": "ISO|null", "turn_prompt_kind": "human|loop|cron|injected|null",
       "background_tasks": 0, "turn_ends_background_wait": false,
       "model": "string|null", "context_tokens": 308011, "context_at": "ISO|null",
-      "permission_mode": "default|plan|acceptEdits|auto|dontAsk|bypassPermissions|<newer>|null"
+      "permission_mode": "default|plan|acceptEdits|auto|dontAsk|bypassPermissions|<newer>|null",
+      "denials": [{"id": 1, "ts": "ISO", "tool_name": "Bash", "reason": "[Category]",
+                   "mcp_server": "string|null", "subagent": false}],
+      "denials_count": 1
     }
   ],
   "usage": [
@@ -494,6 +497,10 @@ then updated_at desc. Default excludes done older than 7 days and non-interactiv
 (Added after the original spec.) `notes` lists a session's open notes, newest `last_ts` first,
 capped at 20 plus any older open `needs_you` notes (never capped out); `notes_count` is the uncapped open count; `counts.notes` sums `notes_count` over
 the sessions this snapshot emits. Older CLIs omit all three; the app defaults them to empty/0.
+`denials` (added with the `events.dismissed_at` migration) lists a session's open (not cleared) permission denials,
+newest `ts` first, capped at 20, the reason cut to 300 characters; `denials_count` is the uncapped
+open count; `counts.denials` sums `denials_count` over the sessions this snapshot emits. Older
+CLIs omit all three; the app defaults them to empty/0.
 Links' `branch`/`owned`/`awaits_you` and `title_source` were added with migration 6; the app
 decodes them as optionals.
 Turn fields (added for turn-finish notifications): `turn_finished_at` is the ts of the

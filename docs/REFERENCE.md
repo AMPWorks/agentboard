@@ -16,7 +16,7 @@ the code. A behavior change updates this file, and README.md only when a new use
 - Internals: [Data](#data), [Backfill](#backfill), [Hooks](#hooks) ([Async hooks](#async-hooks)),
   [State](#state)
 - Features: [Links & integrations](#links--integrations),
-  [Updates (retained notes)](#updates-retained-notes),
+  [Updates (retained notes)](#updates-retained-notes), [Permission denials](#permission-denials),
   [Plan usage and context](#plan-usage-and-context), [Menu bar icon](#menu-bar-icon),
   [Notifications](#notifications), [Search](#search), [Help](#help)
 - Reference: [Configuration (config.json)](#configuration-configjson),
@@ -248,8 +248,9 @@ second app instance or a manual run cannot double it up. Each run:
   `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`,
   `CwdChanged`, `ElicitationResult`, `PermissionDenied`) older than
   `compact_days` (default 7), from every session, live or ended. They are most of the table and
-  nothing reads them once the turn is over; prompts, `Stop`s, notifications and session start/end
-  rows are kept;
+  are not read for state once the turn is over; `PermissionDenied` rows also back the dashboard's
+  Denials list, so this compaction ends a denial's 7 days there, cleared or not. Prompts, `Stop`s,
+  notifications and session start/end rows are kept;
 - deletes dismissed notes older than `prune_days`;
 - runs `VACUUM` when the free pages exceed 8 MB and a quarter of the file, at most once a week
   (`notes_meta.last_vacuum_at`).
@@ -306,7 +307,8 @@ entries are inert there):
   "<server>: <question>" until you answer (see [State](#state)). The link and your answer are never stored.
 - `PermissionDenied` — auto mode's classifier blocked a tool call: recorded (tool name, reason,
   MCP server) as activity, since Claude carries on; repeated blocks come back as a
-  `PermissionRequest`.
+  `PermissionRequest`. Listed in the dashboard's Denials row and the session detail (see
+  [Permission denials](#permission-denials)); never a state change or an update.
 - `PostModelSwitch` — `/model`, an automatic fallback or the restore on resume: stores the new
   model and context size, and never changes the session's state.
 
@@ -793,6 +795,43 @@ After an upgrade that changes these rules, `agentboard notes --rebuild --reset` 
 the recorded history: it drops the open notes it made and replays every `Stop` through the new
 rules, so earlier loop noise disappears, and it never reopens a dismissed note.
 
+## Permission denials
+
+Each `PermissionDenied` hook event (auto mode's classifier blocked a tool call) stays in `events`
+with its tool name, its reason (Claude Code's wording, usually a category such as
+`[Irreversible Local Destruction]`, capped at 4000 characters) and, for an MCP tool, its server.
+The tool's input is never stored. A denial never changes a session's state and never makes an
+update.
+
+The snapshot gives each session `denials`, its newest 20 open (not cleared) denials, each
+`{"id", "ts", "tool_name", "reason", "mcp_server", "subagent"}` with the reason cut to 300
+characters, and `denials_count`, the uncapped open count; `counts.denials` sums `denials_count` over
+the sessions the snapshot emits, so hidden sessions' denials count only with `--all`. One query on
+a partial index (`idx_events_denials`) reads them; the snapshot stays network-free.
+
+```
+agentboard denials [--session TOOL:ID] [--all] [--json]
+agentboard denials --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID]
+```
+
+The listing is newest first (`--all` includes cleared ones, with their `dismissed_at`). Clearing
+sets `events.dismissed_at` on open `PermissionDenied` rows only (an id of another event changes
+nothing) and touches no session, note or triage row. A cleared denial keeps its row until
+compaction removes it with the other tool-use events after `compact_days` (7 by default), so a
+denial is reviewable for 7 days whether cleared or not; raise `compact_days` to keep them longer.
+
+In the dashboard, the sidebar's **Denials** row (below Done) counts the open denials the tool and
+project pickers and the search keep; selecting it replaces the session list with them, newest
+first: the session's project and title, the tool (`mcp__srv__x` with server `srv` reads
+`srv › x`), the reason without its brackets, a **subagent** tag and the time. A click shows the
+session in the detail column, double-click or Return focuses it, right-click gives its context
+menu. Each row's x clears it; the header's **Clear all** runs `denials --dismiss-all` (every open
+denial, hidden sessions included), and with a search or a picker set it reads **Clear matching**
+and clears every denial of each session the filters match on its own fields plus the listed
+denials matched by their own text. The session detail lists the session's denials with **Dismiss
+All** (`denials --dismiss-all --session TOOL:ID`). Denials never reach the popover, the menu bar
+icon or notifications.
+
 ## Plan usage and context
 
 **Plan usage.** The popover footer (above its buttons) and the dashboard sidebar (under the color
@@ -988,7 +1027,10 @@ The menu bar icon, its color and the flash always reflect every session, whateve
 sidebar and the tool and project pickers. The sidebar badges, including **All**, count the
 sessions left after the pickers and the query, so they always match the list. When the filters
 hide a session that needs you or was interrupted, a red line under the sidebar says how many,
-with a **Clear** button that resets the search and both pickers and selects **All**.
+with a **Clear** button that resets the search and both pickers and selects **All**. In the
+**Denials** view a plain word also matches each denial's tool, reason and MCP server (a field
+word still reads its session); the session list and the state badges never match denial text,
+so a query that only hits a denial lists that denial without listing its session.
 
 ## Help
 
@@ -1027,7 +1069,7 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
 | `retitle_min_prompts` | integer >= 1 | `5` | New prompts since the last retitle before a session is retitled again. |
 | `retitle_max_per_run` | integer >= 0 | `5` | At most this many sessions retitled per `refresh-links`; `0` turns it off. |
 | `prune_days` | integer >= 0 | `90` | `prune` deletes sessions idle this many days (never one with an open `needs_you` note, a PR awaiting you, an active snooze or a live process) and dismissed notes older than this; `0` never deletes. |
-| `compact_days` | integer >= 0 | `7` | `prune` deletes tool-use and subagent events older than this many days; `0` never compacts. |
+| `compact_days` | integer >= 0 | `7` | `prune` deletes tool-use and subagent events, and permission denials, older than this many days; `0` never compacts. |
 | `log_level` | `debug`/`info`/`warn`/`error` | `info` | The diagnostic log's level; `AGENTBOARD_LOG_LEVEL` wins over it. |
 
 ```json
@@ -1060,6 +1102,8 @@ agentboard note --kind needs_you|update|error --text T [--session TOOL:ID]
 agentboard notes [--session TOOL:ID] [--kind K ...] [--all] [--json]
 agentboard notes --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID] [--kind K ...]
 agentboard notes --rebuild [--days N] [--reset] [--json]
+agentboard denials [--session TOOL:ID] [--all] [--json]
+agentboard denials --dismiss ID [ID ...] | --dismiss-all [--session TOOL:ID]
 agentboard backfill [--days 30] [--session TOOL:ID --transcript PATH]
 agentboard refresh-links
 agentboard install-hooks [--claude] [--codex] [--dry-run]
