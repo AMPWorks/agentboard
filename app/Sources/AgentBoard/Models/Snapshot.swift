@@ -351,6 +351,11 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     var denials: [Denial] = []
     /// Open permission denials, uncapped.
     var denialsCount: Int = 0
+    /// The session runs inside tmux (focus goes through tmux), and the name
+    /// of its tmux session as of this snapshot (nil while it can't be
+    /// resolved). Both missing from older CLIs.
+    var tmux: Bool = false
+    var tmuxSession: String?
 
     var id: String { key }
 
@@ -385,6 +390,8 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         case permissionMode = "permission_mode"
         case denials
         case denialsCount = "denials_count"
+        case tmux
+        case tmuxSession = "tmux_session"
     }
 
     /// The CLI emits `null` for cwd/project/resume_command when a session's
@@ -437,6 +444,8 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         denials = (try? c.decodeIfPresent(LenientList<Denial>.self, forKey: .denials))?.items ?? []
         denialsCount = ((try? c.decodeIfPresent(Int.self, forKey: .denialsCount)) ?? nil)
             ?? denials.count
+        tmux = (try? c.decodeIfPresent(Bool.self, forKey: .tmux)) ?? false
+        tmuxSession = (try? c.decodeIfPresent(String.self, forKey: .tmuxSession)) ?? nil
     }
 
     static func == (lhs: Session, rhs: Session) -> Bool {
@@ -450,6 +459,8 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
             && lhs.contextAt == rhs.contextAt
             && lhs.permissionMode == rhs.permissionMode
             && lhs.denialsCount == rhs.denialsCount && lhs.denials == rhs.denials
+            // A tmux rename shows up on the next poll, with nothing else changed.
+            && lhs.tmux == rhs.tmux && lhs.tmuxSession == rhs.tmuxSession
     }
     func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
@@ -469,6 +480,13 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     var resumeAvailable: Bool { !(alive || state == .running || state == .needsYou) }
 
     var isAutoDone: Bool { autoDone == true }
+
+    /// The `tmux · <name>` tag text, or nil for a session outside tmux.
+    var tmuxTag: String? {
+        guard tmux else { return nil }
+        guard let name = tmuxSession, !name.isEmpty else { return "tmux" }
+        return "tmux \u{00B7} \(name)"
+    }
 
     /// The row's primary line (see `SessionDisplay`).
     var displayTitle: String { SessionDisplay.primaryTitle(self) }

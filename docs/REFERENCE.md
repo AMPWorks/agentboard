@@ -641,6 +641,24 @@ Terminal focus/resume support iTerm2 (`ITERM_SESSION_ID`) and Apple Terminal
 (`TERM_SESSION_ID`); for anything else, `agentboard focus`/`resume` just activates the app by
 `TERM_PROGRAM`.
 
+**Sessions inside tmux.** The hook records the tmux server socket and pane from `$TMUX` and
+`$TMUX_PANE` (environment only, no extra shell-out), and an event from a plain terminal clears
+them again. Inside tmux the inherited iTerm/Terminal ids belong to whatever started the tmux
+server, so `agentboard focus` ignores them and goes through tmux instead: it looks up the pane's
+current tmux session (`display-message`; a gone pane or dead server fails with
+`outcome=tmux_pane_gone`), selects its window and pane, then brings forward an iTerm2 or Terminal
+tab that has a client attached to that tmux session (it asks the terminal to bring that window
+forward but, unlike the plain iTerm2/Terminal path, doesn't verify that it reached the screen or
+switched desktops). Those probes only look at apps that are
+already running and never launch or activate one on a miss. With no attached client found, it
+opens a **new** iTerm window running `tmux -S <socket> attach-session -t '$<id>'` (a shared
+attach, never `-d`), or a Terminal window when iTerm isn't installed. tmux is found on `PATH`,
+then at `/opt/homebrew/bin/tmux` and `/usr/local/bin/tmux`. Rows of a live tmux session show a
+`tmux · <name>` tag (the name comes from one bounded `tmux list-panes -a` call per tmux server
+per snapshot, so a rename shows up on the next poll), the detail view has a tmux row, and
+dashboard search matches the tmux session name. An Automation refusal (-1743) from a probe or
+the attach exits 4 `needs_automation`, as for plain iTerm2/Terminal sessions. Resume is unchanged.
+
 **Focus across desktops (Spaces).** For iTerm2 and Apple Terminal, `agentboard focus` finds the
 session's tab, activates the terminal, waits until it is frontmost, and only then brings that
 exact window forward (by its window id) and selects the tab; a minimized window is restored. The
@@ -972,7 +990,9 @@ A newer turn of the same session replaces its delivered notification instead of 
 your next prompt in that session removes it, as does the session ending (quitting it, or
 `SessionEnd`); this cleanup still runs after you turn the toggle off. Notifications are grouped per session in
 Notification Center. Clicking either kind brings the session's terminal tab to the front (iTerm2
-and Terminal, via `agentboard focus`), switching to the desktop its window is on; when the session
+and Terminal, via `agentboard focus`), switching to the desktop its window is on. For a session
+inside tmux it brings forward the window attached to its tmux session, or opens a new iTerm window
+attached to it, without checking that the window reached the screen. When the session
 has no focusable terminal, or the jump fails (the tab was closed, macOS stayed on this desktop, a
 missing permission), the dashboard opens with it selected and the reason in its banner. A click on an earlier notification while AgentBoard is not running
 launches it and does the same once the first snapshot loads.
@@ -1294,7 +1314,9 @@ Outcomes:
   `activated_only`, `activate_failed` or `needs_automation`.
 - `needs_automation`: the script was refused with error -1743, so AgentBoard (or the terminal you
   ran `agentboard focus` from) may not control the terminal; allow it in System Settings →
-  Privacy & Security → Automation. Exits 4. For iTerm2 the app is still brought forward.
+  Privacy & Security → Automation. Exits 4. For iTerm2 the app is still brought forward. A tmux
+  session's client probe or attach script refused the same way also ends here (nothing is
+  brought forward).
 - `space_not_reached`: the tab was found and selected, but its window did not come on screen, so
   macOS stayed on this desktop. Exits 5. With `swoosh=off`, turn on the Desktop & Dock setting
   above; otherwise open the window from Mission Control.
@@ -1303,6 +1325,15 @@ Outcomes:
   does the same and logs `outcome=timeout`.
 - `no_terminal` / `unsupported_terminal`: the session has no recorded terminal, or one AgentBoard
   cannot drive.
+- `tmux_client_focused`: the session runs inside tmux, and an iTerm2 or Terminal tab whose tty is
+  an attached tmux client (`client_tty`) was brought to the front. Unlike the iTerm2/Terminal
+  paths, there is no on-screen check, so it never reports `space_not_reached`.
+- `tmux_attached_new_window` / `tmux_attached_terminal`: no attached client was found in a
+  running iTerm2 or Terminal, so a new iTerm window (Terminal when iTerm isn't installed, see
+  `iterm_installed`) was opened running `tmux attach-session` to the session.
+- `tmux_pane_gone`: the recorded tmux pane or its server no longer exists; nothing opens and
+  `focus` exits 1. `tmux_missing` means no tmux binary was found, and `tmux_attach_failed` that
+  the attach AppleScript exited non-zero (exit 1; an Automation refusal is `needs_automation`).
 
 For more detail turn on Verbose logging (or set `AGENTBOARD_LOG_LEVEL=debug`): each strategy is
 then logged as a `cli.focus.try` line.

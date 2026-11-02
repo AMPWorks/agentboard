@@ -102,7 +102,7 @@ struct SessionDetailView: View {
         HStack {
             if session.isFocusable {
                 Button("Focus") { Task { await store.focusOrShowDashboard(session) } }
-                    .help(SessionActionHelp.focus)
+                    .help(SessionActionHelp.focusHelp(session))
             }
             if session.resumeAvailable {
                 Button("Resume") { Task { await store.resume(session) } }
@@ -133,6 +133,10 @@ struct SessionDetailView: View {
             metadataRow(label: "Project", value: session.project)
             metadataRow(label: "Directory", value: session.cwd)
             metadataRow(label: "Branch", value: session.branch ?? "—")
+            if session.tmux {
+                metadataRow(label: "tmux", value: session.tmuxSession ?? "unknown")
+                    .help(SessionActionHelp.tmuxTag(session))
+            }
             metadataRow(label: "Started", value: RelativeTime.string(from: session.startedAt))
             metadataRow(label: "Updated", value: RelativeTime.string(from: session.updatedAt))
             if let endedAt = session.endedAt {

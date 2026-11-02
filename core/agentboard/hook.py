@@ -371,6 +371,35 @@ def _clean_tty(tty):
     return tty
 
 
+_TMUX_PANE_RE = re.compile(r"%[0-9]+")
+
+
+def _tmux_identity(environ=None):
+    """Return (socket_path, pane_id) for a session inside tmux, else (None, None).
+
+    $TMUX is "<socket>,<server-pid>,<session-index>" and $TMUX_PANE is "%N".
+    The socket path can itself hold commas, so the last two fields are split
+    off from the right. Anything malformed reads as "not in tmux": a pane id
+    that doesn't parse would only send `focus` to the wrong place.
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get("TMUX") or ""
+    pane = env.get("TMUX_PANE") or ""
+    parts = raw.rsplit(",", 2)
+    if len(parts) != 3:
+        return None, None
+    socket_path, server_pid, session_idx = parts
+    if (
+        not socket_path.startswith("/")
+        or not server_pid.isdigit()
+        or not session_idx.isdigit()
+        or "\n" in socket_path
+        or not _TMUX_PANE_RE.fullmatch(pane)
+    ):
+        return None, None
+    return socket_path, pane
+
+
 def is_untrusted_daemon(ppid, tty) -> bool:
     """True for a long-lived shared daemon rather than a per-session client.
 
@@ -1084,11 +1113,21 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
             # terminal either.
             iterm_session_id = None
             term_program = None
+            tmux_socket = tmux_pane = None
+            left_tmux = False
         else:
             iterm_session_id = (
                 os.environ.get("ITERM_SESSION_ID") or os.environ.get("TERM_SESSION_ID")
             )
             term_program = os.environ.get("TERM_PROGRAM")
+            tmux_socket, tmux_pane = _tmux_identity()
+            # A terminal other than tmux and no $TMUX: the session now runs
+            # outside tmux (resumed in a plain tab), so a stored pane id is
+            # stale and must not take over focus.
+            left_tmux = (
+                bool(term_program) and term_program != "tmux"
+                and not os.environ.get("TMUX")
+            )
 
         irrelevant_notification = event == "Notification" and not _notification_is_relevant(payload)
         needs_you_tool_reason = _needs_you_tool_reason(event, tool_name)
@@ -1215,8 +1254,9 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
                 "first_prompt, last_prompt, last_assistant, started_at, "
                 "updated_at, last_event, last_event_at, waiting_reason, pid, "
                 "iterm_session_id, term_program, transcript_path, origin, "
-                "interactive, ended_at, tty, end_reason, todos_open, permission_mode) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "interactive, ended_at, tty, end_reason, todos_open, permission_mode, "
+                "tmux_socket, tmux_pane) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     tool,
                     session_id,
@@ -1242,6 +1282,8 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
                     end_reason,
                     todos_open,
                     permission_mode,
+                    tmux_socket,
+                    tmux_pane,
                 ),
             )
         else:
@@ -1265,7 +1307,9 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
                 "tty = COALESCE(?, tty), "
                 "end_reason = COALESCE(?, end_reason), "
                 "todos_open = COALESCE(?, todos_open), "
-                "permission_mode = COALESCE(?, permission_mode) "
+                "permission_mode = COALESCE(?, permission_mode), "
+                "tmux_socket = COALESCE(?, tmux_socket), "
+                "tmux_pane = COALESCE(?, tmux_pane) "
                 "WHERE tool=? AND session_id=?",
                 (
                     cwd,
@@ -1288,6 +1332,8 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
                     end_reason,
                     todos_open,
                     permission_mode,
+                    tmux_socket,
+                    tmux_pane,
                     tool,
                     session_id,
                 ),
@@ -1385,7 +1431,15 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
             # (or a pre-fix hook run) already stored.
             conn.execute(
                 "UPDATE sessions SET pid=NULL, iterm_session_id=NULL, "
-                "term_program=NULL, tty=NULL WHERE tool=? AND session_id=?",
+                "term_program=NULL, tty=NULL, tmux_socket=NULL, tmux_pane=NULL "
+                "WHERE tool=? AND session_id=?",
+                (tool, session_id),
+            )
+        elif left_tmux and row is not None:
+            conn.execute(
+                "UPDATE sessions SET tmux_socket=NULL, tmux_pane=NULL "
+                "WHERE tool=? AND session_id=? "
+                "AND (tmux_socket IS NOT NULL OR tmux_pane IS NOT NULL)",
                 (tool, session_id),
             )
 
@@ -1421,7 +1475,7 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
             else "state_neutral" if state_neutral
             else f"session_start_{source}" if continued_start else None
         ),
-        term=term_program,
+        term=term_program, tmux_pane=tmux_pane,
     )
 
     if event in REPARSE_TRIGGER_EVENTS and not is_subagent_tagged:

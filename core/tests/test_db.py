@@ -213,10 +213,41 @@ class DbTests(AgentBoardTestCase):
         self.assertEqual(cols.get("context_tokens"), "INTEGER")
         self.assertEqual(cols.get("context_at"), "TEXT")
 
+    def test_migration_11_adds_tmux_columns_to_a_v10_database(self):
+        path = self.tmp_path / "v10.db"
+        old = sqlite3.connect(str(path), isolation_level=None)
+        for version in range(1, 11):
+            old.executescript(db._MIGRATIONS[version])
+        old.execute("PRAGMA user_version = 10")
+        old.execute(
+            "INSERT INTO sessions(tool, session_id, title, tty) "
+            "VALUES ('claude', 's1', 'kept', '/dev/ttys001')"
+        )
+        old.close()
+        conn = db.connect(path)
+        try:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 11)
+            session = conn.execute("SELECT * FROM sessions").fetchone()
+            self.assertEqual(session["title"], "kept")
+            self.assertEqual(session["tty"], "/dev/ttys001")
+            for col in ("tmux_socket", "tmux_pane"):
+                self.assertIn(col, session.keys())
+                self.assertIsNone(session[col], col)
+        finally:
+            conn.close()
+
+    def test_fresh_database_has_tmux_columns(self):
+        self.assertGreaterEqual(db.SCHEMA_VERSION, 11)
+        cols = {row["name"]: row["type"]
+                for row in self.conn.execute("PRAGMA table_info(sessions)")}
+        self.assertEqual(cols.get("tmux_socket"), "TEXT")
+        self.assertEqual(cols.get("tmux_pane"), "TEXT")
+
     def test_existing_migrations_are_unchanged(self):
         # Migrations already applied in the field are never edited.
         self.assertEqual(sorted(db._MIGRATIONS)[:9], [1, 2, 3, 4, 5, 6, 7, 8, 9])
         self.assertEqual(max(db._MIGRATIONS), db.SCHEMA_VERSION)
+        self.assertNotIn("tmux", db._MIGRATIONS[10])
         self.assertIn("ALTER TABLE sessions ADD COLUMN retitle_branch TEXT;", db._MIGRATIONS[6])
         self.assertNotIn("prompt_kind", db._MIGRATIONS[6])
         self.assertNotIn("context_tokens", db._MIGRATIONS[7])
