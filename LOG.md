@@ -427,3 +427,43 @@ denial text is kept out of the session's own search haystack: otherwise a word f
 list the session under All and move the state badges, which count sessions, not denials. The
 Denials badge therefore counts from the picker-filtered sessions with the query applied denial by
 denial, rather than from the query-filtered session list the state badges use.
+
+## 2026-11-01 20:41:38 UTC — Configurable sounds for events that need attention
+
+Settings gained a Sounds section: needs you, turn finished, a new permission denial, and a session
+interrupted or awaiting review each get a sound (none, the macOS alert sound, a system sound read
+from the system sounds folder, or an audio file the user picks). The app plays them through
+`NSSound`, independent of the notification toggles and of notification permission, so a missed or
+disabled banner can still be heard. Each choice is one lossless string in UserDefaults (`none`,
+`default`, `system:<name>`, `file:<path>`); the CLI, the snapshot and config.json are unchanged.
+
+Notification banners are now posted silent and the sound setting is the single control, so one
+event never sounds twice. Until the user picks a sound, needs you and turn finished play the macOS
+alert sound only while their notification toggle is on, and nothing while it is off: a fixed
+alert-sound default would have kept what banner users heard but started dinging on every turn for
+the many installs that had those toggles off (their default) and never heard anything. The rule
+lives in one place (`AttentionEvent.choice`), so the player, the detector and the Settings picker
+agree. The picker shows the unset state as its own "Follow notification toggle" entry naming what
+the toggle gives now, rather than showing the effective value: otherwise picking None or System
+default when it already matched the toggle was no selection change, nothing was stored, and a later
+toggle change silently overrode the pick. Any explicit pick, None included, wins. The two new
+events default to silence. System default plays as the system beep, which honors the alert volume
+and the user's alert sound without reading an undocumented preference; system sounds and files
+play at the output volume. App-played sounds are deliberately not silenced by Focus, unlike a
+notification's own sound, since the point is to be heard. Needs you and turn
+finished reuse the stateful diffs that already drive the flash and the notifications, computed once
+per snapshot and shared, so the sound, banner and flash never disagree. A new pure
+`SoundEventDetector` adds the other two: a denial plays when a session's newest open denial id rises
+(a per-session high-water mark that survives a session disappearing, so dismissing or unhiding
+never replays), and a review plays only for a PR awaiting the user or an update note, once per
+distinct turn and reason, never for a plain finished turn, and not alongside a turn-finished or
+needs-you event for the same session when that event has a sound (the detector takes which events
+currently sound, so a review whose covering event is set to None, or to a file or system sound
+that no longer resolves, still plays). Nothing plays for the first snapshot after launch, for older
+sessions a backfill brings in, or for the session the user is looking at in the dashboard; a burst
+of sessions is one sound per event.
+
+Playback goes through a small backend protocol so the tests drive the player with a fake and an
+in-memory defaults suite; the player holds each sound until it finishes, stops a still-playing
+sound of the same event before the next, and logs an unloadable file once per path. Volume control,
+repeats and per-session sounds were left out.

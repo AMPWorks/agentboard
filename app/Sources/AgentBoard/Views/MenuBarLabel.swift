@@ -11,6 +11,8 @@ struct MenuBarLabel: View {
     /// Runs on every snapshot even with the toggle off, so turning it on
     /// later never replays old turns.
     @State private var turns = TurnFinishDetector()
+    /// Settings → Sounds; plays even with the notification toggles off.
+    @State private var sounds = SoundEventDetector()
     @AppStorage(MenuBarIconSettings.coloredKey) private var colored: Bool = true
     @AppStorage(MenuBarIconSettings.flashKey) private var flash: Bool = true
     @AppStorage(MenuBarIconSettings.flashStopKey) private var flashStop: String = FlashStopPolicy.onOpen.rawValue
@@ -77,13 +79,22 @@ struct MenuBarLabel: View {
         }
         .onChange(of: store.snapshot) { _, newValue in
             let notifications = NotificationManager.shared
+            // Both diffs are stateful (a second call returns nothing), so
+            // each runs once and feeds the notifications and the sounds.
             let entered = attention.note(snapshot: newValue)
-            notifications.notify(newlyNeedingYou: entered, in: newValue, enabled: notifyOnNeedsYou)
-            notifications.notify(
-                turns: turns.note(newValue), enabled: notifyOnTurnFinished,
-                context: .init(dashboardIsKey: attention.dashboardIsKey,
-                               dashboardSelection: store.dashboardSelection)
+            let turnChanges = turns.note(newValue)
+            let context = SessionNotificationPlan.Context(
+                dashboardIsKey: attention.dashboardIsKey,
+                dashboardSelection: store.dashboardSelection
             )
+            notifications.notify(newlyNeedingYou: entered, in: newValue, enabled: notifyOnNeedsYou)
+            notifications.notify(turns: turnChanges, enabled: notifyOnTurnFinished, context: context)
+            let player = SoundPlayer.shared
+            let sounding = Set(AttentionEvent.allCases.filter { player.sounds($0) })
+            player.play(sounds.note(
+                newValue, needsYouEntered: entered, turns: turnChanges, context: context,
+                sounds: sounding.contains
+            ))
             if let key = notifications.takePendingOpenKey() {
                 Self.openSession(key, store: store)
             }

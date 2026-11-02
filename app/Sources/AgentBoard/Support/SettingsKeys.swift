@@ -12,11 +12,22 @@ enum SettingsKeys {
     /// Post a notification when an attended session finishes its turn
     /// (default off).
     static let notifyOnTurnFinished = "notifyOnTurnFinished"
+    /// The sound each `AttentionEvent` plays, as a `SoundChoice` string
+    /// (`none`, `default`, `system:<name>`, `file:<path>`). Unset (or empty)
+    /// means the event's `defaultChoice(notifyOn:)`.
+    static let soundNeedsYou = "soundNeedsYou"
+    static let soundTurnFinished = "soundTurnFinished"
+    static let soundDenied = "soundDenied"
+    static let soundReviewReady = "soundReviewReady"
 
     static let all: [String] = [
         SettingsKeys.appearance,
         SettingsKeys.notifyOnNeedsYou,
         SettingsKeys.notifyOnTurnFinished,
+        SettingsKeys.soundNeedsYou,
+        SettingsKeys.soundTurnFinished,
+        SettingsKeys.soundDenied,
+        SettingsKeys.soundReviewReady,
         MenuBarIconSettings.coloredKey,
         MenuBarIconSettings.flashKey,
         MenuBarIconSettings.flashStopKey,

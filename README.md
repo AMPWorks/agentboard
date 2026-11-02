@@ -146,6 +146,10 @@ toolbar) → **Settings…**.
   the flash stops.
 - **Notifications**: notify when a session needs you, and when a session finishes a turn (both
   off by default).
+- **Sounds**: a sound for a session needing you, finishing a turn, a new permission denial, and
+  a session interrupted or awaiting review; plays even with notifications off. Until you pick
+  one (shown as **Follow notification toggle**), needs you and turn finished play the alert
+  sound only while their notification toggle is on; the other two are silent.
 - **General**: launch at login, show plan usage, and show closed and merged PRs on rows.
 - **CLI & Data**: a path to the `agentboard` CLI, if the app cannot find it.
 - **Diagnostics**: verbose logging and **Open log**.
@@ -174,6 +178,9 @@ without opening it. With Reduce motion on, the icon shows a badge instead of fla
 **Notifications.** Optional macOS notifications when a session needs you or finishes its turn.
 Clicking one brings the session's terminal tab to the front, and your next prompt in that session
 clears its finished-turn notification. [More](docs/REFERENCE.md#notifications)
+
+**Sounds.** Pick a system sound, an audio file or none for each event that needs your attention.
+Sounds play through AgentBoard, so they work with notifications off. [More](docs/REFERENCE.md#sounds)
 
 **Search.** The popover and the dashboard share one search: every word must match, quotes keep
 a phrase together, and qualifiers such as `branch:`, `state:`, `repo:` and `pr:` narrow a word.
