@@ -467,3 +467,24 @@ Playback goes through a small backend protocol so the tests drive the player wit
 in-memory defaults suite; the player holds each sound until it finishes, stops a still-playing
 sound of the same event before the next, and logs an unloadable file once per path. Volume control,
 repeats and per-session sounds were left out.
+
+## 2026-11-02 07:28:31 UTC — Sessions inside tmux focus through tmux
+
+A session started inside tmux reported `TERM_PROGRAM=tmux`, which no focus strategy could drive,
+so its row was not clickable. The hook now records the tmux server socket and pane from `$TMUX`
+and `$TMUX_PANE` (one new migration). That is environment only, keeping the hook's no-new-shell-out
+rule, and an event from a plain terminal clears both again. Inside tmux the inherited
+iTerm/Terminal ids belong to whatever started the tmux server, so `focus` ignores them: it looks
+the pane up at click time, selects its window and pane, brings forward an iTerm2 or Terminal tab
+whose tty is an attached client, and otherwise opens a new iTerm window (Terminal without iTerm)
+running a shared `tmux attach-session`. The session is targeted by its `$N` id rather than its
+name, which tmux would parse as target syntax and which can change. The client probes look only at
+apps already running and never activate one on a miss, so a click cannot launch Terminal as a side
+effect; an Automation refusal on a probe or the attach exits 4 like the other paths. Unlike them,
+the tmux path does not verify that the window reached the screen.
+
+Rows show a `tmux · <name>` tag, the detail view a tmux row, and search matches the name. The
+environment carries only a session index, not a name, and the hook cannot shell out, so the
+snapshot resolves names live with one `tmux list-panes -a` per socket, only for alive tmux rows
+and bounded at half the slow-snapshot threshold. Storing the name at focus or refresh time was the
+alternative, but it would be blank until first use and stale after a rename.

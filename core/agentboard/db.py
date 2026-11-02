@@ -6,7 +6,7 @@ from pathlib import Path
 
 DB_FILENAME = "agentboard.db"
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _MIGRATIONS = {
     1: """
@@ -169,6 +169,13 @@ _MIGRATIONS = {
     ALTER TABLE events ADD COLUMN dismissed_at TEXT;
     CREATE INDEX idx_events_denials ON events(tool, session_id, ts)
         WHERE event = 'PermissionDenied';
+    """,
+    # tmux hosting: a session started inside tmux records its server socket
+    # path and pane id (from $TMUX/$TMUX_PANE), so `focus` can find the pane
+    # and its attached clients, or attach a new window to it.
+    11: """
+    ALTER TABLE sessions ADD COLUMN tmux_socket TEXT;
+    ALTER TABLE sessions ADD COLUMN tmux_pane TEXT;
     """,
 }
 

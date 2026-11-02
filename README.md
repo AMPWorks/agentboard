@@ -207,7 +207,8 @@ older than a week. [More](docs/REFERENCE.md#data)
 **Jump to the terminal.** Clicking a row focuses its tab in iTerm2 or Apple Terminal, switching to
 the desktop (Space) its window is on (verified with iTerm2 so far); when that doesn't happen, the
 dashboard opens with the reason and a button for the setting that fixes it. For other terminals AgentBoard brings the terminal app
-to the front.
+to the front. A session running inside tmux opens through tmux: the window attached to its tmux
+session comes forward, or a new iTerm window attaches to it.
 [More](docs/REFERENCE.md#links--integrations)
 
 ## Hooking in your own tools

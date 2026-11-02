@@ -315,6 +315,11 @@ checks with the public CoreGraphics window list that the window really came on s
 Recording permission). Verified with iTerm2 on one display with the Desktop & Dock "switch to a
 Space with open windows" setting on; Apple Terminal, a second display and the setting off are
 expected to work but not verified. Resume opens in the same terminal app the session used when possible.
+tmux (added after the original spec): the hook records `$TMUX`'s socket path and `$TMUX_PANE`
+(env only) in `sessions.tmux_socket`/`tmux_pane`; a session with a pane is always `can_focus`,
+and focus goes through tmux, never the iTerm/Terminal ids it inherited from the tmux server.
+The snapshot's `tmux` is true for such a session; `tmux_session` is its tmux session name, read
+for alive, not-ended rows with one bounded (0.5 s) `tmux list-panes -a` per socket, else null.
 
 ## Backfill (`agentboard backfill --days 30`)
 
@@ -387,6 +392,7 @@ agentboard title --text T [--session TOOL:ID]   name a session (a user's custom 
 agentboard install-hooks [--claude] [--codex] [--dry-run]
 agentboard uninstall-hooks [--claude] [--codex]
 agentboard focus <tool> <session_id>         focus the iTerm2/Terminal tab, on another desktop too if it can (exit 0/1/4/5)
+                                             inside tmux: focus an attached client or attach a new window
 agentboard resume <tool> <session_id> [--print]  open new iTerm2 tab running resume cmd
 agentboard prune [--days N] [--compact-days N] [--dry-run] [--auto] [--vacuum]   retention
 agentboard logs [--since 1h] [--grep T] [--lines N] [--app]   print the diagnostic log
@@ -405,8 +411,9 @@ Diagnostic log (added after the original spec): every subcommand, hook and app a
 once to `agentboard.log.1` at 2 MB (never a `.2`), never raises, and `snapshot`/`paths` stay at
 debug unless they fail or run over 1 s. `focus` logs an `outcome` (`matched_uuid`, `matched_tty`,
 `matched_unknown`, `activated_only`, `activate_failed`, `not_found`, `needs_automation`,
-`space_not_reached`, `timeout`, `no_terminal`, `unsupported_terminal`; osascript/`open -a` calls are
-bounded at 10 s) plus `window_id`, `app_pid`, `space_before`, `onscreen_after`, `onscreen_ms`, `reselect_skipped` when
+`space_not_reached`, `timeout`, `no_terminal`, `unsupported_terminal`, and for tmux sessions
+`tmux_client_focused`, `tmux_attached_new_window`, `tmux_attached_terminal`, `tmux_pane_gone`,
+`tmux_missing`, `tmux_attach_failed`; osascript/`open -a`/tmux calls are bounded at 10 s) plus `window_id`, `app_pid`, `space_before`, `onscreen_after`, `onscreen_ms`, `reselect_skipped` when
 a tab moved before it could be selected, and, on
 `space_not_reached`, `swoosh`. It exits 0 when the window reached the screen (or that can't be
 checked), 1 for a failure (tab not found and only the app brought forward, `not_found`, `timeout`,
@@ -444,6 +451,14 @@ approval within 1 s of the prompt leaves the row needs-you until that tool's `Po
 Resume commands: Claude `cd <cwd> && claude --resume <id>`; Codex `cd <cwd> && codex resume <id>`.
 Focus: iTerm `ITERM_SESSION_ID` is `w0t1p0:<UUID>`; match `unique id` of iTerm sessions to UUID,
 activate iTerm, then select that window (by id), tab and session. Exit non-zero with message if not found.
+tmux focus (when `tmux_pane` is set): `tmux -S <socket> display-message -p -t <pane>` gives the
+pane's session id, name and window (failure: `tmux_pane_gone`, exit 1); `select-window` and
+`select-pane` it; `list-clients -t <session-id>` gives client ttys, each probed in iTerm2 (if
+installed, per `open -Ra iTerm`) and Terminal by tty with scripts that return `not_running`
+for an app that isn't running and never activate on a miss; with no match, a new iTerm window
+(Terminal if iTerm is missing) runs `<tmux> -S <socket> attach-session -t '$<id>'`. A probe
+or attach refused with -1743 exits 4 `needs_automation`. A matched client exits 0
+(`tmux_client_focused`) with no on-screen check, so tmux focus never reports `space_not_reached`.
 
 ## Snapshot JSON contract (consumed by the Swift app)
 
@@ -467,6 +482,7 @@ activate iTerm, then select that window (by id), tab and session. Exit non-zero 
       "started_at": "ISO", "updated_at": "ISO", "ended_at": "ISO|null",
       "alive": true, "interactive": true,
       "can_focus": true,
+      "tmux": false, "tmux_session": "string|null",
       "resume_command": "cd ... && claude --resume ...",
       "links": [{"kind": "pr|ticket", "ref": "ABC-123|#26", "url": "...", "state": "OPEN|MERGED|CLOSED|null", "title": "...",
                  "branch": "string|null", "owned": false, "awaits_you": false}],
