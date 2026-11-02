@@ -9,6 +9,7 @@ import OSLog
 /// post or remove is decided by `SessionNotificationPlan`; this class only
 /// turns that into `UNNotificationRequest`s. Clicking either kind focuses
 /// the session's terminal, or opens the dashboard with it selected.
+/// Notifications are silent; Settings → Sounds plays the sound.
 ///
 /// `UNUserNotificationCenter.current()` raises in a process without a
 /// bundle (the bare `.build/release/AgentBoard` used in fixture mode), so
@@ -87,17 +88,28 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    private func post(_ planned: SessionNotificationPlan.Planned) {
-        guard let center = center() else { return }
+    /// How a banner shows while AgentBoard is the active app: no sound,
+    /// like the request itself.
+    nonisolated static let presentationOptions: UNNotificationPresentationOptions = [.banner]
+
+    /// The request content for one planned notification. Silent: the
+    /// event's sound comes from Settings → Sounds (`SoundPlayer`), which
+    /// plays with notifications off too, so one event never sounds twice.
+    static func content(for planned: SessionNotificationPlan.Planned) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         content.title = planned.title
         if let subtitle = planned.subtitle { content.subtitle = subtitle }
         content.body = planned.body
-        content.sound = .default
+        content.sound = nil
         content.threadIdentifier = planned.threadIdentifier
         content.categoryIdentifier = SessionNotificationPlan.categoryIdentifier
         content.userInfo = planned.userInfo
+        return content
+    }
 
+    private func post(_ planned: SessionNotificationPlan.Planned) {
+        guard let center = center() else { return }
+        let content = Self.content(for: planned)
         let identifier = planned.identifier
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
         center.add(request) { [weak self] error in
@@ -142,12 +154,12 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     /// Show banners even while AgentBoard is the active app (the dashboard
     /// is key with another session selected); the selected session was
-    /// already left out before posting.
+    /// already left out before posting. No sound: `SoundPlayer` plays it.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .sound])
+        completionHandler(Self.presentationOptions)
     }
 }

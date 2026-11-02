@@ -15,7 +15,14 @@ struct SettingsView: View {
     @AppStorage(CLIRunner.verboseLoggingKey) private var verboseLogging: Bool = false
     @AppStorage(SettingsKeys.showPlanUsage) private var showPlanUsage: Bool = true
     @AppStorage(SettingsKeys.showClosedAndMergedPRs) private var showClosedAndMergedPRs: Bool = false
+    // Empty means never picked: the row shows `AttentionEvent.choice`'s
+    // default, which follows the matching notification toggle.
+    @AppStorage(SettingsKeys.soundNeedsYou) private var soundNeedsYou: String = ""
+    @AppStorage(SettingsKeys.soundTurnFinished) private var soundTurnFinished: String = ""
+    @AppStorage(SettingsKeys.soundDenied) private var soundDenied: String = ""
+    @AppStorage(SettingsKeys.soundReviewReady) private var soundReviewReady: String = ""
     @State private var launchAtLogin: Bool = false
+    @State private var systemSounds: [String] = SoundChoice.systemSoundNames()
 
     var body: some View {
         Form {
@@ -70,6 +77,22 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             } header: {
                 header("Notifications", topic: .settings)
+            }
+
+            Section {
+                SoundSettingsRow(event: .needsYou, stored: $soundNeedsYou,
+                                 notifyOn: notifyOnNeedsYou, systemSounds: systemSounds)
+                SoundSettingsRow(event: .turnFinished, stored: $soundTurnFinished,
+                                 notifyOn: notifyOnTurnFinished, systemSounds: systemSounds)
+                SoundSettingsRow(event: .denied, stored: $soundDenied,
+                                 notifyOn: false, systemSounds: systemSounds)
+                SoundSettingsRow(event: .reviewReady, stored: $soundReviewReady,
+                                 notifyOn: false, systemSounds: systemSounds)
+                Text("Sounds play even when notifications are off or not allowed, and Focus does not silence them; notification banners themselves are silent. Until you pick one, Needs you and Turn finished play the alert sound only while their notification toggle is on. Nothing plays for sessions already waiting when AgentBoard starts.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                header("Sounds", topic: .settings)
             }
 
             Section {

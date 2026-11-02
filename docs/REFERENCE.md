@@ -18,7 +18,7 @@ the code. A behavior change updates this file, and README.md only when a new use
 - Features: [Links & integrations](#links--integrations),
   [Updates (retained notes)](#updates-retained-notes), [Permission denials](#permission-denials),
   [Plan usage and context](#plan-usage-and-context), [Menu bar icon](#menu-bar-icon),
-  [Notifications](#notifications), [Search](#search), [Help](#help)
+  [Notifications](#notifications), [Sounds](#sounds), [Search](#search), [Help](#help)
 - Reference: [Configuration (config.json)](#configuration-configjson),
   [CLI reference](#cli-reference), [Diagnostics](#diagnostics)
 
@@ -830,7 +830,7 @@ denial, hidden sessions included), and with a search or a picker set it reads **
 and clears every denial of each session the filters match on its own fields plus the listed
 denials matched by their own text. The session detail lists the session's denials with **Dismiss
 All** (`denials --dismiss-all --session TOOL:ID`). Denials never reach the popover, the menu bar
-icon or notifications.
+icon or notifications, but a new one can play an optional sound (see [Sounds](#sounds)).
 
 ## Plan usage and context
 
@@ -947,7 +947,9 @@ nothing is open (usually sooner, via the data directory watcher).
 ## Notifications
 
 Settings → Notifications has two toggles, both off by default. macOS asks for permission the
-first time you turn one on.
+first time you turn one on. The banners are silent: the sound for each event comes from
+Settings → Sounds (see [Sounds](#sounds)), which plays whether or not notifications are on, so one
+event never sounds twice.
 
 - **Notify when a session needs you** (`notifyOnNeedsYou`): one notification when a session
   newly enters `needs_you`, with the waiting reason as its text.
@@ -974,6 +976,54 @@ and Terminal, via `agentboard focus`), switching to the desktop its window is on
 has no focusable terminal, or the jump fails (the tab was closed, macOS stayed on this desktop, a
 missing permission), the dashboard opens with it selected and the reason in its banner. A click on an earlier notification while AgentBoard is not running
 launches it and does the same once the first snapshot loads.
+
+## Sounds
+
+Settings → Sounds gives four events a sound each. AgentBoard plays it itself, so it plays with the
+notification toggles off and without notification permission; the notification banners are
+silent. Each row has a picker (for needs you and turn finished, **Follow notification toggle**
+first; then **None**, **System default**, every sound in
+`/System/Library/Sounds`, and **Choose file…** for an `.aiff`, `.wav`, `.mp3` or `.m4a` anywhere
+on disk, shown by its file name) and a preview button. Cancelling Choose file… keeps the previous
+sound. A chosen file that has since moved shows as "(missing)", plays nothing and logs one notice
+(OSLog, category `sounds`).
+
+**System default** is the system beep (`NSSound.beep()`): the alert sound chosen in System
+Settings → Sound, at the alert volume. System sounds and chosen files play through `NSSound` at
+the main output volume. Focus / Do Not Disturb does not silence any of them: that is deliberate,
+since the point is to be heard (a notification's own sound used to be silenced by Focus).
+
+| Event | Key | Default (unset) | Plays when |
+|---|---|---|---|
+| Needs you | `soundNeedsYou` | `default` while `notifyOnNeedsYou` is on, else `none` | a session newly enters `needs_you` (the same moment the icon starts flashing) |
+| Turn finished | `soundTurnFinished` | `default` while `notifyOnTurnFinished` is on, else `none` | an attended session finishes its turn (exactly when the turn notification would post, toggle on or off) |
+| Permission denied | `soundDenied` | `none` | a session records a new permission denial (its newest open denial id rises) |
+| Interrupted or awaiting review | `soundReviewReady` | `none` | an attended session enters `interrupted`, or enters Review because a PR it opened awaits you or it raised an update note |
+
+Each value is one string: `none`, `default`, `system:<name>` (a system sound, without its
+extension) or `file:<absolute path>`; anything else reads as `none`. A missing or empty value
+means the user has not picked one, and the default applies: for needs you and turn finished it
+follows the matching notification toggle, so a user who had that banner keeps hearing its sound
+and an install with the toggle off stays silent. The Settings picker shows the unset state as its
+own entry, **Follow notification toggle (System default)** or **(None)** as the toggle stands,
+updated live; choosing it stores the empty value again. Every other entry stores a concrete value,
+so picking **None** or **System default** pins it even when it matches what the toggle gives
+today. Any explicit pick, `none` included, wins over the toggle. Permission denied and
+interrupted or awaiting review have no toggle and no Follow entry; unset, they show **None**.
+
+Never: anything at launch (the first snapshot plays nothing, including sessions already waiting),
+an older session a backfill or **Show hidden** brings in (unless its denial or state change is
+newer than the launch), the session selected in the dashboard while the dashboard window is key,
+or a session reappearing after it was hidden. Dismissing denials never plays. Interrupted or
+awaiting review never plays for a plain finished turn (that is Turn finished), for a session that
+also finished its turn or newly needs you in the same snapshot when that event has a sound that
+will play (with that event set to None, or to a file or system sound that is missing, the review
+sound plays instead), for non-interactive sessions or
+loop and cron turns, or again while the same turn and reason stay (a session flickering between
+Running and Review is silent). Several sessions qualifying in one snapshot play one sound per
+event, and two events set to the same sound in one snapshot play it once. A sound plays once:
+there is no repeat. A newer sound for the same event stops one still playing. The CLI is not
+involved; the choices are app settings in the `io.github.agentboard` defaults domain.
 
 ## Search
 
