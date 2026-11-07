@@ -58,10 +58,13 @@ enum NoteStyle {
     }
 }
 
-/// The popover's Updates section: the filtered feed of open notes as rows
+/// The popover's Updates panel: the filtered feed of open notes as rows
 /// (`UpdatesFeed.rows`), compact by default so it never pushes the session
-/// list out of view: every needs_you row, and at most
-/// `UpdatesFeed.compactLimit` others until "Show all N" expands it.
+/// list out of view: every needs_you row, and at most `compactLimit`
+/// others until "Show all N" expands it. With `onHide` (the panel was
+/// opened from the Updates button) it sits on a tinted card with a Hide
+/// button; without it (Settings → Popover → Always shown) it is the plain
+/// section it always was.
 struct UpdatesSectionView: View {
     let rows: [UpdatesFeed.Row]
     /// Listed notes the rows stand for (the header's "N of M").
@@ -70,46 +73,107 @@ struct UpdatesSectionView: View {
     let total: Int
     let clearPlan: UpdatesFeed.ClearPlan
     @ObservedObject var store: SnapshotStore
+    var fontSize: UpdatesFontSize = .standard
+    var compactLimit: Int = UpdatesFeed.compactLimit
+    /// Shown instead of rows when the query keeps none.
+    var emptyText: String = "No open updates"
+    var onHide: (() -> Void)? = nil
 
     @State private var expanded = false
 
     var body: some View {
-        let compact = UpdatesFeed.compact(rows, expanded: expanded)
+        let compact = UpdatesFeed.compact(rows, expanded: expanded, limit: compactLimit)
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: 6) {
                 Text(UpdatesFeed.header(listed: listed, total: total))
-                    .font(.caption.bold())
+                    .font(fontSize.text.bold())
                     .foregroundStyle(.secondary)
                     .help("Open updates: what sessions said that is worth keeping, until you dismiss it")
                 HelpButton(topic: .updates, tooltip: "Explain the Updates feed in AgentBoard Help",
                            closesHostWindow: true)
-                    .font(.caption)
+                    .font(fontSize.text)
                 Spacer()
-                Button(clearPlan.title) {
-                    let plan = clearPlan
-                    Task { await store.dismiss(plan.dismissals, action: plan.title.lowercased()) }
+                if !rows.isEmpty {
+                    Button(clearPlan.title) {
+                        let plan = clearPlan
+                        Task { await store.dismiss(plan.dismissals, action: plan.title.lowercased()) }
+                    }
+                    .help(clearPlan.help)
                 }
-                .buttonStyle(.plain)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .help(clearPlan.help)
+                if let onHide {
+                    Button("Hide") { onHide() }
+                        .padding(.leading, 6)
+                        .help("Hide the Updates panel; the Updates button next to the search field shows it again")
+                }
             }
+            .buttonStyle(.plain)
+            .font(fontSize.text)
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
-            .padding(.top, 4)
+            .padding(.top, onHide == nil ? 4 : 6)
+            .padding(.bottom, rows.isEmpty ? 0 : 2)
+            if rows.isEmpty {
+                Text(emptyText)
+                    .font(fontSize.text)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+            }
             ForEach(compact.shown) { row in
-                UpdateRowView(row: row, store: store)
+                UpdateRowView(row: row, store: store, fontSize: fontSize)
                     .padding(.horizontal, 4)
             }
-            if UpdatesFeed.needsToggle(rows) {
+            if UpdatesFeed.needsToggle(rows, limit: compactLimit) {
                 Button(expanded ? "Show fewer" : "Show all \(rows.count)") {
                     expanded.toggle()
                 }
                 .buttonStyle(.plain)
-                .font(.caption)
+                .font(fontSize.text)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 2)
-                .help(expanded ? "Show at most \(UpdatesFeed.compactLimit) updates" : "List every update here")
+                .help(expanded ? "Show at most \(compactLimit) updates besides the ones that need you" : "List every update here")
+            }
+        }
+        .padding(.bottom, onHide == nil ? 0 : 4)
+        .background {
+            if onHide != nil {
+                RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.5))
+            }
+        }
+        .padding(.horizontal, onHide == nil ? 0 : 6)
+    }
+}
+
+/// With the Updates panel closed, the needs_you updates whose session is
+/// not red (`PopoverUpdatesSettings.pinnedRows`), so a request is never
+/// hidden behind the button.
+struct PinnedUpdatesView: View {
+    let rows: [UpdatesFeed.Row]
+    @ObservedObject var store: SnapshotStore
+    var fontSize: UpdatesFontSize = .standard
+    let showAll: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(rows.count == 1 ? "Update that needs you" : "Updates that need you (\(rows.count))")
+                    .font(fontSize.text.bold())
+                    .foregroundStyle(.secondary)
+                    .help("Requests from sessions that are not in Needs you (done, snoozed, or answered since); dismiss one once it is handled")
+                Spacer()
+                Button("Show all updates") { showAll() }
+                    .buttonStyle(.plain)
+                    .font(fontSize.text)
+                    .foregroundStyle(.secondary)
+                    .help("Open the Updates panel with every open update")
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            ForEach(rows) { row in
+                UpdateRowView(row: row, store: store, fontSize: fontSize)
+                    .padding(.horizontal, 4)
             }
         }
     }
@@ -124,6 +188,7 @@ struct UpdatesSectionView: View {
 struct UpdateRowView: View {
     let row: UpdatesFeed.Row
     @ObservedObject var store: SnapshotStore
+    var fontSize: UpdatesFontSize = .standard
 
     @State private var expanded = false
     @State private var isHovering = false
@@ -133,54 +198,55 @@ struct UpdateRowView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
             NoteStyle.glyph(row.glyphKind)
-                .font(.caption)
-                .frame(width: 14)
+                .font(fontSize.text)
+                .frame(width: fontSize.textSize + 4)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(row.toolBadge)
-                        .font(.caption2.monospaced().bold())
-                        .frame(width: 14, height: 14)
+                        .font(.system(size: fontSize.minorSize, weight: .bold, design: .monospaced))
+                        .frame(width: fontSize.minorSize + 4, height: fontSize.minorSize + 4)
                         .background(row.session.tool == "codex" ? Color.purple.opacity(0.25) : Color.blue.opacity(0.25))
                         .clipShape(Circle())
                         .help(SessionRowView.toolHelp(row.session))
                     Text(row.project.isEmpty ? row.session.displayTitle : row.project)
-                        .font(.caption.bold())
+                        .font(fontSize.text.bold())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     if let group = row.groupLabel {
                         Text(group)
-                            .font(.caption2.monospacedDigit())
+                            .font(fontSize.minor.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .help("\(row.total) open updates from this session")
                     } else if let count = NoteStyle.countLabel(row.note) {
                         Text(count)
-                            .font(.caption2.monospacedDigit())
+                            .font(fontSize.minor.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .help("Seen \(row.note.count) times")
                     }
                     Spacer(minLength: 4)
                     Text(RelativeTime.string(from: row.note.lastTs))
-                        .font(.caption2)
+                        .font(fontSize.minor)
+                        .fixedSize()
                         .foregroundStyle(.secondary)
                 }
                 if expanded && row.isGroup {
                     ForEach(row.notes) { note in
-                        GroupedNoteLine(note: note, session: row.session, store: store) {
+                        GroupedNoteLine(note: note, session: row.session, store: store, fontSize: fontSize) {
                             openInDashboard(note)
                         }
                     }
                     if row.total > row.notes.count {
                         Text("\(row.total - row.notes.count) older not listed")
-                            .font(.caption2)
+                            .font(fontSize.minor)
                             .foregroundStyle(.secondary)
                     }
                 } else if expanded {
                     NoteStyle.fullText(row.note.text)
-                        .font(.caption)
+                        .font(fontSize.text)
                 } else {
                     Text(row.note.firstLine)
-                        .font(.caption)
+                        .font(fontSize.text)
                         .lineLimit(2)
                 }
             }
@@ -205,9 +271,9 @@ struct UpdateRowView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .font(.caption)
+            .font(fontSize.text)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, fontSize.rowPadding)
         .padding(.horizontal, 6)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
@@ -241,16 +307,17 @@ private struct GroupedNoteLine: View {
     let note: Note
     let session: Session
     @ObservedObject var store: SnapshotStore
+    var fontSize: UpdatesFontSize = .standard
     let open: () -> Void
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(note.firstLine)
-                .font(.caption)
+                .font(fontSize.text)
                 .lineLimit(2)
             Spacer(minLength: 4)
             Text(RelativeTime.string(from: note.lastTs))
-                .font(.caption2)
+                .font(fontSize.minor)
                 .foregroundStyle(.secondary)
             Button {
                 Task { await store.dismissNote(note, of: session) }
@@ -259,7 +326,7 @@ private struct GroupedNoteLine: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .font(.caption2)
+            .font(fontSize.minor)
             .help("Dismiss this update")
             .accessibilityLabel("Dismiss update")
         }

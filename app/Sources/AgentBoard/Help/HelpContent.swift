@@ -43,7 +43,7 @@ enum HelpContent {
             .paragraph("The first number next to the icon counts sessions that need you or were interrupted; the second, dimmer number counts sessions in Review. With **Reduce motion** on (System Settings → Accessibility → Display) the icon shows an exclamation badge instead of flashing. Settings → Menu bar icon turns coloring and flashing on or off."),
             .heading("Popover and dashboard"),
             .bullets([
-                "**The popover** opens when you click the menu bar icon: a compact list of the sessions that matter now, the Updates feed and a search field. Click a row to jump to its terminal.",
+                "**The popover** opens when you click the menu bar icon: a compact list of the sessions that matter now and a search field, with the Updates feed one click away behind the **Updates** button. Click a row to jump to its terminal.",
                 "**The dashboard** is a full window with every session, filters by state, tool and project, and a detail pane for the selected session. Open it with **Open Dashboard** in the popover footer or the hotkey.",
             ]),
             .shortcut(keys: "⌃⌥⌘A", action: "Show or hide the dashboard from anywhere."),
@@ -93,7 +93,9 @@ enum HelpContent {
     static let popover = HelpTopic(
         id: .popover, title: "The popover", symbol: "menubar.rectangle",
         blocks: [
-            .paragraph("Click the menu bar icon to open the popover. From top to bottom: the search field, the **Updates** feed (see Updates), the session sections, and the footer."),
+            .paragraph("Click the menu bar icon to open the popover. From top to bottom: the search field with the **Updates** button, the Updates panel when you open it (see Updates), the session sections, and the footer."),
+            .heading("The Updates button"),
+            .paragraph("Next to the search field, **Updates N** shows how many open updates there are (while you search, how many match). Click it to show the Updates panel above the sessions; click it again, or **Hide** in the panel, to close it. It is hidden while there are no updates. By default the panel closes again each time the popover opens; Settings → Popover → **Updates panel** can remember how you left it or always show it (then there is no button). A request from a session that is no longer in Needs you (done, snoozed or answered) stays above the sessions as **Update that needs you** even while the panel is closed, whatever you have typed in the search field."),
             .heading("Sections"),
             .keyValue([
                 HelpRow(key: "Needs you", value: "Sessions that need you, and interrupted ones (with an orange **Interrupted** tag)."),
@@ -155,9 +157,11 @@ enum HelpContent {
             ]),
             .heading("In the popover"),
             .bullets([
-                "Updates sits above Needs you with a count and a clear button. Each row shows the kind, the tool badge, the project, the first line, ×N and the time.",
+                "Updates are one click away: the **Updates** button next to the search field (with the open count) shows the Updates panel above Needs you, and the button or **Hide** closes it. By default the panel closes each time the popover opens; Settings → Popover can remember its state or always show it, and sets its text size and how many rows it lists.",
+                "The panel has a count and a clear button. Each row shows the kind, the tool badge, the project, the first line, ×N and the time.",
+                "While the panel is closed, a needs_you update whose session is not in Needs you (you marked it done or snoozed it, or replied since) stays visible above the sessions, whatever the search query, so a request is never hidden. While you search, a line under the search field says how many updates match, with **Show** to open the panel.",
                 "**Click** a row to open the dashboard on its session, scrolled to that update's full text and outlined. The **chevron** expands the full text in place, and **(x)** dismisses it. Right-click for the session's actions.",
-                "The section stays compact so it never pushes the sessions out of view: every needs_you update, and at most 3 other rows. **Show all N** expands it in place and **Show fewer** collapses it again.",
+                "The panel stays compact so it never pushes the sessions out of view: every needs_you update, and at most 3 other rows (5 or 10 with Settings → Popover). **Show all N** expands it in place and **Show fewer** collapses it again.",
                 "A session with two or more open update and error notes (a loop session, in practice) gets one grouped row with **×N notes**. Its chevron lists them, each with its own x, and its (x) dismisses all of that session's update and error notes, never its needs_you ones.",
                 "With an empty search the button reads **Clear all** and dismisses every open update, including ones not listed. While you search it reads **Clear matching** and dismisses only the updates the search keeps.",
             ]),
@@ -328,6 +332,12 @@ enum HelpContent {
                 HelpRow(key: "Launch at login", value: "Off by default. Starts AgentBoard when you log in. Stored by macOS (System Settings → General → Login Items), not in AgentBoard's defaults."),
                 HelpRow(key: "Show plan usage", value: "On by default. Shows one plan-usage line per source (how much of each limit window is used, when it resets) in the popover footer and the dashboard sidebar. A line appears only when its source has numbers. Key `showPlanUsage`."),
                 HelpRow(key: "Show closed and merged PRs", value: "Off by default. Session rows show buttons only for PRs that are not merged or closed; on, merged (purple) and closed (red) PRs get buttons too. The detail view's Links section, the right-click menu and search include every PR either way, and session states do not change. Key `showClosedAndMergedPRs`."),
+            ]),
+            .heading("Popover"),
+            .keyValue([
+                HelpRow(key: "Updates panel", value: "**Hidden until clicked** (default): the popover opens on the sessions, and the **Updates** button next to the search field shows the panel until the popover closes. **Remember last state**: the panel stays open or closed the way you last left it, across popover opens and restarts (kept under `updatesPanelLastShown`). **Always shown**: the panel always sits above the sessions whenever there are updates, with no Updates button. Key `updatesPanelMode` (`hiddenUntilClicked`, `rememberLast`, `alwaysShown`)."),
+                HelpRow(key: "Updates text size", value: "**Small**, **Default** (default) or **Large** for the Updates panel's rows and header; rows get a little more room as the text grows. Key `updatesFontSize` (`small`, `default`, `large`)."),
+                HelpRow(key: "Updates listed before Show all", value: "**3** (default), **5** or **10**: how many rows besides the needs_you ones the panel lists before **Show all N**. Key `updatesCompactLimit`."),
             ]),
             .heading("CLI & Data"),
             .keyValue([
