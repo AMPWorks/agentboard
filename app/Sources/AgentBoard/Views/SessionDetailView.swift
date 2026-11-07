@@ -101,7 +101,7 @@ struct SessionDetailView: View {
     private var actionBar: some View {
         HStack {
             if session.isFocusable {
-                Button("Focus") { Task { await store.focusOrShowDashboard(session) } }
+                Button(SessionActionHelp.focusTitle(session)) { Task { await store.focusOrShowDashboard(session) } }
                     .help(SessionActionHelp.focusHelp(session))
             }
             if session.resumeAvailable {
@@ -136,6 +136,10 @@ struct SessionDetailView: View {
             if session.tmux {
                 metadataRow(label: "tmux", value: session.tmuxSession ?? "unknown")
                     .help(SessionActionHelp.tmuxTag(session))
+            }
+            if session.desktop {
+                metadataRow(label: "App", value: "Claude desktop app")
+                    .help(SessionActionHelp.desktopLabel)
             }
             metadataRow(label: "Started", value: RelativeTime.string(from: session.startedAt))
             metadataRow(label: "Updated", value: RelativeTime.string(from: session.updatedAt))
