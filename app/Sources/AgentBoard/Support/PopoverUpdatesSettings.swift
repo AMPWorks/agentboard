@@ -116,6 +116,13 @@ enum PopoverUpdatesSettings {
         }
     }
 
+    /// Whether any session has an open update, whatever the popover query:
+    /// the same counting rule as the button's count (`UpdatesFeed.total`),
+    /// so the button never reads "Updates 0" with no query.
+    static func hasOpenUpdates(_ sessions: [Session]) -> Bool {
+        UpdatesFeed.total(from: sessions, query: SessionSearch("")) > 0
+    }
+
     /// The Updates button shows whenever there is any open update (with or
     /// without a query, so the search row does not shift while typing), and
     /// never in `.alwaysShown`, which has nothing to toggle.
@@ -140,10 +147,18 @@ enum PopoverUpdatesSettings {
     /// The Updates button's tooltip.
     static func toggleHelp(shown: Bool, count: Int, filtering: Bool) -> String {
         if shown { return "Hide the Updates panel" }
+        if filtering && count == 0 { return "No updates match the filter; show the Updates panel anyway" }
         let noun = count == 1 ? "update" : "updates"
         return filtering
             ? "Show \(count) \(noun) that match the filter"
             : "Show \(count) open \(noun): what sessions said that is worth keeping"
+    }
+
+    /// The Updates button's VoiceOver label, worded like its tooltip.
+    static func toggleAccessibilityLabel(shown: Bool, count: Int, filtering: Bool) -> String {
+        if shown { return "Hide updates" }
+        if filtering && count == 0 { return "Show updates; none match the filter" }
+        return count == 1 ? "Show 1 update" : "Show \(count) updates"
     }
 
     /// The needs_you rows that stay above the sessions while the panel is
@@ -151,10 +166,12 @@ enum PopoverUpdatesSettings {
     /// Interrupted. A session marked done or snoozed, or one answered by a
     /// newer prompt, keeps its open needs_you note without turning red
     /// (`reconcile.compute_state`), so hiding the note behind the button
-    /// would hide a request. Empty while the panel is open (it lists them).
-    static func pinnedRows(_ rows: [UpdatesFeed.Row], panelShown: Bool) -> [UpdatesFeed.Row] {
+    /// would hide a request. Read from the unfiltered feed, like the menu
+    /// bar icon, so a popover query kept from an earlier open never hides
+    /// one. Empty while the panel is open (it lists them).
+    static func pinnedRows(from sessions: [Session], panelShown: Bool) -> [UpdatesFeed.Row] {
         guard !panelShown else { return [] }
-        return rows.filter { row in
+        return UpdatesFeed.rows(from: sessions, query: SessionSearch("")).filter { row in
             row.isNeedsYou && row.session.state != .needsYou && row.session.state != .interrupted
         }
     }

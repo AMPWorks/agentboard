@@ -45,11 +45,11 @@ struct MenuBarView: View {
         let mode = updatesMode
         let shown = updatesShown
         let feed = UpdatesState(
-            hasUpdates: sessions.contains { $0.notesCount > 0 || !$0.notes.isEmpty },
+            hasUpdates: PopoverUpdatesSettings.hasOpenUpdates(sessions),
             matching: UpdatesFeed.total(from: sessions, query: query),
             shown: shown
         )
-        let pinned = PopoverUpdatesSettings.pinnedRows(updates, panelShown: shown)
+        let pinned = PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: shown)
         VStack(spacing: 0) {
             searchBar(sections, feed: feed, mode: mode)
             Divider()
@@ -186,7 +186,8 @@ struct MenuBarView: View {
         .buttonStyle(.plain)
         .fixedSize()
         .help(PopoverUpdatesSettings.toggleHelp(shown: feed.shown, count: feed.matching, filtering: filtering))
-        .accessibilityLabel(feed.shown ? "Hide updates" : "Show \(feed.matching) updates")
+        .accessibilityLabel(PopoverUpdatesSettings.toggleAccessibilityLabel(shown: feed.shown, count: feed.matching,
+                                                                             filtering: filtering))
     }
 
     private func searchBar(_ sections: PopoverSections, feed: UpdatesState, mode: UpdatesPanelMode) -> some View {

@@ -503,7 +503,9 @@ updates gets an "N updates match · Show" line under the search field instead.
 Checking that premise found three cases where an open `needs_you` note outlives its session's red
 state (`compute_state` checks manual done and snooze first, and a newer prompt releases the
 state while the note stays open). Hiding those behind the button would hide a request, so while
-the panel is closed such rows stay above the sessions as "Update that needs you"; whether a reply,
+the panel is closed such rows stay above the sessions as "Update that needs you", read from the
+unfiltered feed because the popover query survives closing and a leftover filter must not hide a
+request; whether a reply,
 done or snooze should also retire the note is filed as a follow-up idea.
 
 Settings gains a Popover section: when the panel shows (hidden until clicked, remember last

@@ -794,7 +794,8 @@ shown** (`alwaysShown`) is the earlier layout with no button. **Updates text siz
 Show all** (`updatesCompactLimit`: 3, 5 or 10, default 3) shape the panel. While the panel is closed,
 a `needs_you` note whose session is not in Needs you or Interrupted (marked done, snoozed, or
 answered by a newer prompt, all of which keep the note open) stays visible above the sessions as
-**Update that needs you**, so a request is never hidden behind the button. While a query is set
+**Update that needs you**, whatever the search query, so a request is never hidden behind the
+button or a query kept from an earlier open. While a query is set
 and the panel is closed, a line under the search field says how many updates match, with **Show**
 to open the panel; an open panel whose query keeps no update says so instead of disappearing.
 

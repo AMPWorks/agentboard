@@ -85,6 +85,24 @@ struct PopoverUpdatesSettingsTests {
         #expect(S.toggleHelp(shown: false, count: 1, filtering: false).hasPrefix("Show 1 open update:"))
         #expect(S.toggleHelp(shown: false, count: 4, filtering: true) == "Show 4 updates that match the filter")
         #expect(S.toggleHelp(shown: true, count: 4, filtering: false) == "Hide the Updates panel")
+        // A query that keeps no update: say so rather than "Show 0 updates".
+        #expect(S.toggleHelp(shown: false, count: 0, filtering: true)
+            == "No updates match the filter; show the Updates panel anyway")
+        #expect(S.toggleAccessibilityLabel(shown: false, count: 0, filtering: true)
+            == "Show updates; none match the filter")
+        #expect(S.toggleAccessibilityLabel(shown: false, count: 1, filtering: false) == "Show 1 update")
+        #expect(S.toggleAccessibilityLabel(shown: false, count: 4, filtering: true) == "Show 4 updates")
+        #expect(S.toggleAccessibilityLabel(shown: true, count: 4, filtering: false) == "Hide updates")
+    }
+
+    /// The button's visibility uses the same rule as its count.
+    @Test func hasOpenUpdatesUsesTheCountingRule() {
+        let none = Fixtures.snapshot([session("quiet", notes: [])]).sessions
+        let some = Fixtures.snapshot([session("busy", notes: [note(1, "update", "PR #1 opened", minute: 1)])]).sessions
+        #expect(!PopoverUpdatesSettings.hasOpenUpdates(none))
+        #expect(PopoverUpdatesSettings.hasOpenUpdates(some))
+        #expect(PopoverUpdatesSettings.hasOpenUpdates(some)
+            == (UpdatesFeed.total(from: some, query: SessionSearch("")) > 0))
     }
 
     @Test func compactLimitIsThreadedThroughTheFeed() {
@@ -96,23 +114,40 @@ struct PopoverUpdatesSettingsTests {
         #expect(!UpdatesFeed.needsToggle(rows, limit: 10))
     }
 
-    /// A needs_you note whose session is not red (done, snoozed, answered)
-    /// stays visible with the panel closed; one on a Needs you session is
-    /// left to that session's red row.
-    @Test func pinsNeedsYouRowsWhoseSessionIsNotRed() {
+    private static func pinScenario() -> [Session] {
         func s(_ key: String, _ state: String, _ notes: [[String: Any]]) -> [String: Any] {
             Fixtures.session(key, state, extra: ["project": key, "notes": notes, "notes_count": notes.count])
         }
-        let sessions = Fixtures.snapshot([
+        return Fixtures.snapshot([
             s("red", "needs_you", [note(1, "needs_you", "USER_ACTION: approve", minute: 1)]),
             s("parked", "snoozed", [note(2, "needs_you", "USER_ACTION: pick one", minute: 2)]),
             s("answered", "running", [note(3, "needs_you", "USER_ACTION: merge?", minute: 3),
                                       note(4, "update", "PR #4 opened", minute: 4)]),
+            s("finished", "done", [note(5, "needs_you", "USER_ACTION: ship it?", minute: 5)]),
+            s("stopped", "interrupted", [note(6, "needs_you", "USER_ACTION: retry?", minute: 6)]),
         ]).sessions
-        let rows = UpdatesFeed.rows(from: sessions, query: SessionSearch(""))
-        let pinned = PopoverUpdatesSettings.pinnedRows(rows, panelShown: false)
-        #expect(pinned.map(\.id) == ["note:3", "note:2"])
-        #expect(PopoverUpdatesSettings.pinnedRows(rows, panelShown: true).isEmpty)
+    }
+
+    /// A needs_you note whose session is not red (done, snoozed, answered)
+    /// stays visible with the panel closed; one on a Needs you or
+    /// Interrupted session is left to that session's red or orange row.
+    @Test func pinsNeedsYouRowsWhoseSessionIsNotRed() {
+        let sessions = Self.pinScenario()
+        let pinned = PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: false)
+        #expect(pinned.map(\.id) == ["note:5", "note:3", "note:2"])
+        #expect(PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: true).isEmpty)
+    }
+
+    /// A popover query kept from an earlier open that matches neither the
+    /// session nor the note hides them from the feed, but not from the
+    /// pinned rows: a filter never hides a request.
+    @Test func pinnedRowsIgnoreANonMatchingQuery() {
+        let sessions = Self.pinScenario()
+        let query = SessionSearch("zzz-no-such-thing")
+        #expect(UpdatesFeed.rows(from: sessions, query: query).isEmpty)
+        #expect(PopoverSections.make(from: sessions, query: query).hasNoMatches)
+        let pinned = PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: false)
+        #expect(pinned.map(\.id) == ["note:5", "note:3", "note:2"])
     }
 
     /// The badge counts the updates the query keeps, uncapped.
