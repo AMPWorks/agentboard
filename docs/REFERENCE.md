@@ -781,12 +781,30 @@ session or you dismiss the note. Manual done and snooze still win, and a permiss
 reason wins over the note's. The note stays in Updates after a prompt releases the state; if the
 next turn repeats the request, the note's count goes up and the session is red again.
 
-In the popover, Updates sits above Needs you with a count and a clear button: each row shows the
+In the popover, updates sit behind the **Updates** button next to the search field, so the
+popover opens on the sessions. The button shows whenever any note is open, with the count the
+current query keeps (uncapped, `UpdatesFeed.total`, in a neutral color: a request that needs you
+already turns its session red and flashes the icon); one click shows the Updates panel above Needs
+you, and the button or the panel's **Hide** closes it. Settings → Popover → **Updates panel**
+picks when it shows: **Hidden until clicked** (default; `updatesPanelMode` `hiddenUntilClicked`)
+closes it again every time the popover opens, **Remember last state** (`rememberLast`) keeps it
+open or closed across opens and restarts (stored under `updatesPanelLastShown`), and **Always
+shown** (`alwaysShown`) is the earlier layout with no button. **Updates text size** (`updatesFontSize`:
+`small`, `default`, `large`; rows get more padding as the text grows) and **Updates listed before
+Show all** (`updatesCompactLimit`: 3, 5 or 10, default 3) shape the panel. While the panel is closed,
+a `needs_you` note whose session is not in Needs you or Interrupted (marked done, snoozed, or
+answered by a newer prompt, all of which keep the note open) stays visible above the sessions as
+**Update that needs you**, whatever the search query, so a request is never hidden behind the
+button or a query kept from an earlier open. While a query is set
+and the panel is closed, a line under the search field says how many updates match, with **Show**
+to open the panel; an open panel whose query keeps no update says so instead of disappearing.
+
+The panel has a count and a clear button: each row shows the
 kind (red bubble for needs you, red triangle for an error), the project, the first line, `×N` and
 the time; a click opens the dashboard on the owning session, scrolled to that note's full text
 and outlined (the session's context menu still has Focus), the chevron expands the full text in
 place, and (x) dismisses it. The section is compact so it never pushes the sessions out of view: it lists
-every `needs_you` note, but at most 3 other rows, with **Show all N** to expand it in place and
+every `needs_you` note, but at most 3 other rows (`updatesCompactLimit`), with **Show all N** to expand it in place and
 **Show fewer** to collapse it again. A session with two or more open update/error notes (a loop
 session, in practice) gets one row: its newest note's text and time and `×N notes`, the session's
 open update/error count; its chevron lists the notes (each with its own x), and its (x) dismisses
@@ -800,7 +818,8 @@ which. The session detail and the dashboard are not grouped or capped. The popov
 matches its own text or its session's fields (never a sibling note's text; a session's waiting
 reason and last assistant message can repeat its newest note, so a term from them keeps all of its
 notes). When a query hides an open `needs_you` note on a session in Review, Snoozed or Done, the
-notice under the search field counts it in red ("1 update needs you"), and the dashboard sidebar
+notice under the search field counts it in red ("1 update needs you") while the Updates panel is
+open (closed, the note is pinned above the sessions, so the notice leaves it out), and the dashboard sidebar
 warns the same way; a hidden session in Needs you or Interrupted is counted once, as a session. A
 session row shows a small badge with its number of open updates, the session detail lists them in
 full with a Dismiss button each, and the dashboard sidebar shows the total the filters keep,

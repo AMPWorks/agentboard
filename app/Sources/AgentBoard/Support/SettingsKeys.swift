@@ -37,6 +37,9 @@ enum SettingsKeys {
         CLIRunner.verboseLoggingKey,
         SettingsKeys.showPlanUsage,
         SettingsKeys.showClosedAndMergedPRs,
+        PopoverUpdatesSettings.modeKey,
+        PopoverUpdatesSettings.fontSizeKey,
+        PopoverUpdatesSettings.compactLimitKey,
     ]
 
     /// Show the plan-usage lines (one per usage source) in the popover
