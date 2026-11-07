@@ -21,6 +21,9 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.soundTurnFinished) private var soundTurnFinished: String = ""
     @AppStorage(SettingsKeys.soundDenied) private var soundDenied: String = ""
     @AppStorage(SettingsKeys.soundReviewReady) private var soundReviewReady: String = ""
+    @AppStorage(PopoverUpdatesSettings.modeKey) private var updatesMode: String = UpdatesPanelMode.default.rawValue
+    @AppStorage(PopoverUpdatesSettings.fontSizeKey) private var updatesFontSize: String = UpdatesFontSize.default.rawValue
+    @AppStorage(PopoverUpdatesSettings.compactLimitKey) private var updatesCompactLimit: Int = UpdatesFeed.compactLimit
     @State private var launchAtLogin: Bool = false
     @State private var systemSounds: [String] = SoundChoice.systemSoundNames()
 
@@ -96,6 +99,34 @@ struct SettingsView: View {
             }
 
             Section {
+                Picker("Updates panel", selection: $updatesMode) {
+                    ForEach(UpdatesPanelMode.allCases) { mode in
+                        Text(mode.label).tag(mode.rawValue)
+                    }
+                }
+                .help("Choose whether the popover's Updates panel starts hidden behind the Updates button, remembers how you left it, or is always shown")
+                Picker("Updates text size", selection: $updatesFontSize) {
+                    ForEach(UpdatesFontSize.allCases) { size in
+                        Text(size.label).tag(size.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .help("Text size of the rows and header in the popover's Updates panel")
+                Picker("Updates listed before Show all", selection: $updatesCompactLimit) {
+                    ForEach(PopoverUpdatesSettings.compactLimits, id: \.self) { limit in
+                        Text("\(limit)").tag(limit)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .help("How many updates besides the ones that need you the Updates panel lists before Show all")
+                Text(Self.popoverFootnote(UpdatesPanelMode.parse(updatesMode)))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                header("Popover", topic: .settings)
+            }
+
+            Section {
                 Toggle("Launch at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, newValue in
                         LaunchAtLogin.setEnabled(newValue)
@@ -153,6 +184,18 @@ struct SettingsView: View {
         .frame(width: 420)
         .padding()
         .onAppear { launchAtLogin = LaunchAtLogin.isEnabled }
+    }
+
+    static func popoverFootnote(_ mode: UpdatesPanelMode) -> String {
+        let pinned = "Updates that need you from a session that is not in Needs you always stay above the sessions."
+        switch mode {
+        case .hiddenUntilClicked:
+            return "The popover opens on the sessions. Click Updates next to the search field to show the panel; it hides again the next time the popover opens. " + pinned
+        case .rememberLast:
+            return "The panel stays open or closed the way you last left it with the Updates button. " + pinned
+        case .alwaysShown:
+            return "The panel sits above the sessions whenever there are updates, and there is no Updates button."
+        }
     }
 
     private static func byteCount(_ bytes: Int64) -> String {
