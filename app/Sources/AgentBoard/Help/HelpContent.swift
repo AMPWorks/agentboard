@@ -329,6 +329,12 @@ enum HelpContent {
                 HelpRow(key: "Show plan usage", value: "On by default. Shows one plan-usage line per source (how much of each limit window is used, when it resets) in the popover footer and the dashboard sidebar. A line appears only when its source has numbers. Key `showPlanUsage`."),
                 HelpRow(key: "Show closed and merged PRs", value: "Off by default. Session rows show buttons only for PRs that are not merged or closed; on, merged (purple) and closed (red) PRs get buttons too. The detail view's Links section, the right-click menu and search include every PR either way, and session states do not change. Key `showClosedAndMergedPRs`."),
             ]),
+            .heading("Popover"),
+            .keyValue([
+                HelpRow(key: "Updates panel", value: "**Hidden until clicked** (default): the popover opens on the sessions, and the **Updates** button next to the search field shows the panel until the popover closes. **Remember last state**: the panel stays open or closed the way you last left it, across popover opens and restarts (kept under `updatesPanelLastShown`). **Always shown**: the panel always sits above the sessions whenever there are updates, with no Updates button. Key `updatesPanelMode` (`hiddenUntilClicked`, `rememberLast`, `alwaysShown`)."),
+                HelpRow(key: "Updates text size", value: "**Small**, **Default** (default) or **Large** for the Updates panel's rows and header; rows get a little more room as the text grows. Key `updatesFontSize` (`small`, `default`, `large`)."),
+                HelpRow(key: "Updates listed before Show all", value: "**3** (default), **5** or **10**: how many rows besides the needs_you ones the panel lists before **Show all N**. Key `updatesCompactLimit`."),
+            ]),
             .heading("CLI & Data"),
             .keyValue([
                 HelpRow(key: "agentboard path override", value: "Empty by default. AgentBoard looks for the `agentboard` CLI in its own app bundle, then on `$PATH`, then here. Key `agentboardPath`."),

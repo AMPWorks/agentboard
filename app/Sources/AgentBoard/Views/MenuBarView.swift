@@ -17,9 +17,24 @@ struct MenuBarView: View {
     /// becomes key, so later key changes (a context menu, an alert) do not
     /// re-select a query the user is editing.
     @State private var focusOnNextKey = false
+    @AppStorage(PopoverUpdatesSettings.modeKey) private var updatesModeRaw: String = UpdatesPanelMode.default.rawValue
+    @AppStorage(PopoverUpdatesSettings.fontSizeKey) private var updatesFontRaw: String = UpdatesFontSize.default.rawValue
+    @AppStorage(PopoverUpdatesSettings.compactLimitKey) private var updatesLimitRaw: Int = UpdatesFeed.compactLimit
+    @AppStorage(PopoverUpdatesSettings.lastShownKey) private var updatesLastShown: Bool = false // not-a-setting: remembered panel state, written by the Updates button
+    /// The panel's state in Hidden until clicked mode. MenuBarView's state
+    /// survives closing the popover, so `onAppear` resets it on every open.
+    @State private var updatesOpenThisVisit = false
 
     private var sections: PopoverSections {
         PopoverSections.make(from: store.snapshot.sessions, query: SessionSearch(store.popoverQuery))
+    }
+
+    private var updatesMode: UpdatesPanelMode { UpdatesPanelMode.parse(updatesModeRaw) }
+    private var updatesFont: UpdatesFontSize { UpdatesFontSize.parse(updatesFontRaw) }
+
+    private var updatesShown: Bool {
+        PopoverUpdatesSettings.panelShown(mode: updatesMode, remembered: updatesLastShown,
+                                          toggledThisOpen: updatesOpenThisVisit)
     }
 
     var body: some View {
@@ -27,21 +42,40 @@ struct MenuBarView: View {
         let sessions = store.snapshot.sessions
         let query = SessionSearch(store.popoverQuery)
         let updates = UpdatesFeed.rows(from: sessions, query: query)
+        let mode = updatesMode
+        let shown = updatesShown
+        let feed = UpdatesState(
+            hasUpdates: sessions.contains { $0.notesCount > 0 || !$0.notes.isEmpty },
+            matching: UpdatesFeed.total(from: sessions, query: query),
+            shown: shown
+        )
+        let pinned = PopoverUpdatesSettings.pinnedRows(updates, panelShown: shown)
         VStack(spacing: 0) {
-            searchBar(sections)
+            searchBar(sections, feed: feed, mode: mode)
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
-                    // Above Needs you: what sessions said that is worth keeping.
-                    // Compact (UpdatesSectionView), so it never pushes the
-                    // sessions out of view.
-                    if !updates.isEmpty {
+                    // Above Needs you: what sessions said that is worth
+                    // keeping, behind the Updates button unless Settings →
+                    // Popover says otherwise. Compact (UpdatesSectionView),
+                    // so it never pushes the sessions out of view.
+                    if !pinned.isEmpty {
+                        PinnedUpdatesView(rows: pinned, store: store, fontSize: updatesFont) {
+                            setUpdatesShown(true)
+                        }
+                    }
+                    if PopoverUpdatesSettings.panelVisible(mode: mode, shown: shown, hasUpdates: feed.hasUpdates,
+                                                           hasRows: !updates.isEmpty) {
                         UpdatesSectionView(
                             rows: updates,
                             listed: updates.reduce(0) { $0 + $1.notes.count },
-                            total: UpdatesFeed.total(from: sessions, query: query),
+                            total: feed.matching,
                             clearPlan: UpdatesFeed.clearPlan(from: sessions, query: query),
-                            store: store
+                            store: store,
+                            fontSize: updatesFont,
+                            compactLimit: PopoverUpdatesSettings.compactLimit(updatesLimitRaw),
+                            emptyText: "No updates match “\(store.popoverQuery)”",
+                            onHide: mode == .alwaysShown ? nil : { setUpdatesShown(false) }
                         )
                     }
                     ForEach(sections.sections) { section in
@@ -69,6 +103,7 @@ struct MenuBarView: View {
         }
         .background(WindowReader { keyMonitor.window = $0 })
         .onAppear {
+            updatesOpenThisVisit = false
             store.setVisible(true)
             // Every popover open counts as seeing the board.
             attention.popoverDidAppear()
@@ -108,7 +143,53 @@ struct MenuBarView: View {
 
     // MARK: - Search
 
-    private func searchBar(_ sections: PopoverSections) -> some View {
+    /// What the Updates button and the search hint need to know.
+    private struct UpdatesState {
+        /// Any open update at all, whatever the query.
+        let hasUpdates: Bool
+        /// Open updates the query keeps, uncapped (`UpdatesFeed.total`).
+        let matching: Int
+        let shown: Bool
+    }
+
+    private func setUpdatesShown(_ value: Bool) {
+        if updatesMode == .rememberLast {
+            updatesLastShown = value
+        } else {
+            updatesOpenThisVisit = value
+        }
+    }
+
+    /// The one-click Updates button next to the search field: the bubble,
+    /// the word and the count, tinted while the panel is open.
+    private func updatesButton(_ feed: UpdatesState, filtering: Bool) -> some View {
+        Button {
+            setUpdatesShown(!feed.shown)
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: feed.shown ? "text.bubble.fill" : "text.bubble")
+                Text("Updates")
+                Text(PopoverUpdatesSettings.badge(feed.matching))
+                    .monospacedDigit()
+                    .fontWeight(.semibold)
+            }
+            .font(.caption)
+            .foregroundStyle(feed.shown ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule().fill(feed.shown ? AnyShapeStyle(Color.accentColor.opacity(0.18))
+                                          : AnyShapeStyle(.quaternary.opacity(0.8)))
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help(PopoverUpdatesSettings.toggleHelp(shown: feed.shown, count: feed.matching, filtering: filtering))
+        .accessibilityLabel(feed.shown ? "Hide updates" : "Show \(feed.matching) updates")
+    }
+
+    private func searchBar(_ sections: PopoverSections, feed: UpdatesState, mode: UpdatesPanelMode) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
@@ -128,6 +209,9 @@ struct MenuBarView: View {
                     .help("Clear filter")
                     .accessibilityLabel("Clear filter")
                 }
+                if PopoverUpdatesSettings.toggleVisible(mode: mode, hasUpdates: feed.hasUpdates) {
+                    updatesButton(feed, filtering: sections.isFiltering)
+                }
                 HelpButton(topic: .search, tooltip: "Explain search: words, quotes and field:value filters",
                            closesHostWindow: true)
             }
@@ -145,6 +229,19 @@ struct MenuBarView: View {
                     // Two lines, so a hidden-updates clause is never cut off.
                     .lineLimit(2)
                     .padding(.horizontal, 4)
+            }
+            if mode != .alwaysShown,
+               let hint = PopoverUpdatesSettings.matchHint(panelShown: feed.shown, isFiltering: sections.isFiltering,
+                                                           matching: feed.matching) {
+                HStack(spacing: 4) {
+                    Text(hint)
+                        .foregroundStyle(.secondary)
+                    Button("Show") { setUpdatesShown(true) }
+                        .buttonStyle(.link)
+                        .help("Open the Updates panel to see the updates that match the filter")
+                }
+                .font(.caption)
+                .padding(.horizontal, 4)
             }
         }
         .padding(8)

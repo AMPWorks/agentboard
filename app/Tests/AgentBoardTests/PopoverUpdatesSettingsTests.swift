@@ -96,6 +96,25 @@ struct PopoverUpdatesSettingsTests {
         #expect(!UpdatesFeed.needsToggle(rows, limit: 10))
     }
 
+    /// A needs_you note whose session is not red (done, snoozed, answered)
+    /// stays visible with the panel closed; one on a Needs you session is
+    /// left to that session's red row.
+    @Test func pinsNeedsYouRowsWhoseSessionIsNotRed() {
+        func s(_ key: String, _ state: String, _ notes: [[String: Any]]) -> [String: Any] {
+            Fixtures.session(key, state, extra: ["project": key, "notes": notes, "notes_count": notes.count])
+        }
+        let sessions = Fixtures.snapshot([
+            s("red", "needs_you", [note(1, "needs_you", "USER_ACTION: approve", minute: 1)]),
+            s("parked", "snoozed", [note(2, "needs_you", "USER_ACTION: pick one", minute: 2)]),
+            s("answered", "running", [note(3, "needs_you", "USER_ACTION: merge?", minute: 3),
+                                      note(4, "update", "PR #4 opened", minute: 4)]),
+        ]).sessions
+        let rows = UpdatesFeed.rows(from: sessions, query: SessionSearch(""))
+        let pinned = PopoverUpdatesSettings.pinnedRows(rows, panelShown: false)
+        #expect(pinned.map(\.id) == ["note:3", "note:2"])
+        #expect(PopoverUpdatesSettings.pinnedRows(rows, panelShown: true).isEmpty)
+    }
+
     /// The badge counts the updates the query keeps, uncapped.
     @Test func badgeCountFollowsTheQuery() {
         let sessions = Fixtures.snapshot([

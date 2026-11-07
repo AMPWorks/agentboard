@@ -146,6 +146,19 @@ enum PopoverUpdatesSettings {
             : "Show \(count) open \(noun): what sessions said that is worth keeping"
     }
 
+    /// The needs_you rows that stay above the sessions while the panel is
+    /// closed: those whose session is not itself in Needs you or
+    /// Interrupted. A session marked done or snoozed, or one answered by a
+    /// newer prompt, keeps its open needs_you note without turning red
+    /// (`reconcile.compute_state`), so hiding the note behind the button
+    /// would hide a request. Empty while the panel is open (it lists them).
+    static func pinnedRows(_ rows: [UpdatesFeed.Row], panelShown: Bool) -> [UpdatesFeed.Row] {
+        guard !panelShown else { return [] }
+        return rows.filter { row in
+            row.isNeedsYou && row.session.state != .needsYou && row.session.state != .interrupted
+        }
+    }
+
     /// Under the search field while a query is active and the panel is
     /// closed: "2 updates match", so matches only in update text are not
     /// missed. Nil when there is nothing to point at.
