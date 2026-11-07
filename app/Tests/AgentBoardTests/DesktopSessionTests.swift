@@ -65,6 +65,27 @@ struct DesktopSessionTests {
         #expect(before != after)
     }
 
+    /// Desktop rows reached only through a query (the popover's Snoozed and
+    /// Done sections) take the same click path as any other section: focus
+    /// in the desktop app, never the dashboard fallback.
+    @Test func queryOnlySectionsFocusDesktopRows() {
+        let sessions = Fixtures.snapshot(["snoozed", "done", "review"].map { state in
+            Fixtures.session("d-\(state)", state, extra: [
+                "entrypoint": "claude-desktop", "desktop": true, "can_focus": true,
+            ])
+        }).sessions
+        let plain = PopoverSections.make(from: sessions, query: SessionSearch(""))
+        #expect(plain.section(.snoozed) == nil && plain.section(.done) == nil)
+        let filtered = PopoverSections.make(from: sessions, query: SessionSearch("desktop"))
+        for kind in [PopoverSections.Kind.snoozed, .done, .review] {
+            let rows = filtered.section(kind)?.sessions ?? []
+            #expect(rows.count == 1, "\(kind)")
+            #expect(rows.allSatisfy { SessionRowView.popoverTap(for: $0) == .focus }, "\(kind)")
+        }
+        let dead = Fixtures.decoded("t1", "done", alive: false, extra: ["can_focus": true])
+        #expect(SessionRowView.popoverTap(for: dead) == .showDashboard)
+    }
+
     @Test func fixtureHasOneDesktopSession() throws {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

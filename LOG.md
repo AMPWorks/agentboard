@@ -515,3 +515,10 @@ conversation away from the app; Copy Resume Command stays.
 The row icon sits under the tool badge in the badge's fixed 18-point column rather than in a new
 column, so rows without it keep their width and the icon lines up from row to row. Only the
 Claude desktop app is recognised; other entrypoints are recorded but get no icon.
+
+Review round: backfill now stores the transcript's newest `entrypoint`, as the hook keeps the
+latest, so a desktop session resumed in a terminal reads as `cli` (interactivity still follows the
+first one, as before). Search finds these rows by `desktop` or their entrypoint, plain or under
+`tool:`, since the icon advertises the concept. The popover icon takes the row click's code path,
+and the focus log names the app's id `desktop_id` so it no longer repeats the
+`desktop_session` outcome name.

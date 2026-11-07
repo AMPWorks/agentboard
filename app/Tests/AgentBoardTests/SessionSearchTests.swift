@@ -56,6 +56,28 @@ struct SessionSearchTests {
         #expect(matches(query))
     }
 
+    /// A Claude desktop app row, findable by the concept its icon shows.
+    private static let desktopRow = Fixtures.decoded("desk", "review", extra: [
+        "tool": "claude",
+        "entrypoint": "claude-desktop",
+        "desktop": true,
+    ])
+    private static let cliRow = Fixtures.decoded("term", "review", extra: [
+        "tool": "claude",
+        "entrypoint": "cli",
+    ])
+
+    @Test func desktopRowsMatchDesktopAndTheirEntrypoint() {
+        for query in ["desktop", "claude-desktop", "tool:desktop", "tool:claude-desktop", "tool:claude"] {
+            #expect(matches(query, Self.desktopRow), "\(query)")
+        }
+        for query in ["desktop", "tool:desktop"] {
+            #expect(!matches(query, Self.cliRow), "\(query)")
+            #expect(!matches(query), "\(query)")
+        }
+        #expect(matches("tool:cli", Self.cliRow))
+    }
+
     @Test func plainTermDoesNotSearchLinkURLs() {
         #expect(!matches("example.test"))
         #expect(matches("pr:example.test"))

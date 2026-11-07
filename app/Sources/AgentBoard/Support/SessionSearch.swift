@@ -9,7 +9,8 @@ import Foundation
 /// - Matching is case- and diacritic-insensitive substring matching.
 /// - `field:value` narrows a term to one field group (the value may be
 ///   quoted: `branch:"feat x"`). Fields: `repo:`/`project:` (project, cwd),
-///   `path:` (cwd), `branch:`, `tool:`, `state:` (raw value and display
+///   `path:` (cwd), `branch:`, `tool:` (tool, entrypoint, `desktop` for a
+///   Claude desktop app session), `state:` (raw value and display
 ///   name), `pr:` (links of kind `pr`), `link:` (any link). Spaces after
 ///   the colon are ignored: `branch: main` is `branch:main`, and
 ///   `state: "needs you"` is `state:"needs you"`. An unknown field
@@ -143,6 +144,8 @@ struct SessionSearch: Sendable, Equatable {
             session.tmux ? "tmux" : "",
             session.tmuxSession ?? "",
             session.tool,
+            session.entrypoint ?? "",
+            session.desktop ? "desktop" : "",
             session.state.rawValue,
             session.state.displayName,
             session.waitingReason ?? "",
@@ -168,7 +171,7 @@ struct SessionSearch: Sendable, Equatable {
         case .repo: return [session.project, session.cwd]
         case .path: return [session.cwd]
         case .branch: return [session.branch ?? ""]
-        case .tool: return [session.tool]
+        case .tool: return [session.tool, session.entrypoint ?? "", session.desktop ? "desktop" : ""]
         case .state: return [session.state.rawValue, session.state.displayName]
         case .pr:
             return session.links.filter { $0.kind == "pr" }
