@@ -210,7 +210,9 @@ older than a week. [More](docs/REFERENCE.md#data)
 the desktop (Space) its window is on (verified with iTerm2 so far); when that doesn't happen, the
 dashboard opens with the reason and a button for the setting that fixes it. For other terminals AgentBoard brings the terminal app
 to the front. A session running inside tmux opens through tmux: the window attached to its tmux
-session comes forward, or a new iTerm window attaches to it.
+session comes forward, or a new iTerm window attaches to it. A session started in the Claude
+desktop app shows a small desktop-window icon, and clicking it (or the row) opens that session in
+the desktop app.
 [More](docs/REFERENCE.md#links--integrations)
 
 ## Hooking in your own tools

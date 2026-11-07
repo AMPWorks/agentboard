@@ -39,7 +39,16 @@ struct SessionRowView: View {
                 .padding(.top, 5)
                 .help(SessionColor.legendTooltip)
                 .accessibilityLabel(SessionColor.label(for: session))
-            toolBadge
+            // The fixed icon column: the tool badge, with the desktop-app
+            // button under it on Claude desktop app sessions, so the icon
+            // lines up from row to row and never shifts the text.
+            VStack(spacing: 3) {
+                toolBadge
+                if session.desktop {
+                    desktopButton
+                }
+            }
+            .frame(width: 18, alignment: .top)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(session.displayTitle)
@@ -136,11 +145,46 @@ struct SessionRowView: View {
         }
     }
 
+    /// Opens a Claude desktop app session in the app (`agentboard focus`).
+    /// In the popover it takes the row click's path (focus, close the
+    /// popover) so the two never drift; a desktop row is always focusable.
+    private var desktopButton: some View {
+        Button {
+            if compact {
+                handlePopoverTap()
+            } else {
+                Task { await store.focusOrShowDashboard(session) }
+            }
+        } label: {
+            Image(systemName: "macwindow")
+                .font(.system(size: 11))
+                .frame(width: 18, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help(SessionActionHelp.desktopIcon)
+        .accessibilityLabel(SessionActionHelp.desktopLabel)
+        .accessibilityHint(SessionActionHelp.focusDesktop)
+    }
+
+    /// What a popover row click (or its desktop icon) does.
+    enum PopoverTap: Equatable {
+        case focus, showDashboard
+    }
+
+    static func popoverTap(for session: Session) -> PopoverTap {
+        session.isFocusable ? .focus : .showDashboard
+    }
+
+    /// Row click (and the desktop icon) in the popover: acts on the
+    /// session, then closes the popover, whatever section the row is in.
     private func handlePopoverTap() {
         let popoverWindow = NSApp.keyWindow
-        if session.isFocusable {
+        switch Self.popoverTap(for: session) {
+        case .focus:
             Task { await store.focusOrShowDashboard(session) }
-        } else {
+        case .showDashboard:
             store.requestSelection(session.key)
             DashboardWindowController.show()
         }

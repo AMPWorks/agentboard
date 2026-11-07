@@ -226,7 +226,8 @@ class DbTests(AgentBoardTestCase):
         old.close()
         conn = db.connect(path)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 11)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0],
+                             db.SCHEMA_VERSION)
             session = conn.execute("SELECT * FROM sessions").fetchone()
             self.assertEqual(session["title"], "kept")
             self.assertEqual(session["tty"], "/dev/ttys001")
@@ -243,11 +244,39 @@ class DbTests(AgentBoardTestCase):
         self.assertEqual(cols.get("tmux_socket"), "TEXT")
         self.assertEqual(cols.get("tmux_pane"), "TEXT")
 
+    def test_migration_12_adds_entrypoint_to_a_v11_database(self):
+        path = self.tmp_path / "v11.db"
+        old = sqlite3.connect(str(path), isolation_level=None)
+        for version in range(1, 12):
+            old.executescript(db._MIGRATIONS[version])
+        old.execute("PRAGMA user_version = 11")
+        old.execute(
+            "INSERT INTO sessions(tool, session_id, title, tmux_pane) "
+            "VALUES ('claude', 's1', 'kept', '%3')"
+        )
+        old.close()
+        conn = db.connect(path)
+        try:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 12)
+            session = conn.execute("SELECT * FROM sessions").fetchone()
+            self.assertEqual(session["title"], "kept")
+            self.assertEqual(session["tmux_pane"], "%3")
+            self.assertIn("entrypoint", session.keys())
+            self.assertIsNone(session["entrypoint"])
+        finally:
+            conn.close()
+
+    def test_fresh_database_has_entrypoint_column(self):
+        cols = {row["name"]: row["type"]
+                for row in self.conn.execute("PRAGMA table_info(sessions)")}
+        self.assertEqual(cols.get("entrypoint"), "TEXT")
+
     def test_existing_migrations_are_unchanged(self):
         # Migrations already applied in the field are never edited.
         self.assertEqual(sorted(db._MIGRATIONS)[:9], [1, 2, 3, 4, 5, 6, 7, 8, 9])
         self.assertEqual(max(db._MIGRATIONS), db.SCHEMA_VERSION)
         self.assertNotIn("tmux", db._MIGRATIONS[10])
+        self.assertNotIn("entrypoint", db._MIGRATIONS[11])
         self.assertIn("ALTER TABLE sessions ADD COLUMN retitle_branch TEXT;", db._MIGRATIONS[6])
         self.assertNotIn("prompt_kind", db._MIGRATIONS[6])
         self.assertNotIn("context_tokens", db._MIGRATIONS[7])

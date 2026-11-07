@@ -17,6 +17,7 @@ from typing import NamedTuple
 from . import backfill as backfill_mod
 from . import codexmap
 from . import db
+from . import desktop
 from . import diag
 from . import hook as hook_mod
 from . import links
@@ -140,7 +141,11 @@ def _is_tmux_row(session):
 def _can_focus(session):
     """True iff cmd_focus has some way to act on this session's terminal.
     A session inside tmux always does: focus finds an attached client or
-    opens a new window attached to its tmux session."""
+    opens a new window attached to its tmux session. So does a Claude
+    desktop app session, alive or not: focus opens it in the desktop app,
+    which owns the conversation."""
+    if desktop.is_desktop(session.get("entrypoint")):
+        return True
     if _is_tmux_row(session):
         return True
     return session.get("term_program") in TERM_PROGRAM_APP_NAMES
@@ -499,6 +504,8 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
         "alive": bool(alive),
         "interactive": True if session.get("interactive") is None else bool(session.get("interactive")),
         "can_focus": _can_focus(session),
+        "entrypoint": session.get("entrypoint"),
+        "desktop": desktop.is_desktop(session.get("entrypoint")),
         "tmux": _is_tmux_row(session),
         # Filled in by build_snapshot from the live tmux server.
         "tmux_session": None,
@@ -2832,6 +2839,7 @@ class _FocusTrace:
             iterm_id=row["iterm_session_id"] if row else None,
             tmux_pane=row["tmux_pane"] if row else None,
             tmux_socket=row["tmux_socket"] if row else None,
+            entrypoint=row["entrypoint"] if row else None,
         )
 
     def tried(self, strategy, result, **extra):
@@ -2843,7 +2851,7 @@ class _FocusTrace:
             "cli", "focus.try", key=self.key, strategy=strategy, rc=rc,
             stdout=diag.tail_text(out), stderr=diag.tail_text(err), **extra,
         )
-        if strategy in ("open_a", "open_ra"):
+        if strategy in ("open_a", "open_ra", "open_url", "open_b"):
             self.fields["open_rc"] = rc
         elif strategy.startswith("tmux_"):
             self.fields.update(tmux_rc=rc, tmux_err=diag.tail_text(err, 300))
@@ -3043,6 +3051,34 @@ def _focus_tmux(row, key, trace, run_osascript, run_tmux):
     return 0
 
 
+def _focus_desktop(session_id, key, trace, run):
+    """Open a Claude desktop app session in the desktop app: its own
+    `claude://` link to the session when the app's session store names it,
+    else just bring the app forward. Never touches the network."""
+    local_id, lookup = desktop.find_local_session(session_id)
+    trace.fields.update(desktop_lookup=lookup, desktop_id=local_id)
+    diag.info("cli", "focus.begin", **trace.fields)
+    if local_id:
+        result = _run_bounded(run, ["open", desktop.deep_link(local_id)])
+        rc, _out = trace.tried("open_url", result)
+        if isinstance(result, _TimedOut):
+            return _focus_timed_out(trace, key)
+        if rc in (None, 0):
+            trace.finish("desktop_session")
+            return 0
+    result = _run_bounded(run, ["open", "-b", desktop.DESKTOP_BUNDLE_ID])
+    rc, _out = trace.tried("open_b", result)
+    if isinstance(result, _TimedOut):
+        return _focus_timed_out(trace, key)
+    if rc not in (None, 0):
+        return trace.failed(
+            "desktop_app_missing", 1,
+            "Couldn't open the Claude desktop app: is it installed?",
+        )
+    trace.finish("desktop_app_only")
+    return 0
+
+
 def cmd_focus(args, run_osascript=subprocess.run, window_probe=None, run_defaults=None,
               sleep=None, clock=None, thread_factory=None, find_app_pids=None,
               run_tmux=None):
@@ -3059,13 +3095,18 @@ def cmd_focus(args, run_osascript=subprocess.run, window_probe=None, run_default
     conn = db.connect()
     try:
         row = conn.execute(
-            "SELECT iterm_session_id, term_program, tty, tmux_socket, tmux_pane "
+            "SELECT iterm_session_id, term_program, tty, tmux_socket, tmux_pane, entrypoint "
             "FROM sessions WHERE tool=? AND session_id=?",
             (args.tool, args.session_id),
         ).fetchone()
     finally:
         conn.close()
     trace.identity(row)
+    # Before the terminal branches: a desktop session can inherit the
+    # TERM_PROGRAM of the shell that launched the desktop app, which is not
+    # where the session runs.
+    if row and desktop.is_desktop(row["entrypoint"]):
+        return _focus_desktop(args.session_id, key, trace, run_osascript)
     if row and row["tmux_socket"] and row["tmux_pane"]:
         return _focus_tmux(row, key, trace, run_osascript,
                            run_tmux if run_tmux is not None else run_osascript)

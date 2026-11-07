@@ -7,10 +7,21 @@ import AppKit
 enum SessionActionHelp {
     static let focus = "Bring this session's terminal tab to the front, switching to its desktop"
     static let focusTmux = "Bring the window attached to this session's tmux session to the front, or open a new iTerm window attached to it"
+    static let focusDesktop = "Open this session in the Claude desktop app"
+    /// The desktop-app icon on a row (and the detail view's App row).
+    static let desktopIcon = "Claude desktop app session; click to open it there"
+    static let desktopLabel = "Claude desktop app session"
 
-    /// The Focus tooltip: a tmux session is focused through tmux.
+    /// The Focus tooltip: a desktop app session opens in the app, a tmux
+    /// session is focused through tmux.
     static func focusHelp(_ session: Session) -> String {
-        session.tmux ? focusTmux : focus
+        if session.desktop { return focusDesktop }
+        return session.tmux ? focusTmux : focus
+    }
+
+    /// The Focus action's title: a desktop app session has no terminal.
+    static func focusTitle(_ session: Session) -> String {
+        session.desktop ? "Open in Claude App" : "Focus"
     }
 
     static func tmuxTag(_ session: Session) -> String {
@@ -39,7 +50,7 @@ struct SessionContextMenu: View {
     var body: some View {
         Group {
             if session.isFocusable {
-                Button("Focus") { Task { await store.focusOrShowDashboard(session) } }
+                Button(SessionActionHelp.focusTitle(session)) { Task { await store.focusOrShowDashboard(session) } }
                     .help(SessionActionHelp.focusHelp(session))
             }
             if session.resumeAvailable {

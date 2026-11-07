@@ -83,7 +83,7 @@ class SnapshotTests(AgentBoardTestCase):
             "can_focus", "resume_command", "status_text", "links", "triage",
             "notes", "notes_count", "model", "context_tokens", "context_at",
             "permission_mode", "denials", "denials_count",
-            "tmux", "tmux_session",
+            "tmux", "tmux_session", "entrypoint", "desktop",
         ):
             self.assertIn(key, entry)
         self.assertEqual(entry["key"], "claude:s1")
@@ -92,6 +92,33 @@ class SnapshotTests(AgentBoardTestCase):
         self.assertIs(entry["can_focus"], False)
         self.assertEqual(entry["project"], "proj")
         self.assertIn("usage", snapshot)
+
+    def test_desktop_fields(self):
+        insert_session(self.conn, session_id="desk", entrypoint="claude-desktop")
+        insert_session(self.conn, session_id="term", entrypoint="cli")
+        insert_session(self.conn, session_id="old")
+        entries = {e["session_id"]: e
+                   for e in cli.build_snapshot(self.conn, include_all=True)["sessions"]}
+        self.assertEqual(entries["desk"]["entrypoint"], "claude-desktop")
+        self.assertIs(entries["desk"]["desktop"], True)
+        # Focus opens it in the desktop app, alive or not, with no terminal.
+        self.assertIs(entries["desk"]["alive"], False)
+        self.assertIs(entries["desk"]["can_focus"], True)
+        self.assertEqual(entries["term"]["entrypoint"], "cli")
+        for sid in ("term", "old"):
+            self.assertIs(entries[sid]["desktop"], False, sid)
+            self.assertIs(entries[sid]["can_focus"], False, sid)
+        self.assertIsNone(entries["old"]["entrypoint"])
+
+    def test_snapshot_never_reads_the_desktop_store(self):
+        from agentboard import desktop
+        insert_session(self.conn, session_id="desk", entrypoint="claude-desktop")
+        with mock.patch.object(desktop, "find_local_session", side_effect=AssertionError("store")), \
+                mock.patch.object(desktop, "_session_files", side_effect=AssertionError("store")):
+            entries = {e["session_id"]: e
+                       for e in cli.build_snapshot(self.conn, include_all=True)["sessions"]}
+        self.assertIs(entries["desk"]["desktop"], True)
+        self.assertIs(entries["desk"]["can_focus"], True)
 
     def test_session_model_and_context_fields(self):
         insert_session(self.conn, session_id="s1", model="claude-opus-5-5",

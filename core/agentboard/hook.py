@@ -372,6 +372,30 @@ def _clean_tty(tty):
 
 
 _TMUX_PANE_RE = re.compile(r"%[0-9]+")
+_ENTRYPOINT_RE = re.compile(r"[A-Za-z0-9._-]{1,40}")
+
+
+def _entrypoint(tool: str) -> str | None:
+    """Return how this Claude Code session was started, from its environment.
+
+    Claude Code exports $CLAUDE_CODE_ENTRYPOINT to its hooks: `cli` in a
+    terminal, `claude-desktop` when the Claude desktop app runs it, `sdk-cli`
+    for SDK runs. Only Claude sessions record it (a Codex run started from a
+    Claude Code shell inherits the variable but is not that entrypoint), and
+    anything that is not a short plain token is ignored.
+    """
+    if tool != "claude":
+        return None
+    return clean_entrypoint(os.environ.get("CLAUDE_CODE_ENTRYPOINT"))
+
+
+def clean_entrypoint(value) -> str | None:
+    """`value` stripped when it is a short plain token (cli, claude-desktop,
+    sdk-cli, ...), else None. Shared with backfill's transcript parse."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if _ENTRYPOINT_RE.fullmatch(value) else None
 
 
 def _tmux_identity(environ=None):
@@ -1115,6 +1139,7 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
             term_program = None
             tmux_socket = tmux_pane = None
             left_tmux = False
+            entrypoint = None
         else:
             iterm_session_id = (
                 os.environ.get("ITERM_SESSION_ID") or os.environ.get("TERM_SESSION_ID")
@@ -1128,6 +1153,7 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
                 bool(term_program) and term_program != "tmux"
                 and not os.environ.get("TMUX")
             )
+            entrypoint = _entrypoint(tool)
 
         irrelevant_notification = event == "Notification" and not _notification_is_relevant(payload)
         needs_you_tool_reason = _needs_you_tool_reason(event, tool_name)
@@ -1255,8 +1281,8 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
                 "updated_at, last_event, last_event_at, waiting_reason, pid, "
                 "iterm_session_id, term_program, transcript_path, origin, "
                 "interactive, ended_at, tty, end_reason, todos_open, permission_mode, "
-                "tmux_socket, tmux_pane) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "tmux_socket, tmux_pane, entrypoint) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     tool,
                     session_id,
@@ -1284,6 +1310,7 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
                     permission_mode,
                     tmux_socket,
                     tmux_pane,
+                    entrypoint,
                 ),
             )
         else:
@@ -1309,7 +1336,8 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
                 "todos_open = COALESCE(?, todos_open), "
                 "permission_mode = COALESCE(?, permission_mode), "
                 "tmux_socket = COALESCE(?, tmux_socket), "
-                "tmux_pane = COALESCE(?, tmux_pane) "
+                "tmux_pane = COALESCE(?, tmux_pane), "
+                "entrypoint = COALESCE(?, entrypoint) "
                 "WHERE tool=? AND session_id=?",
                 (
                     cwd,
@@ -1334,6 +1362,7 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
                     permission_mode,
                     tmux_socket,
                     tmux_pane,
+                    entrypoint,
                     tool,
                     session_id,
                 ),
