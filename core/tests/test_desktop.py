@@ -121,6 +121,19 @@ class FindLocalSessionTests(_StoreMixin, AgentBoardTestCase):
             self.assertEqual(desktop.find_local_session(CLI_ID), (None, "scan_limit"))
         self.assertEqual(desktop.find_local_session(CLI_ID), (LOCAL_ID, "found"))
 
+    def test_total_bytes_bound(self):
+        sizes = [
+            self._write_record(name=f"local_{n}.json", sessionId=f"local_{n}",
+                               cliSessionId=f"99999999-0000-4000-8000-00000000000{n}",
+                               mtime=2_000_000 + n).stat().st_size
+            for n in range(2)
+        ]
+        self._write_record(mtime=1_000_000)  # the oldest, read last
+        # Room for the two newer records but not the third.
+        with mock.patch.object(desktop, "MAX_TOTAL_BYTES", sum(sizes) + 1):
+            self.assertEqual(desktop.find_local_session(CLI_ID), (None, "scan_limit"))
+        self.assertEqual(desktop.find_local_session(CLI_ID), (LOCAL_ID, "found"))
+
     def test_deadline_bound(self):
         self._write_record()
         ticks = iter([0.0, 100.0])

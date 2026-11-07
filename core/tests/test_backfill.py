@@ -153,7 +153,9 @@ class ClaudeTranscriptTests(AgentBoardTestCase):
         result = backfill.parse_claude_transcript(path)
         self.assertEqual(result["interactive"], 0)
 
-    def test_entrypoint_is_parsed_from_the_first_entry_that_has_one(self):
+    def test_entrypoint_is_the_newest_one_in_the_transcript(self):
+        # A desktop session later resumed in a terminal reads as cli, as the
+        # hook (COALESCE of the latest event) would record it.
         path = self.tmp_path / "desk.jsonl"
         write_jsonl(path, [
             {"type": "mode", "mode": "normal"},
@@ -164,8 +166,31 @@ class ClaudeTranscriptTests(AgentBoardTestCase):
              "timestamp": "2026-01-01T00:01:00.000Z", "entrypoint": "cli"},
         ])
         result = backfill.parse_claude_transcript(path)
-        self.assertEqual(result["entrypoint"], "claude-desktop")
+        self.assertEqual(result["entrypoint"], "cli")
         self.assertEqual(result["interactive"], 1)
+
+    def test_entrypoint_from_the_head_when_the_tail_has_none(self):
+        path = self.tmp_path / "desk2.jsonl"
+        write_jsonl(path, [
+            {"type": "user", "message": {"role": "user", "content": "hi"},
+             "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/tmp/scratch",
+             "entrypoint": "claude-desktop"},
+            {"type": "assistant", "message": {"role": "assistant", "content": "ok"},
+             "timestamp": "2026-01-01T00:01:00.000Z"},
+        ])
+        self.assertEqual(backfill.parse_claude_transcript(path)["entrypoint"], "claude-desktop")
+
+    def test_interactivity_follows_the_first_entrypoint(self):
+        path = self.tmp_path / "sdk.jsonl"
+        write_jsonl(path, [
+            {"type": "user", "message": {"role": "user", "content": "hi"},
+             "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/tmp", "entrypoint": "sdk-cli"},
+            {"type": "user", "message": {"role": "user", "content": "again"},
+             "timestamp": "2026-01-01T00:01:00.000Z", "entrypoint": "cli"},
+        ])
+        result = backfill.parse_claude_transcript(path)
+        self.assertEqual(result["entrypoint"], "cli")
+        self.assertEqual(result["interactive"], 0)
 
     def test_missing_or_odd_entrypoint_parses_as_none(self):
         for value in (None, "", 7, ["cli"], "not a token", "x" * 80):

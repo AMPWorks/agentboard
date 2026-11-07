@@ -406,6 +406,11 @@ def parse_claude_transcript(path: Path, todos_state=None) -> dict:
         if result["first_prompt"] and result["cwd"] and result["started_at"]:
             break
 
+    # The head's entrypoint decides interactivity (an sdk-cli run is one from
+    # its first line); the stored entrypoint is the newest one, as the hook
+    # keeps it, so a desktop session resumed in a terminal reads as cli.
+    head_entrypoint = result["entrypoint"]
+    tail_entrypoint = None
     last_substantive_type = None
     tail_branch = None
     custom_title = None
@@ -450,6 +455,8 @@ def parse_claude_transcript(path: Path, todos_state=None) -> dict:
             result["cwd"] = entry["cwd"]
         if entry.get("gitBranch") and tail_branch is None:
             tail_branch = normalize_branch(entry["gitBranch"])
+        if tail_entrypoint is None:
+            tail_entrypoint = clean_entrypoint(entry.get("entrypoint"))
 
         entry_type = entry.get("type")
         if entry_type in TITLE_TYPES:
@@ -498,6 +505,8 @@ def parse_claude_transcript(path: Path, todos_state=None) -> dict:
 
     if tail_branch:
         result["branch"] = tail_branch
+    if tail_entrypoint:
+        result["entrypoint"] = tail_entrypoint
     if custom_title:
         result["title"], result["title_source"] = custom_title, "custom"
     elif other_title:
@@ -514,7 +523,7 @@ def parse_claude_transcript(path: Path, todos_state=None) -> dict:
         result["title"] = _first_line(result["first_prompt"])
         result["title_source"] = "fallback" if result["title"] else None
 
-    if result["entrypoint"] == "sdk-cli":
+    if head_entrypoint == "sdk-cli":
         result["interactive"] = 0
     result["first_prompt"] = _truncate(result["first_prompt"])
     result["last_prompt"] = _truncate(result["last_prompt"])

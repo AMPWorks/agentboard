@@ -664,7 +664,7 @@ the attach exits 4 `needs_automation`, as for plain iTerm2/Terminal sessions. Re
 **Claude desktop app sessions.** The Claude desktop app runs Claude Code itself, so its sessions
 fire the same hooks and show up on the board. The hook records `$CLAUDE_CODE_ENTRYPOINT` (Claude
 sessions only, environment only; `cli` in a terminal, `claude-desktop` from the desktop app), and
-backfill fills it from the transcript's `entrypoint` when the hook never wrote one; the snapshot
+backfill fills it from the transcript's newest `entrypoint` when the hook never wrote one; the snapshot
 reports it as `entrypoint` plus a `desktop` flag. A desktop row shows a desktop-window icon in its
 fixed icon column; clicking the icon, the row's Focus action, double-click or Return opens the
 session in the desktop app. Such a row is always focusable, alive or not, because the desktop app
@@ -1076,7 +1076,8 @@ way:
 - Double quotes keep a phrase together: `"menu bar"`.
 - Matching ignores case and accents and matches anywhere in a field, so `#4` also finds `#42`.
 - A plain word searches the title, the first and last prompts, the last assistant message, the
-  project, working directory and branch, the tool, the state (`needs_you` or `Needs you`), the
+  project, working directory and branch, the tool (plus the entrypoint, and `desktop` for a Claude
+  desktop app session), the state (`needs_you` or `Needs you`), the
   waiting reason and status text, every link's kind, ref, title and state, the triage note, and
   the session id, and the text of the session's open updates (notes). It does not search link
   URLs; use `pr:` or `link:` for those.
@@ -1088,7 +1089,7 @@ way:
 | `repo:` / `project:` | project name and working directory                   |
 | `path:`              | working directory                                    |
 | `branch:`            | git branch                                           |
-| `tool:`              | `claude` or `codex`                                  |
+| `tool:`              | `claude` or `codex`; entrypoint (`cli`, `claude-desktop`) or `desktop` |
 | `state:`             | state, raw (`needs_you`) or as shown (`Needs you`)   |
 | `pr:`                | links of kind `pr`: ref, title and URL               |
 | `link:`              | any link: kind, label, ref, title, URL and state     |
@@ -1353,10 +1354,12 @@ Outcomes:
 - `tmux_attached_new_window` / `tmux_attached_terminal`: no attached client was found in a
   running iTerm2 or Terminal, so a new iTerm window (Terminal when iTerm isn't installed, see
   `iterm_installed`) was opened running `tmux attach-session` to the session.
-- `desktop_session`: a Claude desktop app session was opened in the desktop app by its
-  `claude://code/continue` link (`strategy=open_url`). `desktop_lookup` says how the store lookup
-  went (`found`, `not_found`, `archived`, `no_store`, `scan_limit`, `bad_id`, `error`) and
-  `desktop_session` is the app's `local_<id>`.
+- `desktop_session`: a Claude desktop app session's `claude://code/continue` link was handed to
+  `open` and accepted (`strategy=open_url`). The link was dispatched; whether the app honoured it
+  is not checked: with its deep links turned off, or for an id it no longer knows, the app only
+  comes forward (or lands on its Code home) and `open` still exits 0. `desktop_lookup` says how
+  the store lookup went (`found`, `not_found`, `archived`, `no_store`, `scan_limit`, `bad_id`,
+  `error`) and `desktop_id` is the app's `local_<id>`.
 - `desktop_app_only`: a desktop session the store did not name (or whose link failed to open) was
   handled by bringing the Claude desktop app forward (`strategy=open_b`); exits 0.
   `desktop_app_missing`: that `open -b` failed too (the app is not installed); exits 1.

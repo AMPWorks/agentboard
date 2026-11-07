@@ -110,6 +110,16 @@ class SnapshotTests(AgentBoardTestCase):
             self.assertIs(entries[sid]["can_focus"], False, sid)
         self.assertIsNone(entries["old"]["entrypoint"])
 
+    def test_snapshot_never_reads_the_desktop_store(self):
+        from agentboard import desktop
+        insert_session(self.conn, session_id="desk", entrypoint="claude-desktop")
+        with mock.patch.object(desktop, "find_local_session", side_effect=AssertionError("store")), \
+                mock.patch.object(desktop, "_session_files", side_effect=AssertionError("store")):
+            entries = {e["session_id"]: e
+                       for e in cli.build_snapshot(self.conn, include_all=True)["sessions"]}
+        self.assertIs(entries["desk"]["desktop"], True)
+        self.assertIs(entries["desk"]["can_focus"], True)
+
     def test_session_model_and_context_fields(self):
         insert_session(self.conn, session_id="s1", model="claude-opus-5-5",
                        context_tokens=308011, context_at="2026-06-15T10:00:00.000Z")

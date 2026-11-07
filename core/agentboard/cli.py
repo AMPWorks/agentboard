@@ -3056,7 +3056,7 @@ def _focus_desktop(session_id, key, trace, run):
     `claude://` link to the session when the app's session store names it,
     else just bring the app forward. Never touches the network."""
     local_id, lookup = desktop.find_local_session(session_id)
-    trace.fields.update(desktop_lookup=lookup, desktop_session=local_id)
+    trace.fields.update(desktop_lookup=lookup, desktop_id=local_id)
     diag.info("cli", "focus.begin", **trace.fields)
     if local_id:
         result = _run_bounded(run, ["open", desktop.deep_link(local_id)])

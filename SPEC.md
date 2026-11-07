@@ -321,7 +321,7 @@ and focus goes through tmux, never the iTerm/Terminal ids it inherited from the 
 The snapshot's `tmux` is true for such a session; `tmux_session` is its tmux session name, read
 for alive, not-ended rows with one bounded (0.5 s) `tmux list-panes -a` per socket, else null.
 Claude desktop app (added after the original spec): the hook records `$CLAUDE_CODE_ENTRYPOINT`
-(Claude sessions only, env only; backfill fills it from the transcript's `entrypoint`) in
+(Claude sessions only, env only; backfill fills it from the transcript's newest `entrypoint`) in
 `sessions.entrypoint`. The snapshot's `entrypoint` is that value and `desktop` is true when it is
 `claude-desktop`; such a session is always `can_focus`, alive or not, and focus opens it in the
 desktop app (`claude://code/continue?session=local_<id>`, the id read at click time from the
