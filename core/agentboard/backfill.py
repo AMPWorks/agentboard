@@ -10,7 +10,9 @@ from . import db
 from . import diag
 from . import notes
 from . import usage as usage_mod
-from .hook import EXIT_COMMANDS, clean_prompt_text, is_untrusted_daemon_pid, normalize_branch
+from .hook import (
+    EXIT_COMMANDS, clean_entrypoint, clean_prompt_text, is_untrusted_daemon_pid, normalize_branch,
+)
 from .reconcile import is_pid_alive, parse_ts
 
 HEAD_SCAN_MAX_LINES = 500
@@ -393,8 +395,8 @@ def parse_claude_transcript(path: Path, todos_state=None) -> dict:
             result["cwd"] = entry["cwd"]
         if entry.get("gitBranch") and result["branch"] is None:
             result["branch"] = normalize_branch(entry["gitBranch"])
-        if entry.get("entrypoint") and result["entrypoint"] is None:
-            result["entrypoint"] = entry["entrypoint"]
+        if result["entrypoint"] is None:
+            result["entrypoint"] = clean_entrypoint(entry.get("entrypoint"))
         if entry.get("userType") and result["userType"] is None:
             result["userType"] = entry["userType"]
         if entry.get("type") == "user" and not entry.get("isMeta") and result["first_prompt"] is None:
@@ -815,7 +817,7 @@ BACKFILL_COLUMNS = [
     "cwd", "branch", "title", "first_prompt", "last_prompt", "last_assistant",
     "started_at", "updated_at", "last_event", "last_event_at",
     "transcript_path", "interactive", "todos_open",
-    "model", "context_tokens", "context_at",
+    "model", "context_tokens", "context_at", "entrypoint",
 ]
 
 # The model and context size are measured, not reconstructed: the freshest

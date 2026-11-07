@@ -153,6 +153,31 @@ class ClaudeTranscriptTests(AgentBoardTestCase):
         result = backfill.parse_claude_transcript(path)
         self.assertEqual(result["interactive"], 0)
 
+    def test_entrypoint_is_parsed_from_the_first_entry_that_has_one(self):
+        path = self.tmp_path / "desk.jsonl"
+        write_jsonl(path, [
+            {"type": "mode", "mode": "normal"},
+            {"type": "user", "message": {"role": "user", "content": "hi"},
+             "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/tmp/scratch",
+             "entrypoint": "claude-desktop"},
+            {"type": "user", "message": {"role": "user", "content": "again"},
+             "timestamp": "2026-01-01T00:01:00.000Z", "entrypoint": "cli"},
+        ])
+        result = backfill.parse_claude_transcript(path)
+        self.assertEqual(result["entrypoint"], "claude-desktop")
+        self.assertEqual(result["interactive"], 1)
+
+    def test_missing_or_odd_entrypoint_parses_as_none(self):
+        for value in (None, "", 7, ["cli"], "not a token", "x" * 80):
+            with self.subTest(value=value):
+                path = self.tmp_path / "odd.jsonl"
+                entry = {"type": "user", "message": {"role": "user", "content": "hi"},
+                         "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/tmp"}
+                if value is not None:
+                    entry["entrypoint"] = value
+                write_jsonl(path, [entry])
+                self.assertIsNone(backfill.parse_claude_transcript(path)["entrypoint"])
+
     def test_skill_command_resolves_to_clean_prompt_and_title(self):
         path = self.tmp_path / "sess_cmd1.jsonl"
         write_jsonl(path, [
@@ -607,6 +632,35 @@ class UpsertBackfillSessionTests(AgentBoardTestCase):
         # null fields get filled in
         self.assertEqual(row["title"], "backfill title")
         self.assertEqual(row["interactive"], 0)
+
+    def test_backfill_fills_a_missing_entrypoint_on_a_hook_row(self):
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, cwd, origin) "
+            "VALUES ('claude','s1','/real/cwd','hook')"
+        )
+        backfill.upsert_backfill_session(self.conn, "claude", "s1",
+                                         {"cwd": "/x", "entrypoint": "claude-desktop"})
+        row = self.conn.execute("SELECT entrypoint FROM sessions WHERE session_id='s1'").fetchone()
+        self.assertEqual(row["entrypoint"], "claude-desktop")
+
+    def test_backfill_keeps_a_hook_written_entrypoint(self):
+        self.conn.execute(
+            "INSERT INTO sessions(tool, session_id, cwd, origin, entrypoint) "
+            "VALUES ('claude','s1','/real/cwd','hook','cli')"
+        )
+        for parsed in ("claude-desktop", None):
+            backfill.upsert_backfill_session(self.conn, "claude", "s1",
+                                             {"cwd": "/x", "entrypoint": parsed})
+            row = self.conn.execute(
+                "SELECT entrypoint FROM sessions WHERE session_id='s1'").fetchone()
+            self.assertEqual(row["entrypoint"], "cli")
+
+    def test_backfill_inserts_the_entrypoint(self):
+        backfill.upsert_backfill_session(self.conn, "claude", "s1",
+                                         {"cwd": "/x", "entrypoint": "claude-desktop"})
+        row = self.conn.execute(
+            "SELECT entrypoint, origin FROM sessions WHERE session_id='s1'").fetchone()
+        self.assertEqual((row["entrypoint"], row["origin"]), ("claude-desktop", "backfill"))
 
     def test_backfill_keeps_a_hook_written_permission_mode(self):
         self.conn.execute(

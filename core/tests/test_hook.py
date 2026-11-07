@@ -1690,6 +1690,73 @@ class HookTmuxIdentityTests(AgentBoardTestCase):
         self.assertEqual(self._row()["tmux_pane"], "%7")
 
 
+class HookEntrypointTests(AgentBoardTestCase):
+    """$CLAUDE_CODE_ENTRYPOINT is stored on the session row (Claude only)."""
+
+    def _row(self, tool="claude"):
+        return self.conn.execute(
+            "SELECT * FROM sessions WHERE tool=? AND session_id='s1'", (tool,)
+        ).fetchone()
+
+    def _fire(self, event, env, tool="claude", fake_run=None, **extra):
+        payload = {"session_id": "s1", "cwd": "/tmp", "hook_event_name": event}
+        payload.update(extra)
+        if fake_run is None:
+            def fake_run(cmd, **kwargs):
+                return mock.Mock(returncode=0, stdout="")
+        with mock.patch("agentboard.hook.subprocess.run", side_effect=fake_run), \
+             mock.patch.dict("agentboard.hook.os.environ", env, clear=False):
+            if "CLAUDE_CODE_ENTRYPOINT" not in env:
+                os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
+            hook.process_payload(self.conn, tool, payload)
+
+    def test_desktop_entrypoint_is_recorded(self):
+        self._fire("SessionStart", {"CLAUDE_CODE_ENTRYPOINT": "claude-desktop"})
+        self.assertEqual(self._row()["entrypoint"], "claude-desktop")
+
+    def test_missing_env_leaves_it_null(self):
+        self._fire("SessionStart", {})
+        self.assertIsNone(self._row()["entrypoint"])
+
+    def test_later_event_without_env_keeps_the_stored_value(self):
+        self._fire("SessionStart", {"CLAUDE_CODE_ENTRYPOINT": "claude-desktop"})
+        self._fire("PreToolUse", {}, tool_name="Bash")
+        self.assertEqual(self._row()["entrypoint"], "claude-desktop")
+
+    def test_resume_from_another_entrypoint_replaces_it(self):
+        # `claude --resume` in a terminal on a desktop session: it now runs there.
+        self._fire("SessionStart", {"CLAUDE_CODE_ENTRYPOINT": "claude-desktop"})
+        self._fire("UserPromptSubmit", {"CLAUDE_CODE_ENTRYPOINT": "cli"}, prompt="hi")
+        self.assertEqual(self._row()["entrypoint"], "cli")
+
+    def test_odd_values_are_ignored(self):
+        for value in ("", "   ", "claude desktop", "x" * 41, "a;b", "cli\nx"):
+            with self.subTest(value=value):
+                self.conn.execute("DELETE FROM sessions")
+                self._fire("SessionStart", {"CLAUDE_CODE_ENTRYPOINT": value})
+                self.assertIsNone(self._row()["entrypoint"])
+
+    def test_codex_sessions_do_not_record_an_inherited_value(self):
+        self._fire("SessionStart", {"CLAUDE_CODE_ENTRYPOINT": "cli"}, tool="codex")
+        self.assertIsNone(self._row(tool="codex")["entrypoint"])
+
+    def test_not_recorded_when_the_pid_resolves_to_a_daemon(self):
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return mock.Mock(returncode=0, stdout="")
+            table = {1000: (40007, "ttys003", "sh"), 40007: (1, "??", "claude")}
+            entry = table.get(int(cmd[-1]))
+            if entry is None:
+                return mock.Mock(stdout="")
+            ppid, tty, comm = entry
+            return mock.Mock(stdout=f"{ppid} {tty} {comm}\n")
+
+        with mock.patch("agentboard.hook.os.getppid", return_value=1000):
+            self._fire("SessionStart", {"CLAUDE_CODE_ENTRYPOINT": "claude-desktop"},
+                       fake_run=fake_run)
+        self.assertIsNone(self._row()["entrypoint"])
+
+
 class SessionStartUsageTests(AgentBoardTestCase):
     """A parent SessionStart stores the model and, on resume/fork, the
     context size; any other parent event that names a model stores it."""

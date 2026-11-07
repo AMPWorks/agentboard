@@ -6,7 +6,7 @@ from pathlib import Path
 
 DB_FILENAME = "agentboard.db"
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 _MIGRATIONS = {
     1: """
@@ -176,6 +176,13 @@ _MIGRATIONS = {
     11: """
     ALTER TABLE sessions ADD COLUMN tmux_socket TEXT;
     ALTER TABLE sessions ADD COLUMN tmux_pane TEXT;
+    """,
+    # Claude desktop app sessions: a session records the entrypoint that
+    # started it ($CLAUDE_CODE_ENTRYPOINT, or the transcript's `entrypoint`:
+    # cli, claude-desktop, sdk-cli, ...), so the board can mark desktop
+    # sessions and `focus` can open them in the desktop app.
+    12: """
+    ALTER TABLE sessions ADD COLUMN entrypoint TEXT;
     """,
 }
 
