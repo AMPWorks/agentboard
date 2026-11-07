@@ -225,7 +225,9 @@ The schema (see `core/agentboard/db.py`) has these tables:
   bookkeeping (pid, terminal info), a free-form `status_text`/`status_until` set via
   `agentboard status`, the model it last ran with its context size (`model`,
   `context_tokens`, `context_at`; see [Plan usage and context](#plan-usage-and-context) below), and the permission mode
-  its newest parent hook event reported (`permission_mode`; see [Hooks](#hooks) below).
+  its newest parent hook event reported (`permission_mode`; see [Hooks](#hooks) below), and for
+  Claude sessions how it was started (`entrypoint`: `cli`, `claude-desktop`, `sdk-cli`, ...; see
+  [Claude desktop app sessions](#links--integrations) below).
 - `triage` — the user's own done/snoozed/open decision for a session.
 - `links` — PRs, tickets, or arbitrary URLs associated with a session, from whatever source
   reported them (see [Links](#links--integrations) below).
@@ -658,6 +660,26 @@ then at `/opt/homebrew/bin/tmux` and `/usr/local/bin/tmux`. Rows of a live tmux 
 per snapshot, so a rename shows up on the next poll), the detail view has a tmux row, and
 dashboard search matches the tmux session name. An Automation refusal (-1743) from a probe or
 the attach exits 4 `needs_automation`, as for plain iTerm2/Terminal sessions. Resume is unchanged.
+
+**Claude desktop app sessions.** The Claude desktop app runs Claude Code itself, so its sessions
+fire the same hooks and show up on the board. The hook records `$CLAUDE_CODE_ENTRYPOINT` (Claude
+sessions only, environment only; `cli` in a terminal, `claude-desktop` from the desktop app), and
+backfill fills it from the transcript's `entrypoint` when the hook never wrote one; the snapshot
+reports it as `entrypoint` plus a `desktop` flag. A desktop row shows a desktop-window icon in its
+fixed icon column; clicking the icon, the row's Focus action, double-click or Return opens the
+session in the desktop app. Such a row is always focusable, alive or not, because the desktop app
+owns the conversation; it never goes to a terminal, even if the session inherited the
+`TERM_PROGRAM` of the shell that launched the app. `agentboard focus` looks the session up, at
+click time only, in the desktop app's own session store
+(`~/Library/Application Support/Claude/claude-code-sessions/<org>/<account>/local_<id>.json`,
+matched by its `cliSessionId`) and runs `open "claude://code/continue?session=local_<id>"`; with
+no match (or an archived session, or a failed `open`) it just brings the app forward with
+`open -b com.anthropic.claudefordesktop`. The store and the link are internal to the desktop app
+and may change between versions, so the lookup is read-only and bounded (newest files first, at
+most 300 files and 2 seconds) and every failure falls back to plain activation; nothing touches
+the network and `snapshot` never reads the store. Resume is hidden for desktop rows (resuming in a
+terminal would fork the conversation away from the app); **Copy Resume Command** stays. Only the
+Claude desktop app is recognised; other hosts' entrypoints are recorded but get no icon.
 
 **Focus across desktops (Spaces).** For iTerm2 and Apple Terminal, `agentboard focus` finds the
 session's tab, activates the terminal, waits until it is frontmost, and only then brings that
@@ -1331,6 +1353,13 @@ Outcomes:
 - `tmux_attached_new_window` / `tmux_attached_terminal`: no attached client was found in a
   running iTerm2 or Terminal, so a new iTerm window (Terminal when iTerm isn't installed, see
   `iterm_installed`) was opened running `tmux attach-session` to the session.
+- `desktop_session`: a Claude desktop app session was opened in the desktop app by its
+  `claude://code/continue` link (`strategy=open_url`). `desktop_lookup` says how the store lookup
+  went (`found`, `not_found`, `archived`, `no_store`, `scan_limit`, `bad_id`, `error`) and
+  `desktop_session` is the app's `local_<id>`.
+- `desktop_app_only`: a desktop session the store did not name (or whose link failed to open) was
+  handled by bringing the Claude desktop app forward (`strategy=open_b`); exits 0.
+  `desktop_app_missing`: that `open -b` failed too (the app is not installed); exits 1.
 - `tmux_pane_gone`: the recorded tmux pane or its server no longer exists; nothing opens and
   `focus` exits 1. `tmux_missing` means no tmux binary was found, and `tmux_attach_failed` that
   the attach AppleScript exited non-zero (exit 1; an Automation refusal is `needs_automation`).
