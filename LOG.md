@@ -488,3 +488,30 @@ environment carries only a session index, not a name, and the hook cannot shell 
 snapshot resolves names live with one `tmux list-panes -a` per socket, only for alive tmux rows
 and bounded at half the slow-snapshot threshold. Storing the name at focus or refresh time was the
 alternative, but it would be blank until first use and stale after a rename.
+
+## 2026-11-07 00:58:29 UTC — Popover updates move behind a one-click Updates button
+
+The Updates feed sat above Needs you on every popover open and pushed the sessions down, although
+the session list is what most opens are for. It now sits behind an **Updates N** button in the
+search row: one click shows the panel (a tinted card with **Hide**), and by default it closes again
+on the next open. The count is the uncapped total the query keeps, in a neutral color, and the
+button never auto-opens: a request that needs the user already turns its session red and flashes
+the icon, so a second red signal would only duplicate it. The button stays visible while any update
+is open, query or not, so the search row does not shift while typing; a closed panel with matching
+updates gets an "N updates match · Show" line under the search field instead.
+
+Checking that premise found three cases where an open `needs_you` note outlives its session's red
+state (`compute_state` checks manual done and snooze first, and a newer prompt releases the
+state while the note stays open). Hiding those behind the button would hide a request, so while
+the panel is closed such rows stay above the sessions as "Update that needs you"; whether a reply,
+done or snooze should also retire the note is filed as a follow-up idea.
+
+Settings gains a Popover section: when the panel shows (hidden until clicked, remember last
+state, always shown, the last being the previous layout with no button), its text size (explicit
+point sizes, since macOS ignores Dynamic Type for text styles; Default matches the old caption
+styles and row padding follows the size instead of a separate density setting) and how many rows
+it lists before Show all (3, 5 or 10). The remembered open state is UI state, not a Settings
+control, so it carries a `not-a-setting` marker instead of a `SettingsKeys.all` entry. The
+README popover screenshots were rendered from the fixture offscreen (an `NSHostingView` cached to
+a bitmap) rather than captured from the menu bar, so the pass never touched the system appearance
+or the screen.
