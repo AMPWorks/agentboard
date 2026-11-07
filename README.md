@@ -10,7 +10,7 @@ telemetry.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/popover-dark.png">
-    <img src="docs/images/popover-light.png" width="426" alt="The AgentBoard popover listing sessions grouped by state, with an Updates section at the top">
+    <img src="docs/images/popover-light.png" width="426" alt="The AgentBoard popover listing sessions grouped by state, with the Updates button next to the search field">
   </picture>
 </p>
 
@@ -193,7 +193,9 @@ renames a long-running session. [More](docs/REFERENCE.md#links--integrations)
 
 **Updates.** Sessions that run unattended say a lot, and little of it needs you. AgentBoard keeps
 the few messages worth reading (a request marked `USER_ACTION:`, a PR opened or merged, CI going
-red) as updates in the popover until you dismiss them. An open request turns its session red.
+red) as updates until you dismiss them, one click away behind the **Updates** button next to the
+popover's search field (Settings → Popover can keep the panel open instead). An open request turns
+its session red.
 [More](docs/REFERENCE.md#updates-retained-notes)
 
 **Plan usage, model and context.** When Claude Code or Codex reports plan usage on this Mac, the

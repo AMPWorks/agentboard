@@ -102,6 +102,7 @@ struct UpdatesSectionView: View {
                 }
                 if let onHide {
                     Button("Hide") { onHide() }
+                        .padding(.leading, 6)
                         .help("Hide the Updates panel; the Updates button next to the search field shows it again")
                 }
             }
