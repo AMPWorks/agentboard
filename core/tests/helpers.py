@@ -34,6 +34,8 @@ class AgentBoardTestCase(unittest.TestCase):
             "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CODEX_THREAD_ID",
             # A suite run from inside tmux must not record its own pane.
             "TMUX", "TMUX_PANE",
+            # Nor its own entrypoint (`cli` when run from Claude Code).
+            "CLAUDE_CODE_ENTRYPOINT",
         ]
         self._old_env = {key: os.environ.get(key) for key in scrubbed_keys}
         for key in scrubbed_keys:

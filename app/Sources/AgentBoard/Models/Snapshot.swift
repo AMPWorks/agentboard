@@ -356,6 +356,12 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     /// resolved). Both missing from older CLIs.
     var tmux: Bool = false
     var tmuxSession: String?
+    /// How the session was started (`cli`, `claude-desktop`, `sdk-cli`, or a
+    /// newer value), and whether that is the Claude desktop app: focus then
+    /// opens the session there instead of a terminal. Both missing from
+    /// older CLIs (not a desktop session).
+    var entrypoint: String?
+    var desktop: Bool = false
 
     var id: String { key }
 
@@ -392,6 +398,7 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         case denialsCount = "denials_count"
         case tmux
         case tmuxSession = "tmux_session"
+        case entrypoint, desktop
     }
 
     /// The CLI emits `null` for cwd/project/resume_command when a session's
@@ -446,7 +453,13 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
             ?? denials.count
         tmux = (try? c.decodeIfPresent(Bool.self, forKey: .tmux)) ?? false
         tmuxSession = (try? c.decodeIfPresent(String.self, forKey: .tmuxSession)) ?? nil
+        entrypoint = (try? c.decodeIfPresent(String.self, forKey: .entrypoint)) ?? nil
+        desktop = ((try? c.decodeIfPresent(Bool.self, forKey: .desktop)) ?? nil)
+            ?? (entrypoint == Session.desktopEntrypoint)
     }
+
+    /// The entrypoint the Claude desktop app runs Claude Code with.
+    static let desktopEntrypoint = "claude-desktop"
 
     static func == (lhs: Session, rhs: Session) -> Bool {
         lhs.key == rhs.key && lhs.updatedAt == rhs.updatedAt && lhs.state == rhs.state
@@ -461,6 +474,7 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
             && lhs.denialsCount == rhs.denialsCount && lhs.denials == rhs.denials
             // A tmux rename shows up on the next poll, with nothing else changed.
             && lhs.tmux == rhs.tmux && lhs.tmuxSession == rhs.tmuxSession
+            && lhs.desktop == rhs.desktop && lhs.canFocus == rhs.canFocus
     }
     func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
@@ -472,12 +486,15 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
 
     var toolBadge: String { tool == "codex" ? "X" : "C" }
 
-    /// There's a live, focusable terminal to bring to the front.
-    var isFocusable: Bool { alive && canFocus }
+    /// There's a live, focusable terminal to bring to the front, or a Claude
+    /// desktop app session to open there (alive or not: the app owns it).
+    var isFocusable: Bool { canFocus && (alive || desktop) }
 
     /// Resume only makes sense once the session's own process is gone;
     /// hidden while it's still active (alive, or actively running/needing input).
-    var resumeAvailable: Bool { !(alive || state == .running || state == .needsYou) }
+    /// Never offered for a desktop app session: a terminal resume would fork
+    /// the conversation away from the app (Copy Resume Command stays).
+    var resumeAvailable: Bool { !desktop && !(alive || state == .running || state == .needsYou) }
 
     var isAutoDone: Bool { autoDone == true }
 
