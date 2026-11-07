@@ -39,7 +39,16 @@ struct SessionRowView: View {
                 .padding(.top, 5)
                 .help(SessionColor.legendTooltip)
                 .accessibilityLabel(SessionColor.label(for: session))
-            toolBadge
+            // The fixed icon column: the tool badge, with the desktop-app
+            // button under it on Claude desktop app sessions, so the icon
+            // lines up from row to row and never shifts the text.
+            VStack(spacing: 3) {
+                toolBadge
+                if session.desktop {
+                    desktopButton
+                }
+            }
+            .frame(width: 18, alignment: .top)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(session.displayTitle)
@@ -134,6 +143,26 @@ struct SessionRowView: View {
                 hoverButtons
             }
         }
+    }
+
+    /// Opens a Claude desktop app session in the app (`agentboard focus`),
+    /// closing the popover like a row click does.
+    private var desktopButton: some View {
+        Button {
+            let popoverWindow = compact ? NSApp.keyWindow : nil
+            Task { await store.focusOrShowDashboard(session) }
+            popoverWindow?.close()
+        } label: {
+            Image(systemName: "macwindow")
+                .font(.system(size: 11))
+                .frame(width: 18, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help(SessionActionHelp.desktopIcon)
+        .accessibilityLabel(SessionActionHelp.desktopLabel)
+        .accessibilityHint(SessionActionHelp.focusDesktop)
     }
 
     private func handlePopoverTap() {
