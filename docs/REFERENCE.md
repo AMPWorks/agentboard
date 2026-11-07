@@ -818,7 +818,8 @@ which. The session detail and the dashboard are not grouped or capped. The popov
 matches its own text or its session's fields (never a sibling note's text; a session's waiting
 reason and last assistant message can repeat its newest note, so a term from them keeps all of its
 notes). When a query hides an open `needs_you` note on a session in Review, Snoozed or Done, the
-notice under the search field counts it in red ("1 update needs you"), and the dashboard sidebar
+notice under the search field counts it in red ("1 update needs you") while the Updates panel is
+open (closed, the note is pinned above the sessions, so the notice leaves it out), and the dashboard sidebar
 warns the same way; a hidden session in Needs you or Interrupted is counted once, as a session. A
 session row shows a small badge with its number of open updates, the session detail lists them in
 full with a Dismiss button each, and the dashboard sidebar shows the total the filters keep,

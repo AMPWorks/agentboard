@@ -505,7 +505,8 @@ state (`compute_state` checks manual done and snooze first, and a newer prompt r
 state while the note stays open). Hiding those behind the button would hide a request, so while
 the panel is closed such rows stay above the sessions as "Update that needs you", read from the
 unfiltered feed because the popover query survives closing and a leftover filter must not hide a
-request; whether a reply,
+request. The filter notice's "N updates need you" counts only while the panel is open, since
+closed those notes are pinned on screen. Whether a reply,
 done or snooze should also retire the note is filed as a follow-up idea.
 
 Settings gains a Popover section: when the panel shows (hidden until clicked, remember last

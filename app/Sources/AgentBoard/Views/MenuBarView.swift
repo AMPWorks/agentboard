@@ -25,8 +25,11 @@ struct MenuBarView: View {
     /// survives closing the popover, so `onAppear` resets it on every open.
     @State private var updatesOpenThisVisit = false
 
+    /// While the panel is closed the needs_you notes the query would hide
+    /// are pinned above the sessions, so the notice leaves them out.
     private var sections: PopoverSections {
-        PopoverSections.make(from: store.snapshot.sessions, query: SessionSearch(store.popoverQuery))
+        PopoverSections.make(from: store.snapshot.sessions, query: SessionSearch(store.popoverQuery),
+                             needsYouNotesPinned: !updatesShown)
     }
 
     private var updatesMode: UpdatesPanelMode { UpdatesPanelMode.parse(updatesModeRaw) }

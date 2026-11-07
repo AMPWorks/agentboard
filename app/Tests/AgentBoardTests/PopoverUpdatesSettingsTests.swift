@@ -150,6 +150,52 @@ struct PopoverUpdatesSettingsTests {
         #expect(pinned.map(\.id) == ["note:5", "note:3", "note:2"])
     }
 
+    /// A query that hides a needs_you note on a snoozed session: with the
+    /// panel closed the note is pinned above the sessions, so the notice
+    /// does not report it as hidden; with the panel open (query-filtered,
+    /// nothing pinned) it does, in red.
+    @Test func hiddenNoticeLeavesOutNeedsYouNotesThatArePinned() {
+        let sessions = Self.pinScenario()
+        let query = SessionSearch("approve") // only the red session's note says it
+        let hiddenNote = UpdatesFeed.hiddenNeedsYouNotes(from: sessions, query: query)
+        #expect(hiddenNote == 3)
+
+        let closed = PopoverUpdatesSettings.panelShown(mode: .hiddenUntilClicked, remembered: false,
+                                                       toggledThisOpen: false)
+        let pinned = PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: closed)
+        #expect(pinned.map(\.id) == ["note:5", "note:3", "note:2"])
+        let whileClosed = PopoverSections.make(from: sessions, query: query, needsYouNotesPinned: !closed)
+        #expect(whileClosed.hiddenNeedsYouNotes == 0)
+        #expect(whileClosed.hiddenNotice == "Filtered: 4 sessions hidden, 1 needs you")
+        #expect(whileClosed.noticeIsEmphasized) // the hidden Interrupted session
+
+        let open = PopoverUpdatesSettings.panelShown(mode: .hiddenUntilClicked, remembered: false,
+                                                     toggledThisOpen: true)
+        #expect(PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: open).isEmpty)
+        let whileOpen = PopoverSections.make(from: sessions, query: query, needsYouNotesPinned: !open)
+        #expect(whileOpen.hiddenNeedsYouNotes == 3)
+        #expect(whileOpen.hiddenNotice == "Filtered: 4 sessions hidden, 1 needs you, 3 updates need you")
+    }
+
+    /// Only a snoozed session's request is hidden: closed, the notice is
+    /// plain and not red, since the request is on screen as a pinned row.
+    @Test func hiddenNoticeIsPlainWhenTheOnlyHiddenRequestIsPinned() {
+        let sessions = Fixtures.snapshot([
+            Fixtures.session("parked", "snoozed", extra: [
+                "project": "parked", "notes": [note(1, "needs_you", "USER_ACTION: pick one", minute: 1)],
+                "notes_count": 1,
+            ]),
+            session("alpha", notes: []),
+        ]).sessions
+        let query = SessionSearch("alpha")
+        let closed = PopoverSections.make(from: sessions, query: query, needsYouNotesPinned: true)
+        #expect(closed.hiddenNotice == "Filtered: 1 session hidden")
+        #expect(!closed.noticeIsEmphasized)
+        let open = PopoverSections.make(from: sessions, query: query, needsYouNotesPinned: false)
+        #expect(open.hiddenNotice == "Filtered: 1 session hidden, 1 update needs you")
+        #expect(open.noticeIsEmphasized)
+    }
+
     /// The badge counts the updates the query keeps, uncapped.
     @Test func badgeCountFollowsTheQuery() {
         let sessions = Fixtures.snapshot([

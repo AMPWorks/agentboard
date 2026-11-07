@@ -57,9 +57,15 @@ struct PopoverSections: Sendable, Equatable {
     /// query (see `UpdatesFeed.hiddenNeedsYouNotes`). A session in Review,
     /// Snoozed or Done can hold one, so the state count above misses it;
     /// notes on Needs you / Interrupted sessions are left to that count.
+    /// Zero when `needsYouNotesPinned`: those notes are then on screen.
     let hiddenNeedsYouNotes: Int
 
-    static func make(from sessions: [Session], query: SessionSearch) -> PopoverSections {
+    /// `needsYouNotesPinned`: the popover shows every such note above the
+    /// sessions whatever the query (the Updates panel is closed, see
+    /// `PopoverUpdatesSettings.pinnedRows`), so the query hides none of them
+    /// and the notice must not count them.
+    static func make(from sessions: [Session], query: SessionSearch,
+                     needsYouNotesPinned: Bool = false) -> PopoverSections {
         let filtering = !query.isEmpty
         let matched = filtering ? sessions.filter(query.matches) : sessions
         let kinds = Kind.allCases.filter { filtering || !$0.queryOnly }
@@ -84,7 +90,8 @@ struct PopoverSections: Sendable, Equatable {
             snapshotIsEmpty: sessions.isEmpty,
             hiddenCount: hidden,
             hiddenNeedingAttention: hiddenAttention,
-            hiddenNeedsYouNotes: UpdatesFeed.hiddenNeedsYouNotes(from: sessions, query: query)
+            hiddenNeedsYouNotes: needsYouNotesPinned
+                ? 0 : UpdatesFeed.hiddenNeedsYouNotes(from: sessions, query: query)
         )
     }
 
