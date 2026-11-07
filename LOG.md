@@ -488,3 +488,30 @@ environment carries only a session index, not a name, and the hook cannot shell 
 snapshot resolves names live with one `tmux list-panes -a` per socket, only for alive tmux rows
 and bounded at half the slow-snapshot threshold. Storing the name at focus or refresh time was the
 alternative, but it would be blank until first use and stale after a rename.
+
+## 2026-11-07 05:05:45 UTC — Claude desktop app sessions open in the desktop app
+
+The Claude desktop app runs Claude Code itself, so its sessions fire the same hooks and appeared
+on the board as ordinary rows that could not be focused: there is no terminal. Claude Code
+exports `$CLAUDE_CODE_ENTRYPOINT` to its hooks (`cli` in a terminal, `claude-desktop` from the
+desktop app), and its transcripts carry the same value as `entrypoint`. The hook now stores it on
+the session (one new migration; Claude sessions only, environment only, skipped for a daemon
+pid, and a later event without it never blanks it), backfill fills it from the transcript when
+the hook never did, and the snapshot adds `entrypoint` and a `desktop` flag. Reading the
+transcript in the hook was the alternative, rejected because the synchronous hook must not read
+files it does not need.
+
+Opening the exact session relies on two desktop-app internals: its per-session record under
+`~/Library/Application Support/Claude/claude-code-sessions/`, which maps the Claude Code session
+id to the app's own `local_<id>`, and its `claude://code/continue?session=local_<id>` link, which
+only accepts that id. Both may change between desktop versions, so `focus` resolves the id at
+click time only (never in `snapshot`), read-only and bounded by file count, bytes and time, and
+every miss falls back to `open -b` on the app's bundle id. The desktop branch runs before the
+tmux and terminal branches, since a desktop session can inherit the `TERM_PROGRAM` of whatever
+launched the app. A desktop row is always focusable, alive or not, because the app owns the
+conversation. Resume is hidden for these rows, since a terminal resume would fork the
+conversation away from the app; Copy Resume Command stays.
+
+The row icon sits under the tool badge in the badge's fixed 18-point column rather than in a new
+column, so rows without it keep their width and the icon lines up from row to row. Only the
+Claude desktop app is recognised; other entrypoints are recorded but get no icon.
