@@ -204,7 +204,7 @@ struct UpdateRowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(row.toolBadge)
-                        .font(.system(size: fontSize.minorSize - 1, weight: .bold, design: .monospaced))
+                        .font(.system(size: fontSize.minorSize, weight: .bold, design: .monospaced))
                         .frame(width: fontSize.minorSize + 4, height: fontSize.minorSize + 4)
                         .background(row.session.tool == "codex" ? Color.purple.opacity(0.25) : Color.blue.opacity(0.25))
                         .clipShape(Circle())
