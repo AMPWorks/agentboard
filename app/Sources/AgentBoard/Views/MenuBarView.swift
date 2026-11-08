@@ -44,9 +44,11 @@ struct MenuBarView: View {
         let sections = sections
         let sessions = store.snapshot.sessions
         let query = SessionSearch(store.popoverQuery)
-        let updates = UpdatesFeed.rows(from: sessions, query: query)
         let mode = updatesMode
         let shown = updatesShown
+        // The feed sorts every open note, so it is built once, and only
+        // while the panel can show it (`panelVisible` is false when hidden).
+        let updates = shown ? UpdatesFeed.rows(from: sessions, query: query) : []
         let feed = UpdatesState(
             hasUpdates: PopoverUpdatesSettings.hasOpenUpdates(sessions),
             matching: UpdatesFeed.total(from: sessions, query: query),

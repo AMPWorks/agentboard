@@ -169,11 +169,15 @@ enum PopoverUpdatesSettings {
     /// would hide a request. Read from the unfiltered feed, like the menu
     /// bar icon, so a popover query kept from an earlier open never hides
     /// one. Empty while the panel is open (it lists them).
+    /// Built from those notes alone, never the whole feed: a needs_you note
+    /// is always a row of its own (`UpdatesFeed.rows`), so these are the
+    /// feed's needs_you rows in feed order, without sorting every open note
+    /// on each popover body evaluation.
     static func pinnedRows(from sessions: [Session], panelShown: Bool) -> [UpdatesFeed.Row] {
         guard !panelShown else { return [] }
-        return UpdatesFeed.rows(from: sessions, query: SessionSearch("")).filter { row in
-            row.isNeedsYou && row.session.state != .needsYou && row.session.state != .interrupted
-        }
+        return UpdatesFeed.make(from: sessions, query: SessionSearch("")) { note, session in
+            note.kind == .needsYou && session.state != .needsYou && session.state != .interrupted
+        }.map(UpdatesFeed.single)
     }
 
     /// Under the search field while a query is active and the panel is

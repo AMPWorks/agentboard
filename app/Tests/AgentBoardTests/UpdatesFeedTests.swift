@@ -207,3 +207,107 @@ struct NoteDecodingTests {
         #expect(with != without)
     }
 }
+
+/// The feed sorts every open note on each popover body evaluation, so its
+/// sort must parse each date once and the parser must not rebuild formatters.
+@Suite("UpdatesFeed sorting cost")
+struct UpdatesFeedSortTests {
+    /// Many sessions with notes whose times collide, mix fractional and
+    /// whole seconds, or do not parse.
+    private static func manyNotes(sessions: Int = 40, perSession: Int = 20) -> [Session] {
+        var id = 0
+        let raw: [[String: Any]] = (0..<sessions).map { s in
+            let notes: [[String: Any]] = (0..<perSession).map { n in
+                id += 1
+                let minute = (id * 7) % 50
+                let lastTs: String
+                switch id % 5 {
+                case 0: lastTs = String(format: "2026-10-15T10:%02d:00.250000Z", minute)
+                case 1: lastTs = ""
+                default: lastTs = String(format: "2026-10-15T10:%02d:00Z", minute)
+                }
+                return note(id, n % 4 == 0 ? "needs_you" : "update", "note \(id)", lastTs: lastTs)
+            }
+            return session("s\(s)", ["snoozed", "review", "needs_you", "interrupted", "running"][s % 5],
+                           project: "p\(s)", notes: notes)
+        }
+        return Fixtures.snapshot(raw).sessions
+    }
+
+    /// What the feed sorted by before dates were parsed once per note.
+    private static func reference(_ sessions: [Session], _ query: SessionSearch) -> [Int] {
+        sessions.flatMap { session in session.notes.filter { query.matches($0, in: session) } }
+            .sorted { a, b in
+                let da = a.lastDate ?? .distantPast
+                let db = b.lastDate ?? .distantPast
+                if da != db { return da > db }
+                return a.id > b.id
+            }
+            .map(\.id)
+    }
+
+    @Test func orderMatchesTheComparatorSortWithTiesByNewerId() {
+        let sessions = Self.manyNotes()
+        for query in [SessionSearch(""), SessionSearch("p3"), SessionSearch("note")] {
+            let feed = UpdatesFeed.make(from: sessions, query: query)
+            #expect(feed.map(\.id) == Self.reference(sessions, query))
+        }
+        // Equal times: the higher id first; unparseable times sort last.
+        let feed = UpdatesFeed.make(from: sessions, query: SessionSearch(""))
+        for (a, b) in zip(feed, feed.dropFirst()) {
+            let da = a.note.lastDate ?? .distantPast
+            let db = b.note.lastDate ?? .distantPast
+            #expect(da > db || (da == db && a.id > b.id))
+        }
+        #expect(feed.last?.note.lastDate == nil)
+    }
+
+    /// Pinned rows skip the full feed; they must still be exactly its
+    /// needs_you rows of sessions that are not red, in feed order.
+    @Test func pinnedRowsMatchTheFeedsNeedsYouRows() {
+        let sessions = Self.manyNotes(sessions: 9, perSession: 6)
+        let expected = UpdatesFeed.rows(from: sessions, query: SessionSearch("")).filter { row in
+            row.isNeedsYou && row.session.state != .needsYou && row.session.state != .interrupted
+        }
+        #expect(!expected.isEmpty)
+        #expect(PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: false) == expected)
+        #expect(PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: true).isEmpty)
+    }
+
+    @Test func dateParsingKeepsItsFormats() {
+        #expect(ISO8601DateParsing.date(from: "2026-10-15T10:00:00Z")?.timeIntervalSince1970 == 1_792_058_400)
+        #expect(ISO8601DateParsing.date(from: "2026-10-15T10:00:00.500000Z")?.timeIntervalSince1970
+                == 1_792_058_400.5)
+        #expect(ISO8601DateParsing.date(from: "2026-10-15T12:00:00+02:00")?.timeIntervalSince1970
+                == 1_792_058_400)
+        #expect(ISO8601DateParsing.date(from: "") == nil)
+        #expect(ISO8601DateParsing.date(from: "yesterday") == nil)
+    }
+
+    /// About 800 notes, as a busy board has: building a formatter per
+    /// comparison took over a second here. The bound is relative, so a slow
+    /// or loaded machine slows both sides alike: the whole feed must cost
+    /// less than parsing each note's date once the old way (two fresh
+    /// ISO8601DateFormatters), a twentieth of what the old sort did. The feed
+    /// keeps its best of three runs so one stall cannot fail it; a stall in
+    /// the single baseline run only widens the margin.
+    @Test func sortingAFullBoardIsCheap() {
+        let sessions = Self.manyNotes()
+        let stamps = sessions.flatMap { $0.notes.map(\.lastTs) }
+        let clock = ContinuousClock()
+        let feed = (0..<3).map { _ in
+            clock.measure { _ = UpdatesFeed.rows(from: sessions, query: SessionSearch("")) }
+        }.min()!
+        let oldParseOnce = clock.measure {
+            for stamp in stamps {
+                let withFractional = ISO8601DateFormatter()
+                withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if withFractional.date(from: stamp) != nil { continue }
+                let plain = ISO8601DateFormatter()
+                plain.formatOptions = [.withInternetDateTime]
+                _ = plain.date(from: stamp)
+            }
+        }
+        #expect(feed < oldParseOnce, "feed \(feed) vs one old-style parse per note \(oldParseOnce)")
+    }
+}

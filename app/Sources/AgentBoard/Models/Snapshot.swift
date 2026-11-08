@@ -654,14 +654,16 @@ struct UsageSource: Codable, Sendable, Equatable {
 }
 
 /// Parses the ISO8601 timestamps the CLI emits, tolerating fractional seconds.
+/// Views sort hundreds of notes by date on every body evaluation, so this
+/// must be cheap: ISO8601FormatStyle parses in about a microsecond, where
+/// building two ISO8601DateFormatters per call took about a millisecond
+/// (and sharing them, about 100 microseconds). Both styles are Sendable.
 enum ISO8601DateParsing {
-    static func date(from string: String) -> Date? {
-        let withFractional = ISO8601DateFormatter()
-        withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFractional.date(from: string) { return date }
+    private static let withFractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    private static let plain = Date.ISO8601FormatStyle()
 
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: string)
+    static func date(from string: String) -> Date? {
+        if let date = try? withFractional.parse(string) { return date }
+        return try? plain.parse(string)
     }
 }
