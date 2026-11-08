@@ -128,13 +128,28 @@ final class SnapshotStore: ObservableObject {
     /// paths --json` once -- the CLI is the one source of truth for where it
     /// actually reads/writes (it alone knows about a baked-in AGENTBOARD_HOME
     /// from install time), so this must never be computed independently here.
-    private func resolveDataDirectory() async -> String {
+    /// The fallback is the one exception, and its database path is a best
+    /// guess: if the CLI ever renamed or moved the database, the watcher
+    /// would stamp a file that never changes and only the poll would
+    /// refresh, so the guessed paths are logged with the failure.
+    private func resolveDataDirectory() async -> (home: String, db: String) {
         do {
-            return try await cli.paths().home
+            let paths = try await cli.paths()
+            return (paths.home, paths.db)
         } catch {
-            log.error("agentboard paths --json failed, falling back: \(error.localizedDescription, privacy: .public)")
-            return Self.fallbackDataDirectory()
+            let home = Self.fallbackDataDirectory()
+            let db = (home as NSString).appendingPathComponent("agentboard.db")
+            log.error("agentboard paths --json failed, guessing home \(home, privacy: .public) and db \(db, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return (home, db)
         }
+    }
+
+    /// The files whose writes mean the snapshot may have changed: the
+    /// database, its WAL and config.json. The watcher ignores directory
+    /// events that leave all three untouched, such as the `-wal`/`-shm`
+    /// files each `snapshot` run creates and deletes (`DirectoryWatcher`).
+    static func stampedFiles(home: String, db: String) -> [String] {
+        [db, db + "-wal", (home as NSString).appendingPathComponent("config.json")]
     }
 
     func start() {
@@ -142,10 +157,11 @@ final class SnapshotStore: ObservableObject {
         startedAt = Date()
         pathsTask = Task { [weak self] in
             guard let self else { return }
-            let directory = await self.resolveDataDirectory()
+            let (directory, db) = await self.resolveDataDirectory()
             guard !Task.isCancelled else { return }
             self.dataDirectory = directory
-            self.watcher.start(path: directory) { [weak self] in
+            self.watcher.start(path: directory,
+                               stampedFiles: Self.stampedFiles(home: directory, db: db)) { [weak self] in
                 Task { await self?.refresh() }
             }
         }

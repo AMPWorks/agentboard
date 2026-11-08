@@ -552,3 +552,25 @@ first one, as before). Search finds these rows by `desktop` or their entrypoint,
 `tool:`, since the icon advertises the concept. The popover icon takes the row click's code path,
 and the focus log names the app's id `desktop_id` so it no longer repeats the
 `desktop_session` outcome name.
+
+## 2026-11-07 21:42:02 UTC — Cheap note dates and a watcher that ignores its own refreshes
+
+With the popover open the app could sit at full CPU. Two things compounded. `ISO8601DateParsing`
+built two `ISO8601DateFormatter` objects on every call, and the Updates feed's sort comparator
+parsed both notes' dates on every comparison, so one feed build on a busy board blocked the main
+thread for a long time. PR #22 made the popover build that feed twice per body evaluation (the
+panel rows and the pinned needs-you rows) even with the panel hidden. And the body was
+re-evaluated every refresh, which ran back to back: each `agentboard snapshot` opens the
+WAL-mode database, creating and deleting `-wal`/`-shm` in the watched data directory, so the
+watcher fired and started the next refresh half a second later, forever.
+
+Dates now parse with `Date.ISO8601FormatStyle` (Sendable, about a microsecond per parse, and
+about a hundred times faster than even a shared `ISO8601DateFormatter`); the feed sorts on dates
+computed once per note, ties still going to the higher note id. The popover builds the feed only
+while the panel is shown, and the pinned rows come from the needs-you notes alone: a needs-you
+note is always its own row, so these are the feed's needs-you rows in feed order without sorting
+every open note. The watcher stamps the database, its `-wal` and `config.json` (inode, size,
+modification time) and passes on a directory event only when a stamp moved, so a read no longer
+looks like a write; a missed change is still caught by the regular poll. An empty file stamps as
+missing, because a reader's `-wal` exists, empty, for as long as its `snapshot` runs, and a stamp
+taken mid-run would otherwise start one more refresh.

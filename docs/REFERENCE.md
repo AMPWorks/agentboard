@@ -497,7 +497,10 @@ none once the session has ended or is done; the detail view's Permissions row st
 ..., "core": ...}`), honoring `AGENTBOARD_HOME` exactly the way the rest of the CLI does. The app
 calls this once at launch so its directory watcher watches the same place the CLI actually
 reads/writes, falling back to `AGENTBOARD_HOME`, then the same default above, only if the call
-fails.
+fails. A directory event triggers a refresh only when the database, its `-wal` file or
+`config.json` changed since the last one that did (inode, size or modification time; an empty
+file counts as missing): every `snapshot` run creates and deletes the WAL-mode database's
+`-wal`/`-shm` files, so without that check each refresh would set off the next.
 
 Mark a session's own triage state directly:
 

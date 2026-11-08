@@ -156,18 +156,20 @@ enum UpdatesFeed {
     /// (`SessionSearch.matches(_:in:)`), so a query for a PR number lists
     /// the note that mentions it, not its siblings. Ties on time keep the
     /// higher note id (the newer row) first.
-    static func make(from sessions: [Session], query: SessionSearch) -> [Item] {
-        let items = sessions.flatMap { session in
+    /// `including` narrows the notes considered before the query (pinned
+    /// rows take only needs_you notes).
+    static func make(from sessions: [Session], query: SessionSearch,
+                     including include: (Note, Session) -> Bool = { _, _ in true }) -> [Item] {
+        // Each note's date is parsed once, not on every comparison.
+        let keyed = sessions.flatMap { session in
             session.notes
-                .filter { query.matches($0, in: session) }
-                .map { Item(note: $0, session: session) }
+                .filter { include($0, session) && query.matches($0, in: session) }
+                .map { (date: $0.lastDate ?? .distantPast, item: Item(note: $0, session: session)) }
         }
-        return items.sorted { a, b in
-            let da = a.note.lastDate ?? .distantPast
-            let db = b.note.lastDate ?? .distantPast
-            if da != db { return da > db }
-            return a.note.id > b.note.id
-        }
+        return keyed.sorted { a, b in
+            if a.date != b.date { return a.date > b.date }
+            return a.item.note.id > b.item.note.id
+        }.map(\.item)
     }
 
     /// Open `needs_you` notes among the listed ones that the query leaves out
@@ -311,7 +313,7 @@ extension UpdatesFeed {
         return rows
     }
 
-    private static func single(_ item: Item) -> Row {
+    static func single(_ item: Item) -> Row {
         Row(session: item.session, notes: [item.note], total: 1, isGroup: false,
             dismissal: .ids([item.note.id]))
     }
