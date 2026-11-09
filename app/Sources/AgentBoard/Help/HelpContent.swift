@@ -125,6 +125,13 @@ enum HelpContent {
             .heading("Footer"),
             .paragraph("**Open Dashboard** opens the full window, **Refresh** reloads the snapshot right away, and the gear menu holds **Settings…**, **AgentBoard Help**, **Open Log** and **Quit AgentBoard**."),
             .paragraph("Above the buttons, one **plan usage** line per source that has numbers, led by the source's name, such as `Claude · 5h 57% · 7d 70% · resets in 1h 55m` or `Codex · 5h 12% · 7d 31%`: how much of each limit window is used and when the soonest resets. The window names come from the source. A line turns orange at 80% and red at 95%. Hover it for each window's reset time, where the numbers were read and how old they are; numbers over an hour old say so in the line (`Claude as of 3h ago`), because a source is only as fresh as its last report on this Mac. A window that has already reset is left out until newer numbers arrive. With no source (an API key, Bedrock or Vertex, most gateways) there is no line at all. Sources are explained under PRs, links and integrations. **Settings → Show plan usage** hides the lines."),
+            .heading("Size"),
+            .bullets([
+                "Drag the **grip** in the bottom-right corner to make the popover taller, shorter, wider or narrower; AgentBoard remembers the size. Double-click the grip to go back to the default height and the full width.",
+                "By default the popover is as wide as the room from the menu bar icon to the right edge of the screen. Its left edge stays at the icon; it moves left only when the icon is too close to the right edge for the narrowest popover. Dragging the grip sideways keeps your width instead (Settings → Popover size → **Use the full width to the screen edge** turns full width back on).",
+                "Settings → Popover size → **Fit height to active sessions** sizes the height to show every Needs you, Review and Running session; the grip then changes only the width.",
+                "The popover never runs past the bottom or right edge of the screen: a size saved on a larger display is shrunk to fit, and comes back on that display. A long title or status line wraps onto more lines instead of being cut off.",
+            ]),
             .heading("Keyboard"),
             .shortcut(keys: "Type", action: "The search field has the cursor when the popover opens, so you can type a filter right away."),
             .shortcut(keys: "⌘F", action: "Focus the search field again."),
@@ -338,6 +345,12 @@ enum HelpContent {
                 HelpRow(key: "Updates panel", value: "**Hidden until clicked** (default): the popover opens on the sessions, and the **Updates** button next to the search field shows the panel until the popover closes. **Remember last state**: the panel stays open or closed the way you last left it, across popover opens and restarts (kept under `updatesPanelLastShown`). **Always shown**: the panel always sits above the sessions whenever there are updates, with no Updates button. Key `updatesPanelMode` (`hiddenUntilClicked`, `rememberLast`, `alwaysShown`)."),
                 HelpRow(key: "Updates text size", value: "**Small**, **Default** (default) or **Large** for the Updates panel's rows and header; rows get a little more room as the text grows. Key `updatesFontSize` (`small`, `default`, `large`)."),
                 HelpRow(key: "Updates listed before Show all", value: "**3** (default), **5** or **10**: how many rows besides the needs_you ones the panel lists before **Show all N**. Key `updatesCompactLimit`."),
+            ]),
+            .heading("Popover size"),
+            .keyValue([
+                HelpRow(key: "Fit height to active sessions", value: "Off by default. On, the popover grows or shrinks to show every Needs you, Review and Running session (and the Updates panel when it is open), up to the height of the screen; while you search it fits everything that matches. The corner grip then changes only the width. Key `popoverAutoExpand`."),
+                HelpRow(key: "Use the full width to the screen edge", value: "On by default: the popover reaches from the menu bar icon to the right edge of the screen. Dragging the corner grip sideways turns it off and keeps that width; turning it off here keeps the width you last dragged to, or the current width if you never dragged (key `popoverWidth`, in points; 0 until you drag). Key `popoverAutoWidth`."),
+                HelpRow(key: "Reset size", value: "Goes back to the default height and the full width, the same as double-clicking the corner grip. The height you drag to is kept under `popoverHeight` (points of session list, default 388); a size saved on a larger display is shrunk to fit a smaller one without being forgotten."),
             ]),
             .heading("CLI & Data"),
             .keyValue([

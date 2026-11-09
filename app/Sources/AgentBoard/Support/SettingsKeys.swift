@@ -40,6 +40,10 @@ enum SettingsKeys {
         PopoverUpdatesSettings.modeKey,
         PopoverUpdatesSettings.fontSizeKey,
         PopoverUpdatesSettings.compactLimitKey,
+        PopoverSizing.heightKey,
+        PopoverSizing.autoExpandKey,
+        PopoverSizing.widthKey,
+        PopoverSizing.autoWidthKey,
     ]
 
     /// Show the plan-usage lines (one per usage source) in the popover

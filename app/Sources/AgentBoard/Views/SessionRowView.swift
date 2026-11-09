@@ -54,7 +54,7 @@ struct SessionRowView: View {
                     Text(session.displayTitle)
                         .font(compact ? .body : .headline)
                         .foregroundStyle(SessionColor.color(for: session))
-                        .lineLimit(1)
+                        .wrapsInPopover(compact)
                     if session.state == .interrupted {
                         Text("Interrupted")
                             .font(.caption2)
@@ -100,13 +100,13 @@ struct SessionRowView: View {
                     Text(title)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .wrapsInPopover(compact)
                 }
                 HStack(spacing: 6) {
                     Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .wrapsInPopover(compact)
                     Spacer(minLength: 4)
                     if let tag = session.tmuxTag {
                         Label(tag, systemImage: "rectangle.split.3x1")
@@ -135,7 +135,7 @@ struct SessionRowView: View {
                     Text(reason)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                        .wrapsInPopover(compact)
                         .help(reason)
                 }
             }
@@ -295,5 +295,18 @@ struct SessionRowView: View {
             Image(systemName: systemImage)
         }
         .help(help)
+    }
+}
+
+private extension View {
+    /// Popover rows wrap a long line onto more lines instead of truncating
+    /// it, at whatever width the popover has; dashboard rows stay one line.
+    @ViewBuilder
+    func wrapsInPopover(_ compact: Bool) -> some View {
+        if compact {
+            lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+        } else {
+            lineLimit(1)
+        }
     }
 }

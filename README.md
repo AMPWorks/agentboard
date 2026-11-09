@@ -150,6 +150,10 @@ toolbar) → **Settings…**.
   a session interrupted or awaiting review; plays even with notifications off. Until you pick
   one (shown as **Follow notification toggle**), needs you and turn finished play the alert
   sound only while their notification toggle is on; the other two are silent.
+- **Popover**: when the Updates panel shows, its text size and how many rows it lists.
+- **Popover size**: fit the height to the active sessions, use the full width to the screen edge
+  (on by default), and **Reset size**. Drag the grip in the popover's bottom-right corner to resize
+  it by hand.
 - **General**: launch at login, show plan usage, and show closed and merged PRs on rows.
 - **CLI & Data**: a path to the `agentboard` CLI, if the app cannot find it.
 - **Diagnostics**: verbose logging and **Open log**.

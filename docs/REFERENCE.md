@@ -1089,6 +1089,33 @@ event, and two events set to the same sound in one snapshot play it once. A soun
 there is no repeat. A newer sound for the same event stops one still playing. The CLI is not
 involved; the choices are app settings in the `io.github.agentboard` defaults domain.
 
+## Popover size
+
+The popover is as wide as the room from the menu bar icon to the right edge of the screen (less
+8 pt), at least 320 pt, and its session list is 388 pt tall. Drag the grip in its bottom-right
+corner to change both: the list stays between 240 pt and the room below the menu bar (the screen's
+visible height less the search bar, footer and an 8 pt margin), and the width between 320 pt and
+the room to the right edge. The left edge stays at the icon; when the icon is too close to the right
+edge for 320 pt, the popover moves left just enough to stay on screen. Double-click the grip, or
+Settings → Popover size → **Reset size**, for the default height and the full width. Session rows wrap
+a long title, status, branch or waiting reason onto more lines instead of truncating it.
+
+The app stores the size in its defaults (`io.github.agentboard`): `popoverHeight` (list height
+in points, default 388), `popoverWidth` (points; 0 until the grip is dragged sideways) and
+`popoverAutoWidth` (default true; dragging the width sets it false, the Settings toggle **Use the
+full width to the screen edge** sets it back; turning the toggle off keeps the width last dragged
+to, or stores the current full width when there is none). A stored size larger than the current
+screen allows is shrunk for display only, so it returns on the larger display: a sideways-only
+drag leaves the stored height alone, and a VoiceOver adjust step stores a new size only when it
+actually changes the shown one. With **Fit height to active
+sessions** (`popoverAutoExpand`, default false) the list is as tall as the Needs you, Review and
+Running sections (plus the pinned updates and the Updates panel when shown), within the same
+bounds; while a query is set, everything it shows. Unconcluded, Snoozed and Done never count, and
+changes under 4 pt are ignored. In that mode the grip changes only the width.
+
+MenuBarExtra sizes its panel to the content only when it opens, so the app sets the panel's frame
+itself whenever the content's size changes, keeping the top edge where the panel opened.
+
 ## Search
 
 Both the menu bar popover and the dashboard have a search field, and both read a query the same
