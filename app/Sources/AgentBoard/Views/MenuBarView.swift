@@ -25,6 +25,28 @@ struct MenuBarView: View {
     /// survives closing the popover, so `onAppear` resets it on every open.
     @State private var updatesOpenThisVisit = false
 
+    // Size (Settings → Popover size and the corner grip; see PopoverSizing).
+    @AppStorage(PopoverSizing.heightKey) private var storedHeight: Double = Double(PopoverSizing.defaultHeight)
+    @AppStorage(PopoverSizing.autoExpandKey) private var autoExpand: Bool = false
+    @AppStorage(PopoverSizing.widthKey) private var storedWidth: Double = 0
+    @AppStorage(PopoverSizing.autoWidthKey) private var autoWidth: Bool = true
+    @State private var placer = PopoverWindowPlacer()
+    /// The menu bar icon's screen, read on every open and screen change.
+    @State private var screen: PopoverScreen?
+    /// Search bar and footer heights, measured; the list gets the rest.
+    @State private var searchBarHeight: CGFloat = 60
+    @State private var footerHeight: CGFloat = 50
+    /// Auto-expand: the bottom of the content the list must fit, settled
+    /// so changes under `PopoverSizing.autoThreshold` are ignored.
+    @State private var contentBottom: CGFloat?
+    /// The size while the grip is dragged (list height, popover width).
+    @State private var dragSize: CGSize?
+    @State private var dragOrigin: DragOrigin?
+    /// The grip pushed its resize cursor (popped on leaving or closing).
+    @State private var gripCursorPushed = false
+    /// The pointer is over the grip (the cursor also stays up mid-drag).
+    @State private var gripHovered = false
+
     /// While the panel is closed the needs_you notes the query would hide
     /// are pinned above the sessions, so the notice leaves them out.
     private var sections: PopoverSections {
@@ -57,6 +79,7 @@ struct MenuBarView: View {
         let pinned = PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: shown)
         VStack(spacing: 0) {
             searchBar(sections, feed: feed, mode: mode)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { searchBarHeight = $0 }
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
@@ -68,6 +91,7 @@ struct MenuBarView: View {
                         PinnedUpdatesView(rows: pinned, store: store, fontSize: updatesFont) {
                             setUpdatesShown(true)
                         }
+                        .reportsContentBottom()
                     }
                     if PopoverUpdatesSettings.panelVisible(mode: mode, shown: shown, hasUpdates: feed.hasUpdates,
                                                            hasRows: !updates.isEmpty) {
@@ -82,12 +106,14 @@ struct MenuBarView: View {
                             emptyText: "No updates match “\(store.popoverQuery)”",
                             onHide: mode == .alwaysShown ? nil : { setUpdatesShown(false) }
                         )
+                        .reportsContentBottom()
                     }
                     ForEach(sections.sections) { section in
                         if section.kind == .unconcluded {
                             unconcludedSection(section, in: sections)
                         } else {
                             sessionSection(section, in: sections)
+                                .reportsContentBottom(PopoverSizing.isActive(section.kind) || sections.isFiltering)
                         }
                     }
                     if sections.snapshotIsEmpty {
@@ -96,18 +122,33 @@ struct MenuBarView: View {
                             .padding()
                     } else if sections.hasNoMatches {
                         noMatches
+                            .reportsContentBottom()
                     }
                 }
-                .padding(.vertical, 8)
+                .padding(.vertical, PopoverSizing.listPadding)
+                .coordinateSpace(name: Self.listSpace)
+                .onPreferenceChange(ContentBottomKey.self) { bottom in
+                    contentBottom = PopoverSizing.settledAutoHeight(previous: contentBottom, measured: bottom)
+                }
             }
-            // 388 + the search bar keeps the popover's overall height.
-            .frame(width: 380, height: 388)
+            .frame(height: listHeight)
 
             Divider()
             footer
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
         }
-        .background(WindowReader { keyMonitor.window = $0 })
+        .frame(width: popoverWidth)
+        .overlay(alignment: .bottomTrailing) { resizeGrip }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { placer.setContentSize($0) }
+        .background(WindowReader { window in
+            keyMonitor.window = window
+            placer.window = window
+            readScreen()
+        })
         .onAppear {
+            placer.reset()
+            placer.onScreenChange = { readScreen() }
+            readScreen()
             updatesOpenThisVisit = false
             store.setVisible(true)
             // Every popover open counts as seeing the board.
@@ -128,6 +169,12 @@ struct MenuBarView: View {
             }
         }
         .onDisappear {
+            // The view outlives the popover, and a drag cut short by closing
+            // may never end, so drop its state or it would win next open.
+            gripHovered = false
+            setGripCursor(false)
+            dragSize = nil
+            dragOrigin = nil
             focusOnNextKey = false
             store.setVisible(false)
             attention.popoverDidDisappear()
@@ -143,6 +190,134 @@ struct MenuBarView: View {
         }
         .onChange(of: sections.expandsUnconcluded) { _, expands in
             if expands { unconcludedExpandedWhileFiltering = true }
+        }
+    }
+
+    // MARK: - Size
+
+    fileprivate static let listSpace = "popoverList"
+    static let gripSize: CGFloat = 14
+
+    private struct DragOrigin {
+        var size: CGSize
+        /// The pointer in screen coordinates (y up) when the drag began.
+        var mouse: CGPoint
+    }
+
+    private func readScreen() {
+        screen = placer.currentScreen()
+    }
+
+    /// The tallest list that fits under the menu bar on this screen.
+    private var maxListHeight: CGFloat {
+        guard let screen else { return .greatestFiniteMagnitude }
+        // Two one-point dividers sit between the list and the chrome.
+        return PopoverSizing.maxHeight(screenVisibleHeight: screen.visibleFrame.height,
+                                       chromeHeight: searchBarHeight + footerHeight + 2)
+    }
+
+    private var availableWidth: CGFloat {
+        screen?.availableWidth ?? .greatestFiniteMagnitude
+    }
+
+    private var listHeight: CGFloat {
+        if autoExpand {
+            return PopoverSizing.autoHeight(contentBottom: contentBottom, max: maxListHeight)
+        }
+        if let dragSize { return dragSize.height }
+        return PopoverSizing.clamp(height: PopoverSizing.storedHeight(storedHeight), max: maxListHeight)
+    }
+
+    private var popoverWidth: CGFloat {
+        if let dragSize { return dragSize.width }
+        return PopoverSizing.width(auto: autoWidth, stored: storedWidth, available: screen?.availableWidth)
+    }
+
+    private var gripHelp: String {
+        autoExpand
+            ? "Drag to change the popover's width; its height fits the active sessions (Settings → Popover size). Double-click to reset"
+            : "Drag to resize the popover; double-click to reset"
+    }
+
+    /// The bottom-right corner grip: drag to resize (width only while
+    /// auto-expand sets the height), double-click to reset.
+    private var resizeGrip: some View {
+        ResizeGripShape()
+            .stroke(.secondary, style: StrokeStyle(lineWidth: 1, lineCap: .round))
+            .frame(width: 8, height: 8)
+            .frame(width: Self.gripSize, height: Self.gripSize)
+            .padding(2)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                gripHovered = inside
+                // A fast drag can outrun the panel; keep the cursor until it ends.
+                setGripCursor(inside || dragOrigin != nil)
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in dragChanged(value) }
+                    .onEnded { _ in dragEnded() }
+            )
+            .onTapGesture(count: 2) { PopoverSizing.resetSize() }
+            .help(gripHelp)
+            .accessibilityElement()
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("Resize popover")
+            .accessibilityValue("\(Int(listHeight)) points tall, \(Int(popoverWidth)) wide")
+            .accessibilityHint(autoExpand ? "Adjust to change the width" : "Adjust to change the height")
+            .accessibilityAdjustableAction { direction in
+                let sign = direction == .increment ? 1 : -1
+                // A step that cannot move (at a bound) stores nothing, so a
+                // larger size saved on another display survives.
+                if autoExpand {
+                    if let width = PopoverSizing.steppedWidthToStore(shown: popoverWidth, direction: sign,
+                                                                     available: availableWidth) {
+                        storedWidth = width
+                        autoWidth = false
+                    }
+                } else if let height = PopoverSizing.steppedHeightToStore(shown: listHeight, direction: sign,
+                                                                          screenMax: maxListHeight) {
+                    storedHeight = height
+                }
+            }
+            .accessibilityAction(named: "Reset size") { PopoverSizing.resetSize() }
+    }
+
+    private func setGripCursor(_ on: Bool) {
+        guard on != gripCursorPushed else { return }
+        gripCursorPushed = on
+        if on { ResizeGripShape.cursor(widthOnly: autoExpand).push() } else { NSCursor.pop() }
+    }
+
+    /// Follows the pointer in screen coordinates, so the panel moving or
+    /// growing under it never feeds back into the drag.
+    private func dragChanged(_ value: DragGesture.Value) {
+        let mouse = NSEvent.mouseLocation
+        if dragOrigin == nil {
+            // The gesture starts after a point of movement; back that out.
+            dragOrigin = DragOrigin(size: CGSize(width: popoverWidth, height: listHeight),
+                                    mouse: CGPoint(x: mouse.x - value.translation.width,
+                                                   y: mouse.y + value.translation.height))
+        }
+        guard let origin = dragOrigin else { return }
+        let translation = CGSize(width: mouse.x - origin.mouse.x,
+                                 height: autoExpand ? 0 : origin.mouse.y - mouse.y)
+        dragSize = PopoverSizing.dragged(start: origin.size, translation: translation,
+                                         available: availableWidth, screenMax: maxListHeight)
+    }
+
+    private func dragEnded() {
+        defer {
+            dragSize = nil
+            dragOrigin = nil
+            setGripCursor(gripHovered)
+        }
+        guard let origin = dragOrigin, let end = dragSize else { return }
+        let result = PopoverSizing.dragResult(start: origin.size, end: end, heightIsAuto: autoExpand)
+        if let height = result.height { storedHeight = height }
+        if let width = result.width {
+            storedWidth = width
+            autoWidth = false
         }
     }
 
@@ -251,7 +426,7 @@ struct MenuBarView: View {
             }
         }
         .padding(8)
-        .frame(width: 380, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Focus now and once more after the window settles: a MenuBarExtra
@@ -317,21 +492,28 @@ struct MenuBarView: View {
                 }
             }
         )
-        return DisclosureGroup(sections.header(for: section), isExpanded: expanded) {
+        return DisclosureGroup(isExpanded: expanded) {
             ForEach(section.sessions) { session in
                 SessionRowView(session: session, store: store)
                     .padding(.horizontal, 4)
             }
+        } label: {
+            // Auto-expand fits the header, so the section is never out of
+            // sight, but not its rows: expanding it never grows the popover.
+            Text(sections.header(for: section))
+                .reportsContentBottom()
         }
         .font(.caption.bold())
         .foregroundStyle(.secondary)
         .padding(.horizontal, 10)
         .help("Sessions that ended or stopped without finishing; click to show or hide them")
+        // Auto-expand fits it only while filtering, so matches are not hidden.
+        .reportsContentBottom(sections.isFiltering)
     }
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 4) {
-            // Plan usage, one line per source, above the button row (full at 380 pt).
+            // Plan usage, one line per source, above the button row.
             UsageLineView(usage: store.snapshot.usage)
             HStack {
                 Button("Open Dashboard") {
@@ -345,9 +527,57 @@ struct MenuBarView: View {
                 .help("Reload every session's state now")
                 GearMenu(store: store, closesHostWindow: true)
             }
+            // Room for the corner grip, which overlays the bottom-right corner.
+            .padding(.trailing, Self.gripSize)
         }
         .padding(8)
         .buttonStyle(.plain)
         .font(.caption)
+    }
+}
+
+/// The bottom of the content auto-expand must fit, in the list's
+/// coordinate space: the largest bottom edge any reporting view sends.
+private struct ContentBottomKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private extension View {
+    /// Reports this view's bottom edge to auto-expand when `active`.
+    func reportsContentBottom(_ active: Bool = true) -> some View {
+        background {
+            if active {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: ContentBottomKey.self,
+                                           value: proxy.frame(in: .named(MenuBarView.listSpace)).maxY)
+                }
+            }
+        }
+    }
+}
+
+/// Three diagonal strokes in the bottom-right corner, the classic resize grip.
+private struct ResizeGripShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        for fraction in [0.0, 0.4, 0.8] {
+            path.move(to: CGPoint(x: rect.minX + rect.width * fraction, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + rect.height * fraction))
+        }
+        return path
+    }
+
+    /// The diagonal resize cursor (macOS 15 and later), or left-right for
+    /// a width-only drag or on macOS 14.
+    @MainActor
+    static func cursor(widthOnly: Bool) -> NSCursor {
+        if widthOnly { return .resizeLeftRight }
+        if #available(macOS 15, *) {
+            return .frameResize(position: .bottomRight, directions: .all)
+        }
+        return .resizeUpDown
     }
 }

@@ -24,6 +24,9 @@ struct SettingsView: View {
     @AppStorage(PopoverUpdatesSettings.modeKey) private var updatesMode: String = UpdatesPanelMode.default.rawValue
     @AppStorage(PopoverUpdatesSettings.fontSizeKey) private var updatesFontSize: String = UpdatesFontSize.default.rawValue
     @AppStorage(PopoverUpdatesSettings.compactLimitKey) private var updatesCompactLimit: Int = UpdatesFeed.compactLimit
+    @AppStorage(PopoverSizing.autoExpandKey) private var popoverAutoExpand: Bool = false
+    @AppStorage(PopoverSizing.autoWidthKey) private var popoverAutoWidth: Bool = true
+    @AppStorage(PopoverSizing.widthKey) private var popoverWidth: Double = 0
     @State private var launchAtLogin: Bool = false
     @State private var systemSounds: [String] = SoundChoice.systemSoundNames()
 
@@ -127,6 +130,23 @@ struct SettingsView: View {
             }
 
             Section {
+                Toggle("Fit height to active sessions", isOn: $popoverAutoExpand)
+                    .help("Grow or shrink the popover to show every Needs you, Review and Running session, up to the screen's height; while on, the corner grip changes only the width")
+                Toggle("Use the full width to the screen edge", isOn: autoWidthBinding)
+                    .help("Make the popover as wide as the room from the menu bar icon to the right edge of the screen; turning this off keeps the width you last dragged to (or the current width if you never dragged), and dragging the corner grip sideways turns it off")
+                HStack {
+                    Text(Self.sizeFootnote(autoExpand: popoverAutoExpand))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Reset size") { PopoverSizing.resetSize() }
+                        .help("Go back to the default height and the full width (the same as double-clicking the corner grip); Fit height stays as it is")
+                }
+            } header: {
+                header("Popover size", topic: .settings)
+            }
+
+            Section {
                 Toggle("Launch at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, newValue in
                         LaunchAtLogin.setEnabled(newValue)
@@ -196,6 +216,28 @@ struct SettingsView: View {
         case .alwaysShown:
             return "The panel sits above the sessions whenever there are updates, and there is no Updates button."
         }
+    }
+
+    /// Turning auto width off gives the popover a width of its own (the
+    /// current full width unless one was dragged before), so the toggle has
+    /// a visible meaning instead of waiting for a drag.
+    private var autoWidthBinding: Binding<Bool> {
+        Binding(
+            get: { popoverAutoWidth },
+            set: { on in
+                if !on, let width = PopoverSizing.widthWhenAutoTurnsOff(
+                    stored: popoverWidth, available: PopoverWindowPlacer.iconScreen()?.availableWidth) {
+                    popoverWidth = width
+                }
+                popoverAutoWidth = on
+            }
+        )
+    }
+
+    static func sizeFootnote(autoExpand: Bool) -> String {
+        autoExpand
+            ? "Drag the grip in the popover's bottom-right corner to change its width; the height follows the active sessions."
+            : "Drag the grip in the popover's bottom-right corner to resize it; AgentBoard remembers the size."
     }
 
     private static func byteCount(_ bytes: Int64) -> String {

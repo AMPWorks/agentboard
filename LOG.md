@@ -574,3 +574,49 @@ modification time) and passes on a directory event only when a stamp moved, so a
 looks like a write; a missed change is still caught by the regular poll. An empty file stamps as
 missing, because a reader's `-wal` exists, empty, for as long as its `snapshot` runs, and a stamp
 taken mid-run would otherwise start one more refresh.
+
+## 2026-11-07 20:26:43 UTC — A resizable popover that defaults to the full width
+
+The popover was a fixed 380 by 388 point scroll area. It now spans from the menu bar icon to the
+screen's right edge by default (at least 320 points), and a grip in its bottom-right corner
+resizes width and list height together. Four app settings hold the size: `popoverHeight`,
+`popoverWidth` (0 until dragged), `popoverAutoWidth` (on; a sideways drag turns it off) and
+`popoverAutoExpand` (off), which fits the height to the Needs you, Review and Running sections,
+the collapsed Unconcluded header and the Updates panel when shown, or to everything shown while
+a query is set. All the arithmetic is in `PopoverSizing`, pure and tested. A stored size larger
+than the current screen allows is clamped for display only, so it returns on the larger display.
+The left edge stays at the icon and only moves left when even 320 points would cross the right
+edge.
+
+The design assumed SwiftUI would resize the MenuBarExtra panel when the content's size changed.
+A spike on the fixture app showed it does so only when the panel opens; afterwards it re-centers
+the larger or smaller content inside the old frame, clipping it under the menu bar. So
+`PopoverWindowPlacer` takes the content size from `onGeometryChange` and sets the panel's frame
+itself, top-left anchored at the top the panel opened with and the icon's x (read from the
+status item's window), in whole points so the window never rounds the frame and triggers another
+pass. The drag follows `NSEvent.mouseLocation` in screen coordinates instead of the gesture's
+translation, so the panel moving under the pointer never feeds back into the drag.
+
+Popover rows now wrap a long title, status, branch or waiting reason instead of truncating it;
+dashboard rows keep one line. With Fit height on, the grip stays and changes only the width,
+since it is the only way to set a width by hand. Auto-expand applies changes immediately and
+ignores ones under 4 points rather than animating the panel frame through SwiftUI. Reset size
+(Settings and a double-click on the grip) clears height and width but not Fit height, a mode
+rather than a size. The README screenshots are left for the popover usability review that
+follows this task.
+
+Review fixes kept "clamped for display only" true on every write path: a sideways-only drag no
+longer stores the shown (clamped) height, and a VoiceOver adjust step stores a size only when it
+actually moves, so neither replaces a larger size saved on another display. Turning **Use the full
+width** off in Settings now freezes a width (the last dragged one, else the current full width)
+instead of doing nothing until a drag. The placer re-places the panel on a screen change and
+removes its observers when released; closing the popover mid-drag drops the drag state. The
+Updates rows were checked at 320 points with Large text: the project name truncates, the count and
+time stay whole, so they keep one line.
+
+A full-CPU report against this branch turned out to reproduce on `main` (expensive note-date
+parsing in the Updates feed plus a data-directory watcher that refired on every refresh; fixed in
+its own PR). Reviewing the sizing for a feedback loop found none, but the placer now records a
+content size only when it changes and gets the frame to set from `PopoverSizing.frameToApply`,
+which returns nil once the panel has it, so a didResize can never start another resize; a test
+checks that fixed point, including a frame reported back a quarter point off.
