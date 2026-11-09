@@ -74,6 +74,25 @@ enum StoreStatus {
         return nil
     }
 
+    /// The banner text for a failed snapshot. A JSON decoding error's own
+    /// description ("The data couldn't be read because it isn't in the
+    /// correct format.") says nothing about the cause, so it is named, with
+    /// the likely fix; the full error goes to the app log.
+    static func snapshotErrorMessage(_ error: Error) -> String {
+        if error is DecodingError {
+            return "the CLI's snapshot is in a format this app can't read. The app and the CLI may be different versions; reinstall AgentBoard to update both."
+        }
+        return error.localizedDescription
+    }
+
+    /// The popover's text for a board with no sessions. Before the first
+    /// snapshot it says so, rather than "No sessions yet", which would read
+    /// as an empty board while the banner reports a failure.
+    static func emptyBoardText(lastError: String?, lastUpdated: Date?) -> String {
+        guard lastUpdated == nil else { return "No sessions yet" }
+        return lastError == nil ? "Loading sessions…" : "No sessions to show until a snapshot succeeds"
+    }
+
     /// Whether an action error is still within its lifetime.
     static func isLive(_ error: ActionError, now: Date) -> Bool {
         let age = now.timeIntervalSince(error.at)

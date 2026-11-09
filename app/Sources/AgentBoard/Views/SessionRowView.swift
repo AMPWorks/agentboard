@@ -39,110 +39,172 @@ struct SessionRowView: View {
                 .padding(.top, 5)
                 .help(SessionColor.legendTooltip)
                 .accessibilityLabel(SessionColor.label(for: session))
-            // The fixed icon column: the tool badge, with the desktop-app
-            // button under it on Claude desktop app sessions, so the icon
-            // lines up from row to row and never shifts the text.
+            // The fixed icon column (SessionRowLayout.iconColumn): the tool
+            // badge, the permission mode icon under it, then the desktop app
+            // button, so they line up from row to row and never shift text.
             VStack(spacing: 3) {
-                toolBadge
-                if session.desktop {
-                    desktopButton
+                ForEach(SessionRowLayout.iconColumn(for: session), id: \.columnID) { icon in
+                    switch icon {
+                    case .tool: toolBadge
+                    case .mode(let mode): modeIcon(mode)
+                    case .desktop: desktopButton
+                    }
                 }
             }
             .frame(width: 18, alignment: .top)
+            // The text lines in SessionRowLayout.lines order: the repo is
+            // always the second line.
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(session.displayTitle)
-                        .font(compact ? .body : .headline)
-                        .foregroundStyle(SessionColor.color(for: session))
-                        .wrapsInPopover(compact)
-                    if session.state == .interrupted {
-                        Text("Interrupted")
-                            .font(.caption2)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(.orange.opacity(0.2), in: Capsule())
-                            .foregroundStyle(.orange)
-                            .help("The session was working when its process died or went quiet for 30 minutes")
+                ForEach(SessionRowLayout.lines(for: session), id: \.self) { line in
+                    switch line {
+                    case .title: titleLine
+                    case .repo: repoLine
+                    case .secondaryTitle: secondaryTitleLine
+                    case .reason: reasonLine
                     }
-                    if session.notesCount > 0 {
-                        notesBadge
-                    }
-                    if session.isAutoDone {
-                        Text("auto")
-                            .font(.caption2)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(.secondary.opacity(0.2), in: Capsule())
-                            .foregroundStyle(.secondary)
-                            .help("Finished on its own: \(session.doneReason ?? "done")")
-                    }
-                    // The permission mode, when it is not the default and
-                    // the session has not ended or been done.
-                    if let modeTag = PermissionMode.rowTag(for: session) {
-                        Text(modeTag)
-                            .font(.caption2)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(.secondary.opacity(0.2), in: Capsule())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .help(PermissionMode.help(session.permissionMode))
-                    }
-                    Spacer()
-                    Text(RelativeTime.string(from: session.updatedAt))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .help("Last activity")
-                }
-                // A status text is the primary line; the session's own
-                // title then comes second (never the status twice).
-                if let title = SessionDisplay.secondaryTitle(session) {
-                    Text(title)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .wrapsInPopover(compact)
-                }
-                HStack(spacing: 6) {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .wrapsInPopover(compact)
-                    Spacer(minLength: 4)
-                    if let tag = session.tmuxTag {
-                        Label(tag, systemImage: "rectangle.split.3x1")
-                            .labelStyle(.titleAndIcon)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .fixedSize()
-                            .help(SessionActionHelp.tmuxTag(session))
-                    }
-                    PRLinkButtons(session: session, onOverflow: showDetail)
-                    // Model and context: always the rightmost item. The branch
-                    // truncates before it does; SessionModelTag caps the model
-                    // part, so this stays short.
-                    if let tag = SessionModelTag.text(session) {
-                        Text(tag)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .fixedSize()
-                            .layoutPriority(1)
-                            .help(SessionModelTag.help(session))
-                    }
-                }
-                if let reason = session.waitingReason, !reason.isEmpty {
-                    Text(reason)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .wrapsInPopover(compact)
-                        .help(reason)
                 }
             }
             if isHovering {
                 hoverButtons
             }
         }
+    }
+
+    private var titleLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(session.displayTitle)
+                .font(compact ? .body : .headline)
+                .foregroundStyle(SessionColor.textColor(for: session))
+                .wrapsInPopover(compact)
+            // Dashboard rows are one line, so they leave out "closed" (the
+            // dot and the detail pane say it) to keep room for the title.
+            ForEach(SessionRowLayout.titleTags(for: session).filter { compact || $0 != .closed }, id: \.self) { tag in
+                switch tag {
+                case .interrupted: interruptedTag
+                case .notes: notesBadge
+                case .autoDone: autoDoneTag
+                case .closed: closedTag
+                }
+            }
+            Spacer(minLength: 4)
+            Text(RelativeTime.string(from: session.updatedAt))
+                .font(.caption2)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize()
+                .help("Last activity")
+        }
+    }
+
+    private var repoLine: some View {
+        // First-baseline alignment keeps the trailing tags on the repo's
+        // first line when a long branch wraps.
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(SessionRowLayout.repoText(session))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .wrapsInPopover(compact)
+            Spacer(minLength: 4)
+            if let tag = session.tmuxTag {
+                Label(tag, systemImage: "rectangle.split.3x1")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help(SessionActionHelp.tmuxTag(session))
+            }
+            PRLinkButtons(session: session, onOverflow: showDetail)
+            // Model and context: always the rightmost item. A long branch
+            // wraps (dashboard rows truncate it) before this does;
+            // SessionModelTag caps the model part, so this stays short.
+            if let tag = SessionModelTag.text(session) {
+                Text(tag)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .layoutPriority(1)
+                    .help(SessionModelTag.help(session))
+            }
+        }
+    }
+
+    /// The session's own title, under a status text that leads the row.
+    @ViewBuilder
+    private var secondaryTitleLine: some View {
+        if let title = SessionDisplay.secondaryTitle(session) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .wrapsInPopover(compact)
+        }
+    }
+
+    /// What the session needs (in plain words, SessionDisplay.reasonText),
+    /// as legible as the repo line when it is something to act on.
+    @ViewBuilder
+    private var reasonLine: some View {
+        if let reason = SessionDisplay.reasonText(session) {
+            let raw = session.waitingReason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? reason
+            Text(reason)
+                .font(SessionDisplay.reasonIsActionable(session) ? .caption.weight(.medium) : .caption)
+                .foregroundStyle(.secondary)
+                .wrapsInPopover(compact)
+                .help(raw == reason ? raw : "\(reason) (\(raw))")
+        }
+    }
+
+    private var interruptedTag: some View {
+        Text("Interrupted")
+            .font(.caption2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(SessionColor.interrupted.opacity(0.18), in: Capsule())
+            .foregroundStyle(SessionColor.interruptedText)
+            .lineLimit(1)
+            .fixedSize()
+            .help("The session was working when its process died or went quiet for 30 minutes")
+    }
+
+    private var autoDoneTag: some View {
+        Text("auto-done")
+            .font(.caption2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(.secondary.opacity(0.2), in: Capsule())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
+            .help("Finished on its own: \(session.doneReason ?? "done")")
+    }
+
+    /// A Review row whose process has exited: the amber color, in words
+    /// ("exited", so it is never read as a closed PR).
+    private var closedTag: some View {
+        Text("exited")
+            .font(.caption2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(.secondary.opacity(0.2), in: Capsule())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
+            .help("Its process has exited; resume it to continue")
+    }
+
+    /// The permission mode, as an icon in the fixed column under the tool
+    /// badge (SessionRowLayout.iconColumn decides when it shows).
+    private func modeIcon(_ mode: String) -> some View {
+        Image(systemName: PermissionMode.symbol(mode))
+            .font(.system(size: 11))
+            // Bypass is the one mode that never asks: tint it.
+            .foregroundStyle(mode == "bypassPermissions" ? AnyShapeStyle(SessionColor.interruptedText)
+                                                         : AnyShapeStyle(.secondary))
+            .frame(width: 18, height: 14)
+            .help(PermissionMode.help(mode))
+            .accessibilityLabel(PermissionMode.accessibilityLabel(mode))
     }
 
     /// Opens a Claude desktop app session in the app (`agentboard focus`).
@@ -201,17 +263,10 @@ struct SessionRowView: View {
         }
     }
 
-    private var subtitle: String {
-        if let branch = session.branch, !branch.isEmpty {
-            return "\(session.project) · \(branch)"
-        }
-        return session.project
-    }
-
     /// Open notes on this session; red when one of them needs the user.
     private var notesBadge: some View {
         let urgent = session.notes.contains { $0.kind == .needsYou }
-        let color: Color = urgent ? SessionColor.needsYou : .secondary
+        let color: Color = urgent ? SessionColor.needsYouText : .secondary
         return Label("\(session.notesCount)", systemImage: "text.bubble")
             .labelStyle(.titleAndIcon)
             .font(.caption2)
@@ -295,6 +350,17 @@ struct SessionRowView: View {
             Image(systemName: systemImage)
         }
         .help(help)
+    }
+}
+
+private extension SessionRowLayout.Icon {
+    /// A stable identity for `ForEach`: each icon appears at most once.
+    var columnID: String {
+        switch self {
+        case .tool: return "tool"
+        case .mode: return "mode"
+        case .desktop: return "desktop"
+        }
     }
 }
 

@@ -93,4 +93,28 @@ struct StoreStatusTests {
         #expect(SnapshotStore.actionTitle("mark done") == "Mark done")
         #expect(SnapshotStore.actionTitle("") == "")
     }
+
+    @Test func emptyBoardTextIsHonestBeforeTheFirstSnapshot() {
+        #expect(StoreStatus.emptyBoardText(lastError: nil, lastUpdated: nil) == "Loading sessions…")
+        #expect(StoreStatus.emptyBoardText(lastError: "bad json", lastUpdated: nil)
+                == "No sessions to show until a snapshot succeeds")
+        // After a good snapshot the board really is empty, even if a later
+        // refresh failed (the banner says so).
+        #expect(StoreStatus.emptyBoardText(lastError: nil, lastUpdated: Date()) == "No sessions yet")
+        #expect(StoreStatus.emptyBoardText(lastError: "bad json", lastUpdated: Date()) == "No sessions yet")
+    }
+
+    @Test func aDecodingErrorIsNamedWithItsLikelyFix() throws {
+        struct Probe: Decodable { let x: Int }
+        do {
+            _ = try JSONDecoder().decode(Probe.self, from: Data("{".utf8))
+            Issue.record("expected a decoding error")
+        } catch {
+            let text = StoreStatus.snapshotErrorMessage(error)
+            #expect(text.contains("a format this app can't read"))
+            #expect(text.contains("reinstall AgentBoard"))
+        }
+        struct Other: LocalizedError { var errorDescription: String? { "agentboard exited 1" } }
+        #expect(StoreStatus.snapshotErrorMessage(Other()) == "agentboard exited 1")
+    }
 }

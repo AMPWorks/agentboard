@@ -46,6 +46,9 @@ struct MenuBarView: View {
     @State private var gripCursorPushed = false
     /// The pointer is over the grip (the cursor also stays up mid-drag).
     @State private var gripHovered = false
+    /// The list content's bottom edge in the viewport's coordinates, so
+    /// the list can fade its bottom while more is below.
+    @State private var contentMaxY: CGFloat = 0
 
     /// While the panel is closed the needs_you notes the query would hide
     /// are pinned above the sessions, so the notice leaves them out.
@@ -77,65 +80,83 @@ struct MenuBarView: View {
             shown: shown
         )
         let pinned = PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: shown)
-        VStack(spacing: 0) {
-            searchBar(sections, feed: feed, mode: mode)
+        ScrollViewReader { scroller in
+            VStack(spacing: 0) {
+                searchBar(sections, feed: feed, mode: mode) { kind in
+                    if kind == .unconcluded { unconcludedExpanded = true }
+                    withAnimation { scroller.scrollTo(kind, anchor: .top) }
+                }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { searchBarHeight = $0 }
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    // Above Needs you: what sessions said that is worth
-                    // keeping, behind the Updates button unless Settings →
-                    // Popover says otherwise. Compact (UpdatesSectionView),
-                    // so it never pushes the sessions out of view.
-                    if !pinned.isEmpty {
-                        PinnedUpdatesView(rows: pinned, store: store, fontSize: updatesFont) {
-                            setUpdatesShown(true)
-                        }
-                        .reportsContentBottom()
-                    }
-                    if PopoverUpdatesSettings.panelVisible(mode: mode, shown: shown, hasUpdates: feed.hasUpdates,
-                                                           hasRows: !updates.isEmpty) {
-                        UpdatesSectionView(
-                            rows: updates,
-                            listed: updates.reduce(0) { $0 + $1.notes.count },
-                            total: feed.matching,
-                            clearPlan: UpdatesFeed.clearPlan(from: sessions, query: query),
-                            store: store,
-                            fontSize: updatesFont,
-                            compactLimit: PopoverUpdatesSettings.compactLimit(updatesLimitRaw),
-                            emptyText: "No updates match “\(store.popoverQuery)”",
-                            onHide: mode == .alwaysShown ? nil : { setUpdatesShown(false) }
-                        )
-                        .reportsContentBottom()
-                    }
-                    ForEach(sections.sections) { section in
-                        if section.kind == .unconcluded {
-                            unconcludedSection(section, in: sections)
-                        } else {
-                            sessionSection(section, in: sections)
-                                .reportsContentBottom(PopoverSizing.isActive(section.kind) || sections.isFiltering)
-                        }
-                    }
-                    if sections.snapshotIsEmpty {
-                        Text("No sessions yet")
-                            .foregroundStyle(.secondary)
-                            .padding()
-                    } else if sections.hasNoMatches {
-                        noMatches
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        // Above Needs you: what sessions said that is worth
+                        // keeping, behind the Updates button unless Settings →
+                        // Popover says otherwise. Compact (UpdatesSectionView),
+                        // so it never pushes the sessions out of view.
+                        if !pinned.isEmpty {
+                            PinnedUpdatesView(rows: pinned, store: store, fontSize: updatesFont) {
+                                setUpdatesShown(true)
+                            }
                             .reportsContentBottom()
+                        }
+                        if PopoverUpdatesSettings.panelVisible(mode: mode, shown: shown, hasUpdates: feed.hasUpdates,
+                                                               hasRows: !updates.isEmpty) {
+                            UpdatesSectionView(
+                                rows: updates,
+                                listed: updates.reduce(0) { $0 + $1.notes.count },
+                                total: feed.matching,
+                                clearPlan: UpdatesFeed.clearPlan(from: sessions, query: query),
+                                store: store,
+                                fontSize: updatesFont,
+                                compactLimit: PopoverUpdatesSettings.compactLimit(updatesLimitRaw),
+                                emptyText: "No updates match “\(store.popoverQuery)”",
+                                onHide: mode == .alwaysShown ? nil : { setUpdatesShown(false) }
+                            )
+                            .reportsContentBottom()
+                        }
+                        ForEach(sections.sections) { section in
+                            if section.kind == .unconcluded {
+                                unconcludedSection(section, in: sections)
+                            } else {
+                                sessionSection(section, in: sections)
+                                    .reportsContentBottom(PopoverSizing.isActive(section.kind) || sections.isFiltering)
+                            }
+                        }
+                        if sections.snapshotIsEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(StoreStatus.emptyBoardText(lastError: store.lastError, lastUpdated: store.lastUpdated))
+                                    .foregroundStyle(.secondary)
+                                if store.lastUpdated != nil {
+                                    Text("Start a Claude Code or Codex session and it shows up here within a few seconds.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .padding()
+                        } else if sections.hasNoMatches {
+                            noMatches
+                                .reportsContentBottom()
+                        }
+                    }
+                    .padding(.vertical, PopoverSizing.listPadding)
+                    .coordinateSpace(name: Self.listSpace)
+                    .onPreferenceChange(ContentBottomKey.self) { bottom in
+                        contentBottom = PopoverSizing.settledAutoHeight(previous: contentBottom, measured: bottom)
+                    }
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.viewportSpace)).maxY } action: {
+                        contentMaxY = $0
                     }
                 }
-                .padding(.vertical, PopoverSizing.listPadding)
-                .coordinateSpace(name: Self.listSpace)
-                .onPreferenceChange(ContentBottomKey.self) { bottom in
-                    contentBottom = PopoverSizing.settledAutoHeight(previous: contentBottom, measured: bottom)
-                }
-            }
-            .frame(height: listHeight)
+                .coordinateSpace(name: Self.viewportSpace)
+                .frame(height: listHeight)
+                .mask { listMask }
 
-            Divider()
-            footer
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
+                Divider()
+                footer
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
+            }
         }
         .frame(width: popoverWidth)
         .overlay(alignment: .bottomTrailing) { resizeGrip }
@@ -196,6 +217,22 @@ struct MenuBarView: View {
     // MARK: - Size
 
     fileprivate static let listSpace = "popoverList"
+    private static let viewportSpace = "popoverViewport"
+
+    /// Opaque, except a fade over the list's last points while more
+    /// content is below (PopoverSizing.hasMoreBelow).
+    @ViewBuilder
+    private var listMask: some View {
+        if PopoverSizing.hasMoreBelow(contentMaxY: contentMaxY, viewportHeight: listHeight) {
+            VStack(spacing: 0) {
+                Color.black
+                LinearGradient(colors: [.black, .black.opacity(0.15)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: PopoverSizing.moreBelowFade)
+            }
+        } else {
+            Color.black
+        }
+    }
     static let gripSize: CGFloat = 14
 
     private struct DragOrigin {
@@ -370,7 +407,8 @@ struct MenuBarView: View {
                                                                              filtering: filtering))
     }
 
-    private func searchBar(_ sections: PopoverSections, feed: UpdatesState, mode: UpdatesPanelMode) -> some View {
+    private func searchBar(_ sections: PopoverSections, feed: UpdatesState, mode: UpdatesPanelMode,
+                           jump: @escaping (PopoverSections.Kind) -> Void) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
@@ -403,6 +441,10 @@ struct MenuBarView: View {
             // CLI or database failures, right under the search bar.
             StatusBannerView(store: store)
 
+            if !sections.summary.isEmpty {
+                summaryLine(sections.summary, jump: jump)
+            }
+
             if let notice = sections.hiddenNotice {
                 Text(notice)
                     .font(sections.noticeIsEmphasized ? .caption.bold() : .caption)
@@ -427,6 +469,52 @@ struct MenuBarView: View {
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// "2 need you · 1 in review · 4 running": one button per section,
+    /// each scrolling the list to it, so the counts read at a glance even
+    /// when a section is below the fold.
+    private func summaryLine(_ items: [PopoverSections.SummaryItem],
+                             jump: @escaping (PopoverSections.Kind) -> Void) -> some View {
+        // The words when they fit; else dot and count only (the tooltip
+        // names the section), so a narrow popover never runs past its edge.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 4) {
+                ForEach(items) { item in
+                    SummaryButton(item: item, compact: false) { jump(item.kind) }
+                }
+            }
+            HStack(spacing: 4) {
+                ForEach(items) { item in
+                    SummaryButton(item: item, compact: true) { jump(item.kind) }
+                }
+            }
+        }
+        .font(.caption.weight(.medium))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Summary")
+    }
+
+    /// A section's color in the summary line and its header: Needs you and
+    /// Running carry their state color; mixed sections stay neutral.
+    static func sectionTextStyle(_ kind: PopoverSections.Kind) -> AnyShapeStyle {
+        switch kind {
+        case .needsYou: return AnyShapeStyle(SessionColor.needsYouText)
+        case .running: return AnyShapeStyle(SessionColor.runningText)
+        case .review, .unconcluded, .snoozed, .done: return AnyShapeStyle(.secondary)
+        }
+    }
+
+    /// The dot matches its rows' dots: Review is teal while any of its
+    /// sessions still runs, else amber like its closed rows.
+    static func summaryDotColor(_ item: PopoverSections.SummaryItem) -> Color {
+        switch item.kind {
+        case .needsYou: return SessionColor.needsYou
+        case .running: return SessionColor.running
+        case .review: return item.anyAlive ? SessionColor.reviewOpen : SessionColor.closed
+        // Gray: the quiet, collapsed bucket, never mistaken for Review.
+        case .unconcluded, .snoozed, .done: return .secondary
+        }
     }
 
     /// Focus now and once more after the window settles: a MenuBarExtra
@@ -459,7 +547,7 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 0) {
             Text(sections.header(for: section))
                 .font(.caption.bold())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Self.sectionTextStyle(section.kind))
                 .padding(.horizontal, 10)
                 .padding(.top, 4)
                 .help(Self.sectionHelp(section.kind))
@@ -468,6 +556,7 @@ struct MenuBarView: View {
                     .padding(.horizontal, 4)
             }
         }
+        .id(section.kind)
     }
 
     static func sectionHelp(_ kind: PopoverSections.Kind) -> String {
@@ -507,6 +596,7 @@ struct MenuBarView: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 10)
         .help("Sessions that ended or stopped without finishing; click to show or hide them")
+        .id(section.kind)
         // Auto-expand fits it only while filtering, so matches are not hidden.
         .reportsContentBottom(sections.isFiltering)
     }
@@ -533,6 +623,46 @@ struct MenuBarView: View {
         .padding(8)
         .buttonStyle(.plain)
         .font(.caption)
+    }
+}
+
+/// One count in the summary line: a dot in its rows' color and the text,
+/// with a capsule and the pointing hand on hover so it reads as a control.
+private struct SummaryButton: View {
+    let item: PopoverSections.SummaryItem
+    /// Dot and count only, for a popover too narrow for the words.
+    let compact: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(MenuBarView.summaryDotColor(item))
+                    .frame(width: 6, height: 6)
+                Text(compact ? "\(item.count)" : item.text)
+                    .monospacedDigit()
+                    .foregroundStyle(MenuBarView.sectionTextStyle(item.kind))
+            }
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(.quaternary.opacity(hovering ? 0.9 : 0)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .onHover { inside in
+            guard inside != hovering else { return }
+            hovering = inside
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .onDisappear {
+            if hovering { NSCursor.pop() }
+            hovering = false
+        }
+        .help("Scroll to \(item.kind.title) (\(item.count))")
+        .accessibilityLabel(item.text)
     }
 }
 

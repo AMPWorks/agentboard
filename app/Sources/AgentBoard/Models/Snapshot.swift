@@ -145,7 +145,10 @@ struct Note: Codable, Sendable, Identifiable, Equatable, Hashable {
     /// The first non-empty line, without surrounding markdown emphasis.
     var firstLine: String {
         for line in text.split(whereSeparator: \.isNewline) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Bold markers anywhere in the line, so "**PR #9 opened** for x"
+            // loses its closing ** too; then any stray * at the ends.
+            let trimmed = line.replacingOccurrences(of: "**", with: "")
+                .trimmingCharacters(in: .whitespaces)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "*"))
                 .trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { return trimmed }

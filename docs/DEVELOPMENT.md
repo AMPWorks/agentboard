@@ -18,7 +18,8 @@ agentboard/
     bin/agentboard          executable CLI entry point
     tests/                  unittest suite — python3 -m unittest discover core/tests
   app/                      SwiftUI menu bar app (macOS 14+), built by scripts/build-app.sh
-  scripts/                  install.sh, uninstall.sh, build-app.sh, swift-test.sh
+  scripts/                  install.sh, uninstall.sh, build-app.sh, swift-test.sh,
+                             capture-popover.sh (+ capture_scenarios.py, capture_tool.swift)
 ```
 
 ## Testing
@@ -84,6 +85,29 @@ can't expand SwiftUI macros.
 (one session needing you), `snapshot-quiet.json` (only done/snoozed), or `snapshot.json` (a bit of
 everything; also what `AGENTBOARD_USE_FIXTURE=1` loads from the app bundle).
 
+### Capturing the popover in many states
+
+`scripts/capture-popover.sh` screenshots the popover once per scenario: empty, 1 to 40 sessions,
+many needing you, all running, Done sessions behind a query, the Updates panel at each text size,
+default, tall and auto-expand heights, full width, long titles and branches at 460 and 320 points,
+every permission mode, and the "Snapshot failed" banner, each in light and dark. It builds the
+fixtures with `scripts/capture_scenarios.py` from `app/Fixtures/snapshot.json` (time-shifted to
+now, so only fixture projects appear), runs the bare binary under a unique name with an empty
+`AGENTBOARD_HOME`, sets each scenario's Settings in that binary's own defaults domain (light or
+dark through the app's Appearance setting, never System Settings), clicks its menu bar icon and
+captures just the panel window. It removes the defaults domain and data directory when done.
+
+```
+scripts/build-app.sh --no-install
+scripts/capture-popover.sh                     # PNGs in app/build/usability/shots/
+scripts/capture-popover.sh --only 'long-text'  # a subset; --list prints the names
+scripts/capture-popover.sh --binary OLD --out DIR   # e.g. a build of main, for before/after
+```
+
+It needs Screen Recording and Accessibility permission for the terminal, moves the pointer for
+the click (and puts it back), and refuses to run while another AgentBoard is running. Quiet by
+default (`--verbose` or `AGENTBOARD_VERBOSE=1` streams the log, `app/build/usability/capture-popover.log`).
+
 ### Regenerating the screenshots
 
 The README's images live in `docs/images/`: `<name>-light.png` and `<name>-dark.png` for
@@ -111,6 +135,10 @@ token can appear:
        lambda m: (p(m.group(1)) + delta).strftime("%Y-%m-%dT%H:%M:%S") + (m.group(2) or "") + "Z", text))
    ' app/Fixtures/snapshot.json "$TMPDIR/snapshot-now.json"
    ```
+
+For the popover alone, `scripts/capture-popover.sh --only '^readme-popover'` covers steps 1 to 4
+and 8 (it saves the panel without its shadow, at the README's width, with closed and merged PRs
+shown); the manual steps below cover the other windows.
 
 3. Note the defaults domains (`defaults domains | tr ',' '\n' | sed 's/^ //' | sort`), then launch
    the bare binary against an empty data directory:

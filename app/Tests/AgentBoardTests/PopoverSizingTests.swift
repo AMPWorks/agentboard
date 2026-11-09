@@ -263,4 +263,11 @@ struct PopoverSizingTests {
                                                top: 1082.3, anchorX: 1219.4, visibleFrame: visible) == nil)
         }
     }
+
+    @Test func moreBelowOnlyWhenContentPassesTheViewport() {
+        #expect(PopoverSizing.hasMoreBelow(contentMaxY: 600, viewportHeight: 388))
+        #expect(!PopoverSizing.hasMoreBelow(contentMaxY: 388, viewportHeight: 388))
+        #expect(!PopoverSizing.hasMoreBelow(contentMaxY: 388.6, viewportHeight: 388))
+        #expect(!PopoverSizing.hasMoreBelow(contentMaxY: 200, viewportHeight: 388))
+    }
 }

@@ -620,3 +620,45 @@ its own PR). Reviewing the sizing for a feedback loop found none, but the placer
 content size only when it changes and gets the frame to set from `PopoverSizing.frameToApply`,
 which returns nil once the panel has it, so a didResize can never start another resize; a test
 checks that fixed point, including a frame reported back a quarter point off.
+
+## 2026-11-09 03:42:50 UTC — Popover usability review: fixed row columns, counts up front, plain reasons
+
+The popover was reviewed from screenshots rather than by eye. `scripts/capture-popover.sh` runs
+the bare app binary on fixtures that `scripts/capture_scenarios.py` builds from the sample
+snapshot (empty, 1 to 40 sessions, many needing you, all running, Done behind a query, the Updates
+panel at each text size, default, tall, auto-expand and narrow sizes, long text, every permission
+mode, a malformed snapshot), each in light and dark through the app's own Appearance setting. It
+clicks the status item with a synthetic event, sets the search query through Accessibility rather
+than keystrokes (the panel's app is never frontmost, so typing could reach another app), and
+captures only the panel window. A bundle-less binary's defaults domain is its executable name, so
+each run copies the binary under a unique name and deletes exactly that domain afterwards; the
+`AgentBoard` domain a bare build would share is never touched. Screen Recording and
+Accessibility permission are required, which is why this is a developer script and not a test.
+
+Four rounds of reviewer subagents scored the shots against a rubric (urgency in two seconds,
+labels, density, contrast, discoverability, light/dark parity, misleading content, wrapping) plus
+the user's row criteria. The row now has one order (`SessionRowLayout`): the title line with its
+tags and time, then always project · branch, then a status-led row's own title, then the reason.
+The permission mode moved from a free-floating text tag to an icon in the fixed column under the
+tool badge. Light mode got darker text variants of the state colors, since system green and orange
+fall to about 2:1 on the light popover; dots, the menu bar icon and capsule fills keep the system
+colors. Every section header carries its count, and a summary line under the search field counts
+each section and scrolls to it, because at the default height a board of 15 sessions showed no
+sign that Running existed; the list's bottom also fades while more is below.
+
+Reasons are shown in plain words in the app only (`SessionDisplay.reasonText`; the snapshot is
+unchanged): a bare tool name on a Needs you row is "Needs permission: Bash", raw notification
+types become sentences, a failed turn reads "Turn failed (rate limit): …", and an Interrupted row,
+which the CLI gives no reason, says to resume it. The MCP "<server>: <question>" form is left as
+is, since the app cannot tell it from other text without a reason-kind field. The status banner
+wraps instead of truncating mid-word, names an undecodable snapshot, and the list stops claiming
+"No sessions yet" while the snapshot fails. Deferred findings (density, the Always-shown Updates
+panel's ordering, footer affordances, the dashboard's narrow list column) went to Task Ideas.
+
+Review follow-up: a one-word needs_you note headline ("Blocked") looks like a tool name, so the
+permission rewrite skips any reason that is a line of one of the session's open needs_you notes.
+The plain-words tables are hand-copied from values the hook stores, so
+`core/tests/test_session_display_reasons.py` now fails when the hook gains a notification type or
+tool reason the app has no words for; the light text colors' 4.5:1 contrast and the fixture
+generator each got a test, and the capture script refuses a leftover capture copy and an `--only`
+that matches nothing.

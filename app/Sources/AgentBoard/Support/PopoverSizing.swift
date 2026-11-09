@@ -49,6 +49,18 @@ enum PopoverSizing {
         defaults.removeObject(forKey: PopoverSizing.autoWidthKey)
     }
 
+    /// The list fades its last `moreBelowFade` points while content
+    /// continues below the visible area, so a row cut by the footer reads
+    /// as "scroll for more" rather than as clipping.
+    static let moreBelowFade: CGFloat = 14
+
+    /// Whether content continues below the list's visible area: the
+    /// content's bottom edge, in the viewport's coordinates, lies more than
+    /// a point past the viewport (sub-point slack is layout rounding).
+    static func hasMoreBelow(contentMaxY: CGFloat, viewportHeight: CGFloat) -> Bool {
+        contentMaxY > viewportHeight + 1
+    }
+
     // MARK: - Height
 
     /// The tallest list that keeps the whole popover on screen: the room
