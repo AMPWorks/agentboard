@@ -97,13 +97,45 @@ struct PopoverSections: Sendable, Equatable {
 
     func section(_ kind: Kind) -> Section? { sections.first { $0.kind == kind } }
 
-    /// Headers carry a count while a query is active (Unconcluded's
-    /// disclosure label always does).
+    /// Every header carries its count, e.g. "Needs you (3)", so a list
+    /// longer than the popover still says how much each section holds.
     func header(for section: Section) -> String {
-        if isFiltering || section.kind == .unconcluded {
-            return "\(section.kind.title) (\(section.sessions.count))"
+        "\(section.kind.title) (\(section.sessions.count))"
+    }
+
+    /// One entry of the summary line under the search field.
+    struct SummaryItem: Equatable, Identifiable {
+        let kind: Kind
+        let count: Int
+        /// Review only: some row in it is still running (teal), so the dot
+        /// matches the rows it counts rather than always being teal.
+        var anyAlive: Bool = false
+        var id: Kind { kind }
+        var text: String { PopoverSections.summaryText(kind, count: count) }
+    }
+
+    /// The summary line: a count per section, in section order, so what
+    /// needs you, what is in review and what is running read at a glance
+    /// even when those sections are below the fold. Empty while filtering
+    /// (the filter notice takes the line), and with fewer than two sections,
+    /// where it would only repeat the one header under it.
+    var summary: [SummaryItem] {
+        let listed = sections.filter { !$0.kind.queryOnly }
+        guard !isFiltering, listed.count > 1 else { return [] }
+        return listed.map {
+            SummaryItem(kind: $0.kind, count: $0.sessions.count, anyAlive: $0.sessions.contains(where: \.alive))
         }
-        return section.kind.title
+    }
+
+    static func summaryText(_ kind: Kind, count: Int) -> String {
+        switch kind {
+        case .needsYou: return count == 1 ? "1 needs you" : "\(count) need you"
+        case .review: return "\(count) in review"
+        case .running: return "\(count) running"
+        case .unconcluded: return "\(count) unconcluded"
+        case .snoozed: return "\(count) snoozed"
+        case .done: return "\(count) done"
+        }
     }
 
     /// The Unconcluded disclosure opens by itself while a query is active

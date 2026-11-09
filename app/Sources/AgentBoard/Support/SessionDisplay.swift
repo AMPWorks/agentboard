@@ -26,6 +26,115 @@ enum SessionDisplay {
     }
 }
 
+extension SessionDisplay {
+    /// Notification types the hook stores as the reason when a needs-you
+    /// notification carries no message, in plain words.
+    static let notificationReasons: [String: String] = [
+        "permission_prompt": "Needs your permission",
+        "elicitation_dialog": "Asks you a question",
+        "elicitation_url_dialog": "Asks you to open a link",
+        "agent_needs_input": "Needs your input",
+        "idle_prompt": "Waiting for your next prompt",
+    ]
+
+    /// Reasons a PreToolUse of AskUserQuestion / ExitPlanMode records.
+    static let toolReasons: [String: String] = [
+        "question": "Asks you a question",
+        "plan approval": "Waiting for your plan approval",
+    ]
+
+    static let interruptedReason = "Stopped mid-turn: resume it to continue"
+
+    /// Claude Code's StopFailure error types, which a failed turn's reason
+    /// starts with ("<error>: <first line>", hook.failure_reason).
+    static let failureReasons: [String: String] = [
+        "rate_limit": "rate limit",
+        "authentication_failed": "not signed in",
+        "billing_error": "billing problem",
+        "invalid_request": "invalid request",
+        "server_error": "API server error",
+        "max_output_tokens": "output too long",
+        "overloaded": "API overloaded",
+        "unknown": "unknown error",
+    ]
+
+    /// The row's reason line in plain words, or nil when there is none: a
+    /// bare tool name on a Needs you row is a permission prompt for that
+    /// tool ("Needs permission: Bash"), a raw notification type becomes a
+    /// sentence, and an "<type>: <text>" or "StopFailure: <text>" prefix is
+    /// spelled out. Anything else (MCP questions, failures, review reasons)
+    /// already reads as text and is shown as is; the tooltip keeps the raw
+    /// value.
+    static func reasonText(_ session: Session) -> String? {
+        guard let raw = session.waitingReason?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            // The CLI gives an interrupted session no reason; say what
+            // happened and what to do, like every other Needs you row.
+            return session.state == .interrupted ? interruptedReason : nil
+        }
+        if let plain = notificationReasons[raw] ?? toolReasons[raw] { return plain }
+        for (type, plain) in notificationReasons {
+            let prefix = type + ": "
+            if raw.hasPrefix(prefix) {
+                let rest = raw.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+                return rest.isEmpty ? plain : "\(plain): \(rest)"
+            }
+        }
+        if raw.hasPrefix("StopFailure: ") {
+            return "Turn failed: " + raw.dropFirst("StopFailure: ".count)
+        }
+        for (error, plain) in failureReasons {
+            if raw == error { return "Turn failed (\(plain))" }
+            if raw.hasPrefix(error + ": ") {
+                return "Turn failed (\(plain)): " + raw.dropFirst(error.count + 2)
+            }
+        }
+        if session.state == .needsYou, isToolName(raw), !isNeedsYouNoteHeadline(raw, of: session) {
+            return "Needs permission: \(raw)"
+        }
+        return raw
+    }
+
+    /// True when `raw` is the headline of one of the session's open
+    /// needs_you notes (reconcile.note_headline): a one-word headline such
+    /// as "Blocked" looks like a tool name but is the note's own text, so
+    /// it is shown as is. A headline is a note line without its markdown
+    /// emphasis or leading marker characters, so a line matches when it
+    /// equals `raw` or ends with it after a non-alphanumeric character.
+    static func isNeedsYouNoteHeadline(_ raw: String, of session: Session) -> Bool {
+        session.notes.contains { note in
+            guard note.kind == .needsYou else { return false }
+            return note.text.split(whereSeparator: \.isNewline).contains { line in
+                let cleaned = line.replacingOccurrences(of: "**", with: "")
+                    .trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: "*")))
+                guard cleaned.hasSuffix(raw) else { return false }
+                guard let before = cleaned.dropLast(raw.count).unicodeScalars.last else { return true }
+                return !CharacterSet.alphanumerics.contains(before)
+            }
+        }
+    }
+
+    /// A Claude Code tool name as a PermissionRequest reports it: `Bash`,
+    /// `WebFetch`, `mcp__server__tool`.
+    static func isToolName(_ text: String) -> Bool {
+        if text.hasPrefix("mcp__") { return !text.contains(" ") }
+        guard let first = text.unicodeScalars.first, CharacterSet.uppercaseLetters.contains(first) else {
+            return false
+        }
+        return text.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == "_" }
+    }
+
+    /// A reason the user acts on (Needs you, Interrupted, Review) is set in
+    /// a medium weight, so it stands out from a secondary title above it; a
+    /// Running row's background-task note and the rest are regular.
+    static func reasonIsActionable(_ session: Session) -> Bool {
+        switch session.state {
+        case .needsYou, .interrupted, .review: return true
+        case .running, .unconcluded, .snoozed, .done, .unknown: return false
+        }
+    }
+}
+
 /// The PR buttons on a session row: one per PR link that has a URL, the
 /// ones that need the user first, capped with a "+N" for the rest. Merged
 /// and closed PRs are left off unless `showFinished` is set (Settings →

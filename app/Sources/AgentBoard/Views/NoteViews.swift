@@ -258,7 +258,8 @@ struct UpdateRowView: View {
                 }
                 .help(row.isGroup ? "Dismiss all \(row.total) updates from this session" : "Dismiss")
                 .accessibilityLabel(row.isGroup ? "Dismiss this session's updates" : "Dismiss update")
-                .opacity(isHovering ? 1 : 0.35)
+                // Visible at rest (the chevron under it is too), full on hover.
+                .opacity(isHovering ? 1 : 0.6)
                 if canExpand {
                     Button {
                         expanded.toggle()

@@ -24,10 +24,12 @@ struct StatusBannerView: View {
         return HStack(spacing: 6) {
             Image(systemName: banner.severity == .error ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
                 .foregroundStyle(color)
+            // Wraps (up to three lines) instead of cutting the message in
+            // the middle; the tooltip keeps the full text.
             Text(banner.text)
                 .font(.caption)
-                .lineLimit(2)
-                .truncationMode(.middle)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
                 .help(banner.detail ?? banner.text)
             Spacer(minLength: 0)
             if let remedy = banner.remedy {
@@ -35,10 +37,17 @@ struct StatusBannerView: View {
                     .controlSize(.small)
                     .help(remedy.help)
             }
-            Button("Open log") { store.revealLog() }
-                .controlSize(.small)
-                .disabled(!store.logFileExists)
-                .help("Reveal agentboard.log, the diagnostic log, in Finder")
+            if store.logFileExists {
+                Button("Open log") { store.revealLog() }
+                    .controlSize(.small)
+                    .help("Reveal agentboard.log, the diagnostic log, in Finder")
+            } else {
+                // No log to open yet: offer the message itself instead of a
+                // disabled button.
+                Button("Copy error") { ClipboardHelper.copy(banner.detail ?? banner.text) }
+                    .controlSize(.small)
+                    .help("Copy the full error message to the clipboard")
+            }
             if banner.isActionError {
                 Button {
                     store.dismissActionError()

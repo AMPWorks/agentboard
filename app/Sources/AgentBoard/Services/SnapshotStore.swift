@@ -227,8 +227,8 @@ final class SnapshotStore: ObservableObject {
             // that and is not yet a hang.
             if refreshesInFlight > 1 { refreshStartedAt = Date() }
         } catch {
-            self.lastError = error.localizedDescription
-            log.error("snapshot refresh failed: \(error.localizedDescription, privacy: .public)")
+            self.lastError = StoreStatus.snapshotErrorMessage(error)
+            log.error("snapshot refresh failed: \(String(describing: error), privacy: .public)")
         }
     }
 

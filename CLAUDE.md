@@ -12,8 +12,10 @@ JSON contract:
   derives each session's state.
 - `app/` is a SwiftPM/SwiftUI menu bar app (macOS 14+, Swift 6 language mode, no dependencies).
   It never opens the database; it shells out to the CLI for everything.
-- `scripts/` holds `install.sh`, `uninstall.sh`, `build-app.sh`, `swift-test.sh`. docs/REFERENCE.md documents their
-  behavior in depth; SPEC.md is the original design contract (snapshot JSON shape, state rules).
+- `scripts/` holds `install.sh`, `uninstall.sh`, `build-app.sh`, `swift-test.sh`, and
+  `capture-popover.sh` (popover screenshots in many states, see docs/DEVELOPMENT.md).
+  docs/REFERENCE.md documents their behavior in depth; SPEC.md is the original design contract
+  (snapshot JSON shape, state rules).
 
 ## Commands
 
@@ -32,6 +34,7 @@ scripts/build-app.sh --no-install                               # compile + asse
 AGENTBOARD_FIXTURE_PATH=app/Fixtures/snapshot.json app/.build/release/AgentBoard  # app on the sample fixture, no CLI
 for f in scripts/*.sh; do bash -n "$f"; done                    # syntax-check every script (bash -n a b checks only a)
 scripts/install.sh --dry-run                                    # preview against the real ~/.claude and ~/.codex
+scripts/capture-popover.sh                                      # popover screenshots per scenario (quit AgentBoard first)
 ```
 
 Use the wrappers, not bare `swift build`/`swift test`: with only the Command Line Tools, plain

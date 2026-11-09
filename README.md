@@ -10,7 +10,7 @@ telemetry.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/popover-dark.png">
-    <img src="docs/images/popover-light.png" width="426" alt="The AgentBoard popover listing sessions grouped by state, with the Updates button next to the search field">
+    <img src="docs/images/popover-light.png" width="430" alt="The AgentBoard popover: a count per section under the search field and the Updates button, then sessions grouped by state">
   </picture>
 </p>
 
@@ -54,7 +54,8 @@ or were interrupted, then (dimmer) the ones in Review.
   <img src="docs/images/menu-bar-icon-light.png" width="48" alt="The AgentBoard menu bar icon in red, with its session counts">
 </picture>
 
-The popover (click the icon) lists the sessions that matter now. The dashboard (⌃⌥⌘A, or **Open
+The popover (click the icon) lists the sessions that matter now, with a count per section under
+the search field (click one to jump to it). The dashboard (⌃⌥⌘A, or **Open
 Dashboard** in the popover) is a full window with every session, filters by state, tool and
 project, and a detail pane for the selected session. Its **Denials** row lists the tool calls
 Claude Code's auto mode blocked over the last 7 days.
@@ -64,14 +65,14 @@ Claude Code's auto mode blocked over the last 7 days.
   <img src="docs/images/dashboard-light.png" width="800" alt="The AgentBoard dashboard window with a state sidebar, the session list and the detail pane">
 </picture>
 
-Each row shows the session's title, project and branch, and what it is waiting on. It also has a
-button per PR (`#N`, green while open, outlined when it awaits you), a count of open updates, the
-permission mode (`plan`, `auto`, ...) while the session is live, and the model and context size,
-such as `Opus 5.5 · 308k`.
+Each row shows the session's title, then always its project and branch on the second line, and
+what it is waiting on. It also has a button per PR (`#N`, green while open, outlined when it
+awaits you), a count of open updates, a permission mode icon (`plan`, `auto`, ...) under the tool
+badge while the session is live, and the model and context size, such as `Opus 5.5 · 308k`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/session-row-dark.png">
-  <img src="docs/images/session-row-light.png" width="442" alt="One session row in Review with its PR buttons">
+  <img src="docs/images/session-row-light.png" width="422" alt="One session row in Review with its PR buttons">
 </picture>
 
 Full rules: [State](docs/REFERENCE.md#state) and [Menu bar icon](docs/REFERENCE.md#menu-bar-icon).

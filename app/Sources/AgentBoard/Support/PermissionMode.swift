@@ -29,6 +29,32 @@ enum PermissionMode {
         return tag(session.permissionMode)
     }
 
+    /// The raw mode a row shows as an icon under the tool badge: the same
+    /// rule as `rowTag` (nothing for the default mode, or once the session
+    /// has ended or is done), trimmed.
+    static func rowMode(for session: Session) -> String? {
+        guard rowTag(for: session) != nil else { return nil }
+        return normalized(session.permissionMode)
+    }
+
+    /// The SF Symbol for a mode's row icon. An unknown mode gets a generic
+    /// shield, so it still shows (its tooltip and label name it).
+    static func symbol(_ mode: String) -> String {
+        switch mode {
+        case "plan": return "list.bullet.clipboard"
+        case "acceptEdits": return "pencil"
+        case "auto": return "wand.and.stars"
+        case "dontAsk": return "hand.raised.slash"
+        case "bypassPermissions": return "exclamationmark.shield.fill"
+        default: return "shield"
+        }
+    }
+
+    /// VoiceOver's name for a mode icon, e.g. "Permission mode: plan".
+    static func accessibilityLabel(_ mode: String) -> String {
+        "Permission mode: \(tag(mode) ?? mode)"
+    }
+
     /// The tooltip for the tag. A known mode is "as of the last hook event":
     /// a Shift+Tab mode change at an idle prompt fires no hook, so the tag
     /// can lag until the session's next event.

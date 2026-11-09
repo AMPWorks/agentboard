@@ -39,8 +39,8 @@ struct UsageLineView: View {
     static func style(_ tint: UsageLine.Tint) -> AnyShapeStyle {
         switch tint {
         case .normal: return AnyShapeStyle(.secondary)
-        case .high: return AnyShapeStyle(SessionColor.interrupted)
-        case .critical: return AnyShapeStyle(SessionColor.needsYou)
+        case .high: return AnyShapeStyle(SessionColor.interruptedText)
+        case .critical: return AnyShapeStyle(SessionColor.needsYouText)
         }
     }
 }

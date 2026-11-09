@@ -191,6 +191,16 @@ struct NoteDecodingTests {
         #expect(session.notes.map(\.hasMore) == [false, false, true])
     }
 
+    @Test func aLeadingBoldSpanLosesBothMarkers() {
+        let session = Fixtures.decoded("a", "review", extra: [
+            "notes": [
+                ["id": 1, "kind": "update", "text": "**PR #57 opened** for the rollup writeup", "ts": "t", "last_ts": "t"],
+                ["id": 2, "kind": "update", "text": "CI is **green** on main", "ts": "t", "last_ts": "t"],
+            ],
+        ])
+        #expect(session.notes.map(\.firstLine) == ["PR #57 opened for the rollup writeup", "CI is green on main"])
+    }
+
     @Test func notesCountDefaultsToTheListLength() {
         let session = Fixtures.decoded("a", "review", extra: [
             "notes": [["id": 1, "kind": "update", "text": "x", "ts": "t", "last_ts": "t"]],

@@ -76,9 +76,9 @@ struct PopoverSectionsTests {
         #expect(make(sessions).section(.needsYou) == nil)
     }
 
-    @Test func headersCountOnlyWhileFiltering() {
+    @Test func headersAlwaysCarryTheCount() {
         let plain = make(everyState)
-        #expect(plain.header(for: plain.section(.needsYou)!) == "Needs you")
+        #expect(plain.header(for: plain.section(.needsYou)!) == "Needs you (2)")
         #expect(plain.header(for: plain.section(.unconcluded)!) == "Unconcluded (1)")
         let filtered = make(everyState, "claude")
         #expect(filtered.header(for: filtered.section(.needsYou)!) == "Needs you (2)")
@@ -204,5 +204,29 @@ struct PopoverSectionsTests {
         let sections = make(everyState, "   ")
         #expect(!sections.isFiltering)
         #expect(sections.section(.done) == nil)
+    }
+
+    @Test func summaryCountsEachSectionInOrder() {
+        let plain = make(everyState)
+        #expect(plain.summary.map(\.kind) == plain.sections.map(\.kind))
+        #expect(plain.summary.first == .init(kind: .needsYou, count: 2))
+        #expect(plain.summary.first?.text == "2 need you")
+        #expect(!plain.summary.contains { $0.kind == .done || $0.kind == .snoozed })
+        // The filter notice takes the line while a query is active.
+        #expect(make(everyState, "claude").summary.isEmpty)
+        #expect(make([]).summary.isEmpty)
+        // One section: the line would only repeat its header.
+        #expect(make(Fixtures.snapshot([session("r1", "review")]).sessions).summary.isEmpty)
+        // Review's dot follows its rows: teal only while one is alive.
+        let closedReview = make(Fixtures.snapshot([session("r1", "review"), session("g", "running")]).sessions)
+        #expect(closedReview.summary.first { $0.kind == .review }?.anyAlive == false)
+    }
+
+    @Test func summaryTextReadsAsASentenceFragment() {
+        #expect(PopoverSections.summaryText(.needsYou, count: 1) == "1 needs you")
+        #expect(PopoverSections.summaryText(.needsYou, count: 3) == "3 need you")
+        #expect(PopoverSections.summaryText(.review, count: 2) == "2 in review")
+        #expect(PopoverSections.summaryText(.running, count: 5) == "5 running")
+        #expect(PopoverSections.summaryText(.unconcluded, count: 1) == "1 unconcluded")
     }
 }

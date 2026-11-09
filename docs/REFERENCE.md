@@ -434,7 +434,10 @@ failures mean `needs_you`, and so does an open `needs_you` note no newer prompt 
 
 A turn that failed on an API error (Claude Code's `StopFailure`) is `needs_you` with "<error>:
 <first line of the message>", e.g. "rate_limit: API Error: Rate limit reached", and adds an
-`error` note under Updates (repeats bump its count). A usage-limit pause that needs you
+`error` note under Updates (repeats bump its count). The app shows `waiting_reason` in plain words
+(display only; the JSON is unchanged): "Turn failed (rate limit): …" for a failure, "Needs
+permission: Bash" for a bare tool name on a `needs_you` session, and a sentence for a raw
+notification type such as `permission_prompt`. A usage-limit pause that needs you
 (`quota_auto_resume_stale`: the limit reset while the Mac slept and the wait needs Enter;
 `quota_auto_resume_disabled`: auto-resume is off) is `needs_you` too; an auto-resume
 (`quota_auto_resume_fired`) or any new activity makes the session `running` again. An MCP server
@@ -490,7 +493,7 @@ notifications read (see [Notifications](#notifications)):
 Each session also carries `permission_mode`: the permission mode Claude Code reported on the
 session's newest parent hook event (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
 `bypassPermissions`, or a newer value as-is), null for Codex and for sessions no hook has
-touched since the upgrade. The app shows it as a small tag on the row (none for `default`, and
+touched since the upgrade. The app shows it as a small icon under the row's tool badge (none for `default`, and
 none once the session has ended or is done; the detail view's Permissions row still shows it).
 
 `agentboard paths --json` reports the resolved data/db/core directories (`{"home": ..., "db":
