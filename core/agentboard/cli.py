@@ -538,6 +538,7 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
                 "id": note["id"],
                 "kind": note["kind"],
                 "text": note["text"],
+                "headline": notes_mod.headline(note["text"], marker_list),
                 "ts": note["ts"],
                 "last_ts": note["last_ts"],
                 "count": note["count"],
@@ -876,7 +877,7 @@ def cmd_title(args):
 
 # -- notes ---------------------------------------------------------------------
 
-def _note_dict(row) -> dict:
+def _note_dict(row, marker_list=notes_mod.DEFAULT_MARKERS) -> dict:
     return {
         "id": row["id"],
         "key": f"{row['tool']}:{row['session_id']}",
@@ -884,6 +885,7 @@ def _note_dict(row) -> dict:
         "session_id": row["session_id"],
         "kind": row["kind"],
         "text": row["text"],
+        "headline": notes_mod.headline(row["text"], marker_list),
         "ts": row["ts"],
         "last_ts": row["last_ts"],
         "count": row["count"],
@@ -997,7 +999,8 @@ def cmd_notes(args):
     finally:
         conn.close()
 
-    items = [_note_dict(row) for row in rows]
+    marker_list = notes_mod.markers(notes_mod.load_config(db.home_dir()))
+    items = [_note_dict(row, marker_list) for row in rows]
     if args.json:
         print(json.dumps({"notes": items}))
         return 0

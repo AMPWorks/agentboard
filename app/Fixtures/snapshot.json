@@ -8,7 +8,7 @@
     "unconcluded": 2,
     "snoozed": 2,
     "done": 2,
-    "notes": 4,
+    "notes": 6,
     "denials": 3
   },
   "sessions": [
@@ -44,7 +44,20 @@
           "title": "Flaky retry logic in reconcile liveness check"
         }
       ],
-      "triage": { "status": "open", "until": null, "note": null }
+      "triage": { "status": "open", "until": null, "note": null },
+      "notes": [
+        {
+          "id": 12,
+          "kind": "needs_you",
+          "text": "**Tick summary.** The retry backoff landed and the regression test passes 200 runs in a row; the flaky liveness check is down to a timing window in the helper script.\n\nUSER_ACTION: [widget-service] approve running the helper script so the full suite can verify the fix\n\nThe helper writes only under the test temp dir.",
+          "headline": "USER_ACTION: [widget-service] approve running the helper script so the full suite can verify the fix",
+          "ts": "2026-10-12T19:29:00.000000Z",
+          "last_ts": "2026-10-12T19:29:00.000000Z",
+          "count": 1,
+          "source": "stop"
+        }
+      ],
+      "notes_count": 1
     },
     {
       "key": "claude:sess-needsyou-2",
@@ -127,7 +140,20 @@
           "title": "Schema migrations for triage table"
         }
       ],
-      "triage": { "status": "open", "until": null, "note": null }
+      "triage": { "status": "open", "until": null, "note": null },
+      "notes": [
+        {
+          "id": 13,
+          "kind": "needs_you",
+          "text": "Migration 0002 is written and dry-runs cleanly against a copy of the dev database.\n\n- **USER_ACTION:** confirm the destructive migration before it alters schema_version",
+          "headline": "USER_ACTION: confirm the destructive migration before it alters schema_version",
+          "ts": "2026-10-12T19:18:00.000000Z",
+          "last_ts": "2026-10-12T19:18:00.000000Z",
+          "count": 1,
+          "source": "stop"
+        }
+      ],
+      "notes_count": 1
     },
     {
       "key": "claude:sess-interrupted-1",

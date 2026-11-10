@@ -690,3 +690,28 @@ Review follow-up: a requested key the snapshot no longer has (the session left i
 while Show hidden is off) now leaves the filters alone, since clearing them could not reveal it,
 and a dashboard row's badge tooltip says it shows the updates in the session's detail rather than
 opening the dashboard the user is already in.
+
+## 2026-11-09 07:18:50 UTC — Update rows lead with the request line
+
+A needs_you update exists because the session's final message has a marker line (`USER_ACTION:`
+by default), but the popover's collapsed rows showed the message's first line, which is usually a
+summary, so the row hid the actual ask. Each note in the snapshot now carries `headline`, computed
+by the same `notes.headline` that already picks a needs_you session's `waiting_reason`: the first
+marker line, else the first line. Doing it in the core keeps `note_markers` in one place; the app
+never sees the marker list. The update rows, the pinned "Update that needs you" rows and the lines
+inside an expanded group show `headline`; the expanded row, the dashboard and search still use the
+full text.
+
+The field is additive. The app decodes it leniently and falls back to the note's first line when a
+CLI omits it, sends an empty one or sends something that is not a string, and it strips bold
+markers from it the way it does for the first line, because the core's plain first line keeps an
+inner `**`. Clearing a needs_you note when the session's next message drops the marker was left
+out: it would look the same as a dismissal and would change the documented "stays until you
+dismiss it" behavior, so it went to Task Ideas.
+
+Review round: `agentboard notes --json` items now carry the same `headline`, so the two JSON
+surfaces agree and an agent need not re-derive it with its own marker list. `notes.headline` now
+also drops the trailing emphasis a marker line closes (`*...*`, `_..._`, backticks), only when the
+line opened with it, so inline code at the end of a request survives; this cleans
+`waiting_reason` too. The fixture's second needs_you note now carries its headline, so the sample
+app shows the ask on every row; the older-CLI fallback stays covered by the decoding tests.

@@ -494,8 +494,8 @@ or attach refused with -1743 exits 4 `needs_automation`. A matched client exits 
       "links": [{"kind": "pr|ticket", "ref": "ABC-123|#26", "url": "...", "state": "OPEN|MERGED|CLOSED|null", "title": "...",
                  "branch": "string|null", "owned": false, "awaits_you": false}],
       "triage": {"status": "open|done|snoozed", "until": "ISO|null", "note": "string|null"},
-      "notes": [{"id": 1, "kind": "needs_you|update|error", "text": "...", "ts": "ISO",
-                 "last_ts": "ISO", "count": 1, "source": "stop|cli|inbox|provider|backfill"}],
+      "notes": [{"id": 1, "kind": "needs_you|update|error", "text": "...", "headline": "...",
+                 "ts": "ISO", "last_ts": "ISO", "count": 1, "source": "stop|cli|inbox|provider|backfill"}],
       "notes_count": 1,
       "turn_finished_at": "ISO|null", "turn_prompt_kind": "human|loop|cron|injected|null",
       "background_tasks": 0, "turn_ends_background_wait": false,
@@ -520,6 +520,10 @@ then updated_at desc. Default excludes done older than 7 days and non-interactiv
 (Added after the original spec.) `notes` lists a session's open notes, newest `last_ts` first,
 capped at 20 plus any older open `needs_you` notes (never capped out); `notes_count` is the uncapped open count; `counts.notes` sums `notes_count` over
 the sessions this snapshot emits. Older CLIs omit all three; the app defaults them to empty/0.
+Each note's `headline` (added later) is the one line that stands for it: its first line starting
+with a marker (`note_markers`, `USER_ACTION:` by default; leading markdown and emphasis removed),
+else its first non-empty line. The app shows it on collapsed update rows and falls back to the
+first line of `text` when a CLI omits it.
 `denials` (added with the `events.dismissed_at` migration) lists a session's open (not cleared) permission denials,
 newest `ts` first, capped at 20, the reason cut to 300 characters; `denials_count` is the uncapped
 open count; `counts.denials` sums `denials_count` over the sessions this snapshot emits. Older
@@ -599,7 +603,8 @@ migration; inbox drops and provider rows accept an optional `"notes": [{"kind", 
   outlined when it awaits the user) opens the PR without focusing the terminal; more than
   three show three plus "+N", which opens the detail view.
   (Added after the original spec.) An **Updates** section above Needs you lists every open note
-  of the (filtered) sessions newest first: kind glyph, project, first line, `×N`, relative time;
+  of the (filtered) sessions newest first: kind glyph, project, the note's `headline` (its first
+  marker line when it has one, otherwise its first line), `×N`, relative time;
   click focuses the owning session, a chevron expands the full text, (x) dismisses, and the
   header has a count and "Clear all" (`agentboard notes --dismiss`).
   Row click = focus; context menu & hover buttons: Focus, Resume, Copy resume cmd, Mark done,

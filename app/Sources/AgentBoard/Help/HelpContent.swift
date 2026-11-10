@@ -168,7 +168,7 @@ enum HelpContent {
             .heading("In the popover"),
             .bullets([
                 "Updates are one click away: the **Updates** button next to the search field (with the open count) shows the Updates panel above Needs you, and the button or **Hide** closes it. By default the panel closes each time the popover opens; Settings → Popover can remember its state or always show it, and sets its text size and how many rows it lists.",
-                "The panel has a count and a clear button. Each row shows the kind, the tool badge, the project, the first line, ×N and the time.",
+                "The panel has a count and a clear button. Each row shows the kind, the tool badge, the project, one line of the message (its first marker line, `USER_ACTION:` by default, when it has one; otherwise its first line), ×N and the time; the chevron shows the full message.",
                 "While the panel is closed, a needs_you update whose session is not in Needs you (you marked it done or snoozed it, or replied since) stays visible above the sessions, whatever the search query, so a request is never hidden. While you search, a line under the search field says how many updates match, with **Show** to open the panel.",
                 "**Click** a row to open the dashboard on its session, scrolled to that update's full text and outlined. The **chevron** expands the full text in place, and **(x)** dismisses it. Right-click for the session's actions.",
                 "The panel stays compact so it never pushes the sessions out of view: every needs_you update, and at most 3 other rows (5 or 10 with Settings → Popover). **Show all N** expands it in place and **Show fewer** collapses it again.",

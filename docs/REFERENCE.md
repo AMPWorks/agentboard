@@ -785,7 +785,9 @@ agentboard notes --rebuild [--days N] [--reset]
 `--dismiss-all` dismisses every open note, listed in the app or not; `--session` narrows it to one
 session and `--kind needs_you|update|error` (one or more) to those kinds, so
 `notes --dismiss-all --session claude:ID --kind update error` clears a loop session's updates but
-keeps its requests. `--kind` also filters a listing.
+keeps its requests. `--kind` also filters a listing. Each item `notes --json` lists carries
+`text` and the same `headline` as the snapshot's notes (its first marker line, else its first
+line; see [Updates](#updates-retained-notes)), so an agent need not re-derive it.
 
 `note` resolves the session exactly like `agentboard link` and, like it, warns and exits 0 when
 it cannot. Inbox drop files and provider rows take the same shape in an optional `"notes"` key,
@@ -828,8 +830,8 @@ and the panel is closed, a line under the search field says how many updates mat
 to open the panel; an open panel whose query keeps no update says so instead of disappearing.
 
 The panel has a count and a clear button: each row shows the
-kind (red bubble for needs you, red triangle for an error), the project, the first line, `×N` and
-the time; a click opens the dashboard on the owning session, scrolled to that note's full text
+kind (red bubble for needs you, red triangle for an error), the project, one line of the message (its first marker line, `USER_ACTION:` by default, when it
+has one; otherwise its first line: the snapshot's `headline`), `×N` and the time; a click opens the dashboard on the owning session, scrolled to that note's full text
 and outlined (the session's context menu still has Focus), the chevron expands the full text in
 place, and (x) dismisses it. The section is compact so it never pushes the sessions out of view: it lists
 every `needs_you` note, but at most 3 other rows (`updatesCompactLimit`), with **Show all N** to expand it in place and
@@ -857,7 +859,10 @@ full with a Dismiss button each, and the dashboard sidebar shows the total the f
 counted note by note like the popover's Updates header. Totals count all open notes
 (`notes_count`), not only the listed ones; the snapshot lists the newest 20 per session plus any
 older open `needs_you` note (a request is never capped out), so a header shows "Updates (20 of 25)"
-when some are not listed.
+when some are not listed. Each listed note carries `text` (the full message) and `headline`: its
+first line starting with a marker (`note_markers`, `USER_ACTION:` by default; leading markdown and
+emphasis removed), else its first non-empty line. The app shows `headline` on collapsed rows and
+falls back to the first line of `text` when an older CLI omits it.
 
 After an upgrade that changes these rules, `agentboard notes --rebuild --reset` re-applies them to
 the recorded history: it drops the open notes it made and replays every `Stop` through the new
