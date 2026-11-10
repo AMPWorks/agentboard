@@ -255,7 +255,16 @@ struct SessionRowView: View {
 
     /// The "+N" PR button: the detail view lists every link.
     private func showDetail() {
-        store.requestSelection(session.key)
+        showInDashboard(note: nil)
+    }
+
+    /// Selects this session in the dashboard and, with `note`, scrolls its
+    /// detail to that note and outlines it. From the popover it also shows
+    /// the dashboard and closes the popover; a dashboard row only changes
+    /// the selection (the dashboard keeps its filters while the row is
+    /// listed, `PendingSelection.clearsFilters`).
+    private func showInDashboard(note: Int?) {
+        store.requestSelection(session.key, note: note)
         if compact {
             let popoverWindow = NSApp.keyWindow
             DashboardWindowController.show()
@@ -263,19 +272,32 @@ struct SessionRowView: View {
         }
     }
 
-    /// Open notes on this session; red when one of them needs the user.
+    /// Open notes on this session; red when one of them needs the user. A
+    /// button of its own, so a click opens the dashboard on the session's
+    /// updates (the needs_you one, else the newest, `SessionNoteTarget`)
+    /// and never runs the row's own click (focus the terminal).
     private var notesBadge: some View {
         let urgent = session.notes.contains { $0.kind == .needsYou }
         let color: Color = urgent ? SessionColor.needsYouText : .secondary
-        return Label("\(session.notesCount)", systemImage: "text.bubble")
-            .labelStyle(.titleAndIcon)
-            .font(.caption2)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1)
-            .background(color.opacity(0.15), in: Capsule())
-            .foregroundStyle(color)
-            .help(session.notesCount == 1 ? "1 open update" : "\(session.notesCount) open updates")
-            .accessibilityLabel(session.notesCount == 1 ? "1 open update" : "\(session.notesCount) open updates")
+        let count = session.notesCount
+        return Button {
+            showInDashboard(note: SessionNoteTarget.badgeTarget(for: session))
+        } label: {
+            Label("\(count)", systemImage: "text.bubble")
+                .labelStyle(.titleAndIcon)
+                .font(.caption2)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(color.opacity(0.15), in: Capsule())
+                .foregroundStyle(color)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .lineLimit(1)
+        .fixedSize()
+        .help(SessionNoteTarget.badgeHelp(count: count, inDashboard: !compact))
+        .accessibilityLabel(SessionNoteTarget.badgeAccessibilityLabel(count: count))
+        .accessibilityHint(SessionNoteTarget.badgeAccessibilityHint(count: count, inDashboard: !compact))
     }
 
     private var toolBadge: some View {

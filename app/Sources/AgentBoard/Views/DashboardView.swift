@@ -43,11 +43,18 @@ struct DashboardView: View {
         return store.snapshot.sessions.first { $0.key == key }
     }
 
-    /// A row tapped in the popover asks the dashboard to select a session;
-    /// clear any filters that might hide it, then select it and consume the request.
+    /// A row tapped in the popover (or a row's update badge or "+N" button)
+    /// asks the dashboard to select a session. Clear the filters only when
+    /// they hide it (a listed session keeps the search and sidebar state),
+    /// then select it and consume the request.
     private func consumePendingSelection() {
         guard let key = store.pendingSelection else { return }
-        clearFilters()
+        let listedKeys = listedSessions(from: matchedSessions).map(\.key)
+        if PendingSelection.clearsFilters(for: key, listedKeys: listedKeys,
+                                          knownKeys: store.snapshot.sessions.map(\.key),
+                                          sidebar: sidebarSelection) {
+            clearFilters()
+        }
         selectedSessionKey = key
         store.pendingSelection = nil
     }

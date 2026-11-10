@@ -849,7 +849,10 @@ notes). When a query hides an open `needs_you` note on a session in Review, Snoo
 notice under the search field counts it in red ("1 update needs you") while the Updates panel is
 open (closed, the note is pinned above the sessions, so the notice leaves it out), and the dashboard sidebar
 warns the same way; a hidden session in Needs you or Interrupted is counted once, as a session. A
-session row shows a small badge with its number of open updates, the session detail lists them in
+session row shows a small badge with its number of open updates. Clicking it (popover or dashboard
+row) selects the session in the dashboard and scrolls its detail to its newest open `needs_you`
+note, else its newest note, outlined; from the popover it also opens the dashboard and closes the
+popover, and it never focuses the terminal. The session detail lists them in
 full with a Dismiss button each, and the dashboard sidebar shows the total the filters keep,
 counted note by note like the popover's Updates header. Totals count all open notes
 (`notes_count`), not only the listed ones; the snapshot lists the newest 20 per session plus any
@@ -1175,7 +1178,10 @@ hide a session that needs you or was interrupted, a red line under the sidebar s
 with a **Clear** button that resets the search and both pickers and selects **All**. In the
 **Denials** view a plain word also matches each denial's tool, reason and MCP server (a field
 word still reads its session); the session list and the state badges never match denial text,
-so a query that only hits a denial lists that denial without listing its session.
+so a query that only hits a denial lists that denial without listing its session. A session
+selected from elsewhere (a popover row, a row's update badge or "+N" button, a notification)
+keeps the filters when the list already shows it; otherwise they are cleared so it is listed,
+unless the snapshot no longer has the session at all (clearing could not reveal it).
 
 ## Help
 

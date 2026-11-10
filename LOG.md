@@ -662,3 +662,31 @@ The plain-words tables are hand-copied from values the hook stores, so
 tool reason the app has no words for; the light text colors' 4.5:1 contrast and the fixture
 generator each got a test, and the capture script refuses a leftover capture copy and an `--only`
 that matches nothing.
+
+## 2026-11-09 06:50:39 UTC — The row update badge opens the session's updates
+
+The usability review gave session rows a speech bubble with the open-update count, but it was a
+plain label, so the obvious click did nothing (or, in the popover, jumped to the terminal). It is
+now a button that reuses the popover update rows' path: `requestSelection(key, note:)` sets the
+pending note and the session detail scrolls to it and outlines it. From the popover it also opens
+the dashboard and closes the popover, sharing one function with the "+N" PR button; in a
+dashboard row it only changes the selection. A SwiftUI button inside the popover row's tap
+gesture takes the click, so the row never focuses the terminal as well.
+
+The badge targets one note rather than the Updates header: the first needs_you note in list
+order, else the first note (`SessionNoteTarget.badgeTarget`). The snapshot already lists notes
+newest first, with any older needs_you note appended past the newest 20, so the helper never
+re-sorts. Opening on the header alone was considered, but it would leave a request for the user
+unmarked among loop updates. A target that is no longer listed falls back to the header through
+the existing `NoteFocus.scrollTarget`.
+
+A badge click in a filtered dashboard used to wipe the search, because every pending selection
+cleared the filters. The dashboard now clears them only when the requested session is not in the
+list it shows (`PendingSelection.clearsFilters`; the Denials view lists no sessions, so it still
+switches back to All). This also stops the "+N" button and a popover click on a listed session
+from clearing the search.
+
+Review follow-up: a requested key the snapshot no longer has (the session left it, or is hidden
+while Show hidden is off) now leaves the filters alone, since clearing them could not reveal it,
+and a dashboard row's badge tooltip says it shows the updates in the session's detail rather than
+opening the dashboard the user is already in.
