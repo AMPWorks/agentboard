@@ -121,7 +121,7 @@ enum HelpContent {
             .heading("Clicking a row"),
             .bullets([
                 "**Click** a live session to bring its terminal tab to the front (iTerm2 and Apple Terminal; other terminals are just activated), switching to the desktop (Space) its window is on, a fullscreen window's Space, or restoring it when minimized (verified with iTerm2; expected, not yet verified, for Apple Terminal). For a session inside tmux, the click brings forward the iTerm2 or Terminal window attached to its tmux session (without checking that it reached the screen), or opens a new iTerm window attached to it. A Claude desktop app session (the desktop-window icon) opens in the desktop app on that session, whether or not its process is still running; if the app's own session list doesn't name it, the app is just brought forward. A session with no live terminal opens in the dashboard instead. When the jump doesn't happen (the tab was closed, macOS stayed on this desktop, a missing permission), the dashboard opens on the session with the reason in its banner.",
-                "**Hover** to show quick buttons: copy the resume command, and mark the session done.",
+                "**Hover** to show quick buttons at the row's right edge: copy the resume command, and mark the session done. Every row keeps room for them, so the row never moves when they appear.",
                 "The **update count** (speech bubble) and the PR buttons are buttons of their own: clicking one never focuses the terminal. The update count opens the dashboard on the session's updates.",
                 "**Right-click** for every action: **Focus** (**Open in Claude App** for a desktop app session), **Resume** (once the process has exited; not offered for a desktop app session, whose conversation lives in the app), **Copy Resume Command**, **Mark Done** (or **Reopen** for a done session), **Snooze 1 Day**, and **Open** for each of its links.",
             ]),
@@ -248,7 +248,7 @@ enum HelpContent {
             .bullets([
                 "Rows are sorted by state (most urgent first), then by last update. They show the same dot, badges, titles and PR buttons as the popover.",
                 "**Double-click** (or press Return on) a live session to focus its terminal, switching to its desktop (verified with iTerm2; expected, not yet verified, for Apple Terminal); a failed jump shows why in the banner. **Right-click** for the full action menu.",
-                "**Hover** for quick buttons: Resume (once the process has exited), copy the resume command, mark done, snooze for a day, and open its first non-PR link (a ticket or URL).",
+                "**Hover** for quick buttons at the row's right edge: Resume (once the process has exited), copy the resume command, mark done, snooze for a day, and open its first non-PR link (a ticket or URL). Every row keeps room for all five, so the title and time never shift when they appear.",
             ]),
             .heading("Detail"),
             .bullets([

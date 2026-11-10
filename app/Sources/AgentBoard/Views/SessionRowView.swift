@@ -64,7 +64,10 @@ struct SessionRowView: View {
                     }
                 }
             }
-            if isHovering {
+            // Always laid out, at a fixed width: hovering only shows the
+            // buttons, so the text column is the same width either way and
+            // the row never re-wraps or shifts its time and PR buttons.
+            HoverSlot(width: SessionRowLayout.hoverSlotWidth(compact: compact), visible: isHovering) {
                 hoverButtons
             }
         }
@@ -313,63 +316,55 @@ struct SessionRowView: View {
         session.tool == "codex" ? "A Codex CLI session" : "A Claude Code session"
     }
 
-    @ViewBuilder
+    /// The buttons SessionRowLayout.hoverButtons lists: popover rows copy
+    /// and mark done (focus is the row's own click); dashboard rows every
+    /// action except focus (double-click the row, or the context menu).
     private var hoverButtons: some View {
-        HStack(spacing: 4) {
-            if compact {
-                compactButtons
-            } else {
-                fullButtons
+        HStack(spacing: SessionRowLayout.hoverIconSpacing) {
+            ForEach(SessionRowLayout.hoverButtons(for: session, compact: compact), id: \.self) { button in
+                hoverButton(button)
             }
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
     }
 
-    /// Popover rows: copy and mark done. Focus/resume happen via the row's
-    /// own click/double-click, not a dedicated button.
     @ViewBuilder
-    private var compactButtons: some View {
-        copyButton
-        markDoneButton
-    }
-
-    /// Dashboard rows: every action except focus, which is reached by
-    /// double-clicking the row (or the context menu / detail pane).
-    @ViewBuilder
-    private var fullButtons: some View {
-        if session.resumeAvailable {
-            iconButton("arrow.counterclockwise.circle", help: SessionActionHelp.resume) { Task { await store.resume(session) } }
-        }
-        copyButton
-        markDoneButton
-        iconButton("moon.zzz", help: SessionActionHelp.snooze) { Task { await store.snooze(session, hours: 24) } }
-        // PRs have their own buttons on the row; this opens the first
-        // other link (a ticket, a URL).
-        if let firstLink = session.links.first(where: { !$0.isPR && $0.openURL != nil }),
-           let url = firstLink.openURL {
-            iconButton("arrow.up.right.square", help: SessionActionHelp.open(firstLink)) {
-                NSWorkspace.shared.open(url)
+    private func hoverButton(_ button: SessionRowLayout.HoverButton) -> some View {
+        switch button {
+        case .resume:
+            iconButton(button.systemImage, help: SessionActionHelp.resume) { Task { await store.resume(session) } }
+        case .copy:
+            iconButton(button.systemImage, help: SessionActionHelp.copyResume) {
+                Task {
+                    let command = await store.resumeCommand(for: session)
+                    ClipboardHelper.copy(command)
+                }
+            }
+        case .markDone:
+            iconButton(button.systemImage, help: SessionActionHelp.markDone) { Task { await store.markDone(session) } }
+        case .snooze:
+            iconButton(button.systemImage, help: SessionActionHelp.snooze) { Task { await store.snooze(session, hours: 24) } }
+        case .openLink:
+            // A ticket or URL; PRs have their own buttons on the row.
+            if let link = SessionRowLayout.hoverLink(for: session), let url = link.openURL {
+                iconButton(button.systemImage, help: SessionActionHelp.open(link)) {
+                    NSWorkspace.shared.open(url)
+                }
             }
         }
     }
 
-    private var copyButton: some View {
-        iconButton("doc.on.doc", help: SessionActionHelp.copyResume) {
-            Task {
-                let command = await store.resumeCommand(for: session)
-                ClipboardHelper.copy(command)
-            }
-        }
-    }
-
-    private var markDoneButton: some View {
-        iconButton("checkmark.circle", help: SessionActionHelp.markDone) { Task { await store.markDone(session) } }
-    }
-
+    /// One hover button, framed at SessionRowLayout.hoverIconWidth by
+    /// hoverIconHeight so the buttons fill exactly the slot the row reserves
+    /// for them. Nothing between the row and here sets `.font`, `.imageScale`
+    /// or `.controlSize`; HoverSlotTests measures the glyphs at the default
+    /// font on that basis, so styling the row means re-measuring them.
     private func iconButton(_ systemImage: String, help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
+                .frame(width: SessionRowLayout.hoverIconWidth, height: SessionRowLayout.hoverIconHeight)
+                .contentShape(Rectangle())
         }
         .help(help)
     }

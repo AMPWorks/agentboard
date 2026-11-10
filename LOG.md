@@ -715,3 +715,25 @@ also drops the trailing emphasis a marker line closes (`*...*`, `_..._`, backtic
 line opened with it, so inline code at the end of a request survives; this cleans
 `waiting_reason` too. The fixture's second needs_you note now carries its headline, so the sample
 app shows the ask on every row; the older-CLI fallback stays covered by the decoding tests.
+
+## 2026-11-10 06:59:22 UTC — Hover buttons get a reserved slot, so rows never reflow
+
+A session row added its hover buttons (copy and mark done in the popover, up to five actions in
+the dashboard) to its `HStack` only while the mouse was over it, so the buttons took width from
+the text column: a popover title re-wrapped and the time, update badge and PR buttons moved, and a
+dashboard title truncated differently. Every row now reserves a fixed-width trailing slot
+(`HoverSlot`) and hovering changes only the buttons' opacity, hit-testing, enabled state and
+accessibility. Hidden, the buttons are disabled so keyboard navigation never focuses an invisible
+one, and a click on the empty slot falls through to the row's own tap as before. The overlay and
+context-menu-only alternatives were rejected in favor of this.
+
+The reserved width and the drawn width come from the same numbers in `SessionRowLayout`: each
+button is framed at `hoverIconWidth` (18pt, since the widest glyph draws at 17pt) by
+`hoverIconHeight` (18pt, since `doc.on.doc` draws 18pt tall; at the old literal 16 its top and
+bottom fell outside the clickable shape) with `hoverIconSpacing` between them. Each
+`HoverButton` carries its `systemImage`, which the row draws and the glyph-fit test measures, so a
+renamed symbol cannot slip past the test. The dashboard's button list moved into
+`SessionRowLayout.hoverButtons` so its slot is sized for every case of `HoverButton`, whatever the
+session shows; a new button widens every row instead of overflowing. The trade-off is width: the
+popover text column always loses what hovering used to take (about 48pt with the gap), and a
+dashboard row about 114pt, which makes the narrow dashboard list column's truncation worse.
