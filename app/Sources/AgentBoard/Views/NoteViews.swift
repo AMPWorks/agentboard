@@ -245,7 +245,7 @@ struct UpdateRowView: View {
                     NoteStyle.fullText(row.note.text)
                         .font(fontSize.text)
                 } else {
-                    Text(row.note.firstLine)
+                    Text(row.note.headline)
                         .font(fontSize.text)
                         .lineLimit(2)
                 }
@@ -302,7 +302,7 @@ struct UpdateRowView: View {
     }
 }
 
-/// One note inside an expanded group row: its first line, time and its own
+/// One note inside an expanded group row: its headline, time and its own
 /// x; a click opens it in the dashboard.
 private struct GroupedNoteLine: View {
     let note: Note
@@ -313,7 +313,7 @@ private struct GroupedNoteLine: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text(note.firstLine)
+            Text(note.headline)
                 .font(fontSize.text)
                 .lineLimit(2)
             Spacer(minLength: 4)

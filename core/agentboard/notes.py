@@ -41,6 +41,9 @@ PROMPT_KINDS = ("human", "loop", "cron", "injected")
 # (list bullets, emphasis, block quotes, inline code), e.g.
 # "- **USER_ACTION:** ...".
 MARKER_LEAD_CHARS = " \t*_`>-"
+# The subset of those that open emphasis or code a marker line may close
+# later on the line (headline drops the closing run).
+MARKER_EMPHASIS_CHARS = "*_`"
 
 # A transient failure the tool printed instead of an answer (optionally in
 # bold, as QUIET_RE allows).
@@ -436,11 +439,23 @@ def first_line(text) -> str:
 
 def headline(text, marker_list=DEFAULT_MARKERS) -> str:
     """One line that stands for the note: its first marker line (so a
-    request buried under a summary still leads), else its first line."""
+    request buried under a summary still leads), else its first line. A
+    marker line loses its leading markdown, and the run that closes what it
+    opened (`*...*`, `_..._`, backticks), at the end of the line or before
+    trailing text, but keeps inline code such as `USER_ACTION: run `x``."""
     for line in (text or "").splitlines():
         stripped = line.lstrip(MARKER_LEAD_CHARS)
-        if marker_list and any(stripped.startswith(marker) for marker in marker_list):
-            return stripped.replace("**", "").strip()
+        marker = next((m for m in marker_list or () if stripped.startswith(m)), None)
+        if marker is None:
+            continue
+        prefix = line[:len(line) - len(stripped)]
+        body = stripped[len(marker):].replace("**", "")
+        for char in MARKER_EMPHASIS_CHARS:
+            if count := prefix.count(char):
+                # The first run of up to `count` chars not followed by a
+                # word character closes the emphasis ("my_var" does not).
+                body = re.sub(rf"{re.escape(char)}{{1,{count}}}(?!\w)", "", body, count=1)
+        return (marker + body).strip()
     return first_line(text)
 
 

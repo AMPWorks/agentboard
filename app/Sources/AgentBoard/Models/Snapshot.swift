@@ -108,21 +108,29 @@ struct Note: Codable, Sendable, Identifiable, Equatable, Hashable {
     var id: Int
     var kind: Kind
     var text: String
+    /// The core's `headline` (notes.headline): the first marker line, so a
+    /// request under a summary still leads, else the first line. Nil when
+    /// an older CLI omits it; read it through `headline`.
+    var rawHeadline: String?
     var ts: String
     var lastTs: String
     var count: Int
     var source: String
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, text, ts
+        case id, kind, text
+        case rawHeadline = "headline"
+        case ts
         case lastTs = "last_ts"
         case count, source
     }
 
-    init(id: Int, kind: Kind, text: String, ts: String, lastTs: String, count: Int = 1, source: String = "cli") {
+    init(id: Int, kind: Kind, text: String, ts: String, lastTs: String, count: Int = 1, source: String = "cli",
+         headline: String? = nil) {
         self.id = id
         self.kind = kind
         self.text = text
+        self.rawHeadline = headline
         self.ts = ts
         self.lastTs = lastTs
         self.count = count
@@ -134,6 +142,7 @@ struct Note: Codable, Sendable, Identifiable, Equatable, Hashable {
         id = try c.decode(Int.self, forKey: .id)
         kind = try c.decodeIfPresent(Kind.self, forKey: .kind) ?? .unknown
         text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        rawHeadline = try? c.decodeIfPresent(String.self, forKey: .rawHeadline)
         ts = try c.decodeIfPresent(String.self, forKey: .ts) ?? ""
         lastTs = try c.decodeIfPresent(String.self, forKey: .lastTs) ?? ts
         count = try c.decodeIfPresent(Int.self, forKey: .count) ?? 1
@@ -145,18 +154,32 @@ struct Note: Codable, Sendable, Identifiable, Equatable, Hashable {
     /// The first non-empty line, without surrounding markdown emphasis.
     var firstLine: String {
         for line in text.split(whereSeparator: \.isNewline) {
-            // Bold markers anywhere in the line, so "**PR #9 opened** for x"
-            // loses its closing ** too; then any stray * at the ends.
-            let trimmed = line.replacingOccurrences(of: "**", with: "")
-                .trimmingCharacters(in: .whitespaces)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "*"))
-                .trimmingCharacters(in: .whitespaces)
+            let trimmed = Self.plainLine(line)
             if !trimmed.isEmpty { return trimmed }
         }
         return ""
     }
 
-    /// More than the first line to show (the row can expand). Counts
+    /// The one line a collapsed row shows: the core's headline (the request
+    /// line of a needs-you update), else `firstLine` when the CLI sent none
+    /// or an empty one. Cleaned like `firstLine`, since the core keeps
+    /// inner `**` in a plain first line.
+    var headline: String {
+        let cleaned = rawHeadline.map { Self.plainLine(Substring($0)) } ?? ""
+        return cleaned.isEmpty ? firstLine : cleaned
+    }
+
+    /// One line without markdown emphasis: bold markers anywhere in it, so
+    /// "**PR #9 opened** for x" loses its closing ** too; then any stray *
+    /// at the ends.
+    private static func plainLine(_ line: Substring) -> String {
+        line.replacingOccurrences(of: "**", with: "")
+            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "*"))
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// More than the collapsed line (`headline`) to show, so the row can expand. Counts
     /// non-empty lines, so a single bold line (`**PR #9 merged**`, which
     /// `firstLine` shows without its `**`) has nothing more to show.
     var hasMore: Bool {

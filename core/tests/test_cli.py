@@ -508,8 +508,63 @@ class SnapshotNotesTests(AgentBoardTestCase):
         self.assertEqual(entry["waiting_reason"], "USER_ACTION: [proj] approve the plan")
         self.assertEqual(entry["notes_count"], 1)
         self.assertEqual(
-            set(entry["notes"][0]), {"id", "kind", "text", "ts", "last_ts", "count", "source"}
+            set(entry["notes"][0]),
+            {"id", "kind", "text", "headline", "ts", "last_ts", "count", "source"},
         )
+        self.assertEqual(entry["notes"][0]["headline"], "USER_ACTION: [proj] approve the plan")
+
+    def test_note_headline_is_the_marker_line_below_a_summary(self):
+        self.session()
+        self.note("**Tick summary.** Two PRs merged.\n\n- **USER_ACTION:** approve the plan\nmore")
+        listed = self.entry()[1]["notes"][0]
+        self.assertEqual(listed["headline"], "USER_ACTION: approve the plan")
+        self.assertTrue(listed["text"].startswith("**Tick summary.**"), "text stays the full message")
+
+    def test_note_headline_without_a_marker_is_the_first_line(self):
+        self.session()
+        self.note("\n**PR #4 merged**\nall checks green", kind="update")
+        self.assertEqual(self.entry()[1]["notes"][0]["headline"], "PR #4 merged")
+
+    def test_note_headline_honors_custom_note_markers(self):
+        (self.agentboard_home / "config.json").write_text(json.dumps({"note_markers": ["ASK:"]}))
+        self.session()
+        self.note("Summary of the tick.\nASK: pick a name\nUSER_ACTION: not a marker here")
+        self.assertEqual(self.entry()[1]["notes"][0]["headline"], "ASK: pick a name")
+
+    def test_note_headline_drops_emphasis_wrapped_around_the_marker_line(self):
+        for i, line in enumerate(["*USER_ACTION: approve the plan*",
+                                  "_USER_ACTION: approve the plan_",
+                                  "`USER_ACTION: approve the plan`",
+                                  "- **USER_ACTION: approve the plan**"]):
+            with self.subTest(line=line):
+                session_id = f"wrap{i}"
+                self.session(session_id)
+                self.note(f"Summary.\n{line}", session_id=session_id)
+                entry = self.entry(key=f"claude:{session_id}")[1]
+                self.assertEqual(entry["notes"][0]["headline"], "USER_ACTION: approve the plan")
+                self.assertEqual(entry["waiting_reason"], "USER_ACTION: approve the plan")
+
+    def test_note_headline_drops_emphasis_that_closes_before_trailing_text(self):
+        for i, line in enumerate(["> *USER_ACTION: approve* (then ping me)",
+                                  "_USER_ACTION: approve_ (then ping me)",
+                                  "`USER_ACTION: approve` (then ping me)",
+                                  "**USER_ACTION: approve** (then ping me)"]):
+            with self.subTest(line=line):
+                session_id = f"mid{i}"
+                self.session(session_id)
+                self.note(f"Summary.\n{line}", session_id=session_id)
+                entry = self.entry(key=f"claude:{session_id}")[1]
+                self.assertEqual(entry["notes"][0]["headline"], "USER_ACTION: approve (then ping me)")
+
+    def test_note_headline_keeps_underscores_inside_words(self):
+        self.session()
+        self.note("Summary.\n_USER_ACTION: rename my_var_")
+        self.assertEqual(self.entry()[1]["notes"][0]["headline"], "USER_ACTION: rename my_var")
+
+    def test_note_headline_keeps_inline_code_closing_the_marker_line(self):
+        self.session()
+        self.note("Summary.\nUSER_ACTION: run `make check`")
+        self.assertEqual(self.entry()[1]["notes"][0]["headline"], "USER_ACTION: run `make check`")
 
     def test_marker_line_is_the_waiting_reason_even_when_not_first(self):
         self.session()
@@ -1090,12 +1145,26 @@ class NotesCommandTests(AgentBoardTestCase):
         (note,) = data["notes"]
         self.assertEqual(
             set(note),
-            {"id", "key", "tool", "session_id", "kind", "text", "ts", "last_ts", "count",
-             "source", "dismissed_at"},
+            {"id", "key", "tool", "session_id", "kind", "text", "headline", "ts", "last_ts",
+             "count", "source", "dismissed_at"},
         )
         self.assertEqual(note["key"], "claude:s1")
         self.assertEqual(note["kind"], "needs_you")
         self.assertIsNone(note["dismissed_at"])
+
+    def test_notes_json_headline_is_the_marker_line_below_a_summary(self):
+        self._add("Tick summary.\n\n- **USER_ACTION:** approve the plan", kind="needs_you")
+        self._add("PR #4 merged\nall green", session="claude:s2")
+        notes = {n["session_id"]: n for n in json.loads(_run_cmd(["notes", "--json"])[1])["notes"]}
+        self.assertEqual(notes["s1"]["headline"], "USER_ACTION: approve the plan")
+        self.assertTrue(notes["s1"]["text"].startswith("Tick summary."))
+        self.assertEqual(notes["s2"]["headline"], "PR #4 merged")
+
+    def test_notes_json_headline_honors_custom_note_markers(self):
+        (self.agentboard_home / "config.json").write_text(json.dumps({"note_markers": ["ASK:"]}))
+        self._add("Summary.\nASK: pick a name", kind="needs_you")
+        (note,) = json.loads(_run_cmd(["notes", "--json"])[1])["notes"]
+        self.assertEqual(note["headline"], "ASK: pick a name")
 
     def test_notes_empty_json(self):
         rc, out, _ = _run_cmd(["notes", "--json"])

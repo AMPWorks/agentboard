@@ -75,6 +75,16 @@ struct UpdatesFeedTests {
         #expect(UpdatesFeed.hiddenNeedsYouNotes(from: sessions, query: SessionSearch("")) == 0)
     }
 
+    @Test func queryStillMatchesTextOnlyInTheBodyBelowTheHeadline() {
+        var body = note(1, "needs_you", "Rebuilt the flamingo index overnight.\nUSER_ACTION: approve the plan",
+                        lastTs: "2026-10-15T10:00:00Z")
+        body["headline"] = "USER_ACTION: approve the plan"
+        let sessions = Fixtures.snapshot([session("a", "needs_you", notes: [body])]).sessions
+        let feed = UpdatesFeed.make(from: sessions, query: SessionSearch("flamingo"))
+        #expect(feed.map(\.id) == [1])
+        #expect(feed.first?.note.headline == "USER_ACTION: approve the plan")
+    }
+
     @Test func countsFollowOneRuleAboveTheListCap() {
         // The CLI lists 20 notes per session but reports all 25 open ones.
         let listed = (1...20).map { i in
@@ -134,6 +144,14 @@ struct UpdatesFeedTests {
         let feed = UpdatesFeed.make(from: snapshot.sessions, query: SessionSearch(""))
         #expect(feed.count == snapshot.counts.notes)
         #expect(feed.first?.note.kind == .needsYou)
+        // A request under a summary: the row leads with the core's marker
+        // line, not the summary (the older-CLI fallback is covered by
+        // headlineFallsBackToTheFirstLineWhenAbsentEmptyOrNotAString).
+        let byId = Dictionary(uniqueKeysWithValues: feed.map { ($0.id, $0.note) })
+        #expect(byId[12]?.headline.hasPrefix("USER_ACTION: [widget-service] approve running") == true)
+        #expect(byId[12]?.firstLine.hasPrefix("Tick summary.") == true)
+        #expect(byId[13]?.headline == "USER_ACTION: confirm the destructive migration before it alters schema_version")
+        #expect(byId[13]?.firstLine.hasPrefix("Migration 0002 is written") == true)
     }
 }
 
@@ -199,6 +217,43 @@ struct NoteDecodingTests {
             ],
         ])
         #expect(session.notes.map(\.firstLine) == ["PR #57 opened for the rollup writeup", "CI is green on main"])
+    }
+
+    @Test func headlineDecodesTheCoresMarkerLine() {
+        let session = Fixtures.decoded("a", "needs_you", extra: [
+            "notes": [
+                ["id": 1, "kind": "needs_you", "text": "**Tick summary.** Two PRs merged.\nUSER_ACTION: approve the plan",
+                 "headline": "USER_ACTION: approve the plan", "ts": "t", "last_ts": "t"],
+            ],
+        ])
+        #expect(session.notes[0].headline == "USER_ACTION: approve the plan")
+        #expect(session.notes[0].firstLine == "Tick summary. Two PRs merged.")
+        #expect(session.notes[0].hasMore)
+    }
+
+    @Test func headlineFallsBackToTheFirstLineWhenAbsentEmptyOrNotAString() {
+        let session = Fixtures.decoded("a", "needs_you", extra: [
+            "notes": [
+                ["id": 1, "kind": "needs_you", "text": "**Summary**\nUSER_ACTION: approve", "ts": "t", "last_ts": "t"],
+                ["id": 2, "kind": "needs_you", "text": "**Summary**\nUSER_ACTION: approve", "headline": "",
+                 "ts": "t", "last_ts": "t"],
+                ["id": 3, "kind": "needs_you", "text": "**Summary**\nUSER_ACTION: approve", "headline": " ** ",
+                 "ts": "t", "last_ts": "t"],
+                ["id": 4, "kind": "update", "text": "**Summary**\nmore", "headline": 7, "ts": "t", "last_ts": "t"],
+            ],
+        ])
+        #expect(session.notes.map(\.headline) == ["Summary", "Summary", "Summary", "Summary"])
+    }
+
+    @Test func headlineLosesInnerBoldMarkersLikeTheFirstLine() {
+        // The core's plain first line keeps an inner **; the row must not.
+        let session = Fixtures.decoded("a", "review", extra: [
+            "notes": [
+                ["id": 1, "kind": "update", "text": "**PR #57 opened** for x",
+                 "headline": "PR #57 opened** for x", "ts": "t", "last_ts": "t"],
+            ],
+        ])
+        #expect(session.notes[0].headline == "PR #57 opened for x")
     }
 
     @Test func notesCountDefaultsToTheListLength() {
