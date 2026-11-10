@@ -67,7 +67,7 @@ Claude Code's auto mode blocked over the last 7 days.
 
 Each row shows the session's title, then always its project and branch on the second line, and
 what it is waiting on. It also has a button per PR (`#N`, green while open, outlined when it
-awaits you), a count of open updates, a permission mode icon (`plan`, `auto`, ...) under the tool
+awaits you), a count of open updates (click it to read them in the dashboard), a permission mode icon (`plan`, `auto`, ...) under the tool
 badge while the session is live, and the model and context size, such as `Opus 5.5 · 308k`.
 
 <picture>
