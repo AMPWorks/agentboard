@@ -264,6 +264,295 @@ struct PopoverSizingTests {
         }
     }
 
+    /// MenuBarExtra can move the panel on reopen without resizing it; the
+    /// didMove observer re-places it, so a same-size move must yield a frame.
+    @Test func sameSizeMoveIsCorrected() {
+        let visible = CGRect(x: 0, y: 54, width: 1728, height: 1030)
+        let size = CGSize(width: 496, height: 600)
+        let placed = PopoverSizing.panelFrame(contentSize: size, top: 1084, anchorX: 1224, visibleFrame: visible)
+        let moved = placed.offsetBy(dx: -990, dy: 0)
+        #expect(PopoverSizing.frameToApply(current: moved, contentSize: size, top: 1084, anchorX: 1224,
+                                           visibleFrame: visible) == placed)
+        #expect(PopoverSizing.frameToApply(current: placed, contentSize: size, top: 1084, anchorX: 1224,
+                                           visibleFrame: visible) == nil)
+    }
+
+    // MARK: Anchor
+
+    /// The geometry seen on a notched 1728 x 1117 display: the icon's status
+    /// item window on the menu bar, plus AppKit's off-screen copies.
+    private static let screenFrame = CGRect(x: 0, y: 0, width: 1728, height: 1117)
+    private static let screenVisible = CGRect(x: 0, y: 54, width: 1728, height: 1030)
+    private static let mainScreen = PopoverSizing.Screen(frame: screenFrame, visible: screenVisible)
+    private static let icon = PopoverSizing.StatusItemCandidate(
+        frame: CGRect(x: 1224, y: 1084, width: 38, height: 33), screen: mainScreen)
+    /// One of the copies as AppKit reports it: at 0,-33 on no screen.
+    private static let offScreenCopy = PopoverSizing.StatusItemCandidate(
+        frame: CGRect(x: 0, y: -33, width: 38, height: 33), screen: nil)
+
+    private static func resolve(_ items: [PopoverSizing.StatusItemCandidate], popoverScreen: CGRect?,
+                                lastKnown: PopoverSizing.RememberedIcon? = nil,
+                                screens: [PopoverSizing.Screen] = [mainScreen]) -> PopoverSizing.ResolvedAnchor? {
+        PopoverSizing.resolveAnchor(statusItems: items, popoverScreen: popoverScreen, lastKnown: lastKnown,
+                                    screens: screens)
+    }
+
+    /// A candidate on the main screen with the given frame.
+    private static func onMain(_ frame: CGRect) -> PopoverSizing.StatusItemCandidate {
+        PopoverSizing.StatusItemCandidate(frame: frame, screen: mainScreen)
+    }
+
+    @Test func oneStatusItemGivesItsLeftEdge() {
+        #expect(Self.resolve([Self.icon], popoverScreen: Self.screenFrame) == PopoverSizing.ResolvedAnchor(
+            screen: PopoverScreen(visibleFrame: Self.screenVisible, anchorX: 1224), screenFrame: Self.screenFrame,
+            source: .statusItem))
+    }
+
+    @Test func noStatusItemUsesTheRememberedIcon() {
+        let remembered = PopoverSizing.RememberedIcon(screenFrame: Self.screenFrame, anchorX: 1100)
+        #expect(Self.resolve([], popoverScreen: Self.screenFrame, lastKnown: remembered)
+                == PopoverSizing.ResolvedAnchor(screen: PopoverScreen(visibleFrame: Self.screenVisible, anchorX: 1100),
+                                                screenFrame: Self.screenFrame, source: .remembered))
+    }
+
+    /// The remembered icon is what a status item read gives, and survives a
+    /// Dock or menu bar change (same screen frame, new visible frame) with
+    /// the visible frame taken from the screen as it is now.
+    @Test func aRememberedIconSurvivesADockChange() {
+        let read = Self.resolve([Self.icon], popoverScreen: nil)
+        #expect(read?.remembered == PopoverSizing.RememberedIcon(screenFrame: Self.screenFrame, anchorX: 1224))
+        let dockHidden = CGRect(x: 0, y: 0, width: 1728, height: 1084)
+        let dockOnLeft = CGRect(x: 80, y: 0, width: 1648, height: 1084)
+        for visible in [dockHidden, dockOnLeft] {
+            let now = PopoverSizing.Screen(frame: Self.screenFrame, visible: visible)
+            #expect(Self.resolve([Self.offScreenCopy], popoverScreen: nil, lastKnown: read?.remembered,
+                                 screens: [now])
+                    == PopoverSizing.ResolvedAnchor(screen: PopoverScreen(visibleFrame: visible, anchorX: 1224),
+                                                    screenFrame: Self.screenFrame, source: .remembered))
+        }
+    }
+
+    /// `reanchor()` forgets the top edge only when the anchor's display
+    /// changes: a Dock change (same screen frame, new visible frame) or a
+    /// switch between status item and remembered source on the same display
+    /// is not a move.
+    @Test func aDockChangeIsNotAScreenChange() {
+        let read = Self.resolve([Self.icon], popoverScreen: Self.screenFrame)
+        let dockHidden = PopoverSizing.Screen(frame: Self.screenFrame,
+                                              visible: CGRect(x: 0, y: 0, width: 1728, height: 1084))
+        let afterDock = Self.resolve([], popoverScreen: nil, lastKnown: read?.remembered, screens: [dockHidden])
+        #expect(afterDock != nil && afterDock != read)
+        #expect(!PopoverSizing.ResolvedAnchor.changedScreen(from: read, to: afterDock))
+        #expect(!PopoverSizing.ResolvedAnchor.changedScreen(from: read, to: read))
+        #expect(!PopoverSizing.ResolvedAnchor.changedScreen(from: nil, to: nil))
+        let other = PopoverSizing.Screen(frame: CGRect(x: 1728, y: 0, width: 2560, height: 1440),
+                                         visible: CGRect(x: 1728, y: 0, width: 2560, height: 1415))
+        let otherIcon = PopoverSizing.StatusItemCandidate(
+            frame: CGRect(x: 3900, y: 1415, width: 38, height: 25), screen: other)
+        let onOther = Self.resolve([otherIcon], popoverScreen: other.frame, screens: [Self.mainScreen, other])
+        #expect(onOther?.screenFrame == other.frame)
+        #expect(PopoverSizing.ResolvedAnchor.changedScreen(from: read, to: onOther))
+        #expect(PopoverSizing.ResolvedAnchor.changedScreen(from: nil, to: read))
+        #expect(PopoverSizing.ResolvedAnchor.changedScreen(from: read, to: nil))
+    }
+
+    /// A remembered icon on a display that is gone (unplugged, rearranged or
+    /// changed resolution since) is dropped rather than placing the panel
+    /// against a frame that no longer exists.
+    @Test func aRememberedIconOffTheCurrentScreensIsDropped() {
+        let gone = PopoverSizing.RememberedIcon(screenFrame: CGRect(x: 1728, y: 0, width: 2560, height: 1440),
+                                                anchorX: 3800)
+        #expect(Self.resolve([], popoverScreen: nil, lastKnown: gone) == nil)
+        #expect(Self.resolve([], popoverScreen: nil, lastKnown: gone, screens: []) == nil)
+        // The main display changed resolution: same origin, new size.
+        let resized = PopoverSizing.RememberedIcon(screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+                                                   anchorX: 1000)
+        #expect(Self.resolve([Self.offScreenCopy], popoverScreen: Self.screenFrame, lastKnown: resized) == nil)
+        // A status item read now still wins over it.
+        #expect(Self.resolve([Self.icon], popoverScreen: nil, lastKnown: gone)?.source == .statusItem)
+    }
+
+    /// Nothing known: nil, so the panel stays where SwiftUI put it rather
+    /// than anchoring to itself.
+    @Test func noStatusItemAndNothingKnownGivesNoAnchor() {
+        #expect(Self.resolve([], popoverScreen: Self.screenFrame) == nil)
+        #expect(Self.resolve([], popoverScreen: nil) == nil)
+    }
+
+    @Test func theStatusItemOnThePopoversScreenWins() {
+        // A second display to the left, its menu bar 25 pt tall.
+        let leftFrame = CGRect(x: -1920, y: 0, width: 1920, height: 1080)
+        let leftVisible = CGRect(x: -1920, y: 0, width: 1920, height: 1055)
+        let leftIcon = PopoverSizing.StatusItemCandidate(
+            frame: CGRect(x: -400, y: 1055, width: 38, height: 25),
+            screen: PopoverSizing.Screen(frame: leftFrame, visible: leftVisible))
+        let onLeft = Self.resolve([Self.icon, leftIcon], popoverScreen: leftFrame)
+        #expect(onLeft?.screen == PopoverScreen(visibleFrame: leftVisible, anchorX: -400))
+        let onMain = Self.resolve([leftIcon, Self.icon], popoverScreen: Self.screenFrame)
+        #expect(onMain?.screen == PopoverScreen(visibleFrame: Self.screenVisible, anchorX: 1224))
+    }
+
+    @Test func nonIconCandidatesAreIgnored() {
+        let remembered = PopoverSizing.RememberedIcon(screenFrame: Self.screenFrame, anchorX: 1100)
+        // As wide as the menu bar, below the menu bar, and off the screen.
+        let wide = Self.onMain(CGRect(x: 0, y: 1084, width: 1728, height: 33))
+        let low = Self.onMain(CGRect(x: 1224, y: 400, width: 38, height: 33))
+        let offScreen = Self.onMain(CGRect(x: 0, y: -33, width: 38, height: 33))
+        for candidate in [wide, low, offScreen, Self.offScreenCopy] {
+            #expect(!PopoverSizing.isIconWindow(candidate))
+        }
+        #expect(PopoverSizing.isIconWindow(Self.icon))
+        #expect(Self.resolve([wide, low, offScreen, Self.offScreenCopy], popoverScreen: Self.screenFrame,
+                             lastKnown: remembered)?.source == .remembered)
+        // The icon is found whatever order the copies come in.
+        #expect(Self.resolve([Self.offScreenCopy, offScreen, wide, Self.icon], popoverScreen: nil,
+                             lastKnown: remembered)?.screen.anchorX == 1224)
+    }
+
+    /// The edges `isIconWindow` encodes: a menu bar auto-hidden parks the
+    /// icon with its bottom at the screen's top (half a point of slack), the
+    /// bottom may sit up to `maxIconHeight` below the top, and the icon is
+    /// at most `maxIconWidth` wide.
+    @Test func iconWindowBoundaries() {
+        let top = Self.screenFrame.maxY
+        let parked = Self.onMain(CGRect(x: 1224, y: top, width: 38, height: 33))
+        let aboveParked = Self.onMain(CGRect(x: 1224, y: top + 1, width: 38, height: 33))
+        let lowest = Self.onMain(CGRect(x: 1224, y: top - PopoverSizing.maxIconHeight, width: 38, height: 33))
+        let tooLow = Self.onMain(CGRect(x: 1224, y: top - PopoverSizing.maxIconHeight - 1, width: 38, height: 33))
+        let widest = Self.onMain(CGRect(x: 1224, y: 1084, width: PopoverSizing.maxIconWidth, height: 33))
+        let tooWide = Self.onMain(CGRect(x: 1224, y: 1084, width: PopoverSizing.maxIconWidth + 1, height: 33))
+        let tallest = Self.onMain(CGRect(x: 1224, y: top - PopoverSizing.maxIconHeight, width: 38,
+                                         height: PopoverSizing.maxIconHeight))
+        let tooTall = Self.onMain(CGRect(x: 1224, y: top - PopoverSizing.maxIconHeight, width: 38,
+                                         height: PopoverSizing.maxIconHeight + 1))
+        for accepted in [parked, lowest, widest, tallest] {
+            #expect(PopoverSizing.isIconWindow(accepted), "\(accepted.frame)")
+        }
+        for rejected in [aboveParked, tooLow, tooWide, tooTall] {
+            #expect(!PopoverSizing.isIconWindow(rejected), "\(rejected.frame)")
+        }
+    }
+
+    /// A display arranged below the main one: its top edge is y 0, so an
+    /// off-screen copy at 0,-33 sits exactly where an icon on its menu bar
+    /// would. AppKit puts the copies on no screen, and the placer never gives
+    /// them one from their frame, so they never count, even when the popover
+    /// is on that display.
+    @Test func offScreenCopiesNeverMatchADisplayBelow() {
+        let belowFrame = CGRect(x: 0, y: -1080, width: 1920, height: 1080)
+        let belowVisible = CGRect(x: 0, y: -1080, width: 1920, height: 1055)
+        let copies = Array(repeating: Self.offScreenCopy, count: 6)
+        let screens = [Self.mainScreen, PopoverSizing.Screen(frame: belowFrame, visible: belowVisible)]
+        #expect(Self.resolve(copies + [Self.icon], popoverScreen: belowFrame, screens: screens)?.screen
+                == PopoverScreen(visibleFrame: Self.screenVisible, anchorX: 1224))
+        #expect(Self.resolve(copies, popoverScreen: belowFrame, screens: screens) == nil)
+        #expect(Self.resolve(copies, popoverScreen: nil, screens: screens) == nil)
+    }
+
+    /// Settings asks with no popover window: the icon's anchor all the same.
+    @Test func settingsWithoutAPopoverStillGetsTheIcon() {
+        #expect(Self.resolve([Self.icon], popoverScreen: nil) == PopoverSizing.ResolvedAnchor(
+            screen: PopoverScreen(visibleFrame: Self.screenVisible, anchorX: 1224), screenFrame: Self.screenFrame,
+            source: .statusItem))
+    }
+
+    @Test func describeIsCompact() {
+        #expect(PopoverSizing.describe(CGRect(x: 1224, y: 1084, width: 38, height: 33)) == "1224,1084 38x33")
+        #expect(PopoverSizing.describe(CGRect(x: -0.24, y: 10.06, width: 497.67, height: 0)) == "-0.2,10.1 497.7x0")
+    }
+
+    /// A log helper must never trap: `CGRect.null` has an infinite origin
+    /// and `Int(_:)` traps on that, or on a value past `Int.max`.
+    @Test func describeNeverTrapsOnNonFiniteRects() {
+        #expect(PopoverSizing.describe(.null) == "inf,inf 0x0")
+        #expect(PopoverSizing.describe(.infinite).contains("e+"))
+        #expect(PopoverSizing.describe(CGRect(x: CGFloat.nan, y: 1e300, width: 1, height: 2)) == "nan,1e+300 1x2")
+    }
+
+    // MARK: Undoing someone else's move
+
+    private static let placed = CGRect(x: 1224, y: 484, width: 496, height: 600)
+    private static let movedAway = placed.offsetBy(dx: -990, dy: 0)
+
+    private static func decide(_ reason: PopoverSizing.PlaceReason, current: CGRect = movedAway,
+                               applied: CGRect? = placed, state: PopoverSizing.UndoState = .init(),
+                               now: TimeInterval = 100) -> PopoverSizing.PlaceDecision {
+        PopoverSizing.placeDecision(current: current, applied: applied, reason: reason, state: state, now: now)
+    }
+
+    @Test func theFirstPlacementIsNotAnUndo() {
+        for reason in [PopoverSizing.PlaceReason.open, .key, .content, .move, .resize, .screen] {
+            #expect(Self.decide(reason, applied: nil)
+                    == PopoverSizing.PlaceDecision(action: .place, undid: false, state: .init()))
+        }
+    }
+
+    @Test func aFrameStillAtTheAppliedOneIsNotAnUndo() {
+        // The content changed size, so the panel needs a new frame, but
+        // nothing else moved it.
+        #expect(Self.decide(.move, current: Self.placed)
+                == PopoverSizing.PlaceDecision(action: .place, undid: false, state: .init()))
+    }
+
+    /// Six undone moves in a row are corrected; the seventh gives up (logged
+    /// once) and later ones in the same fight are skipped.
+    @Test func theSeventhUndoneMoveInARowGivesUp() {
+        var state = PopoverSizing.UndoState()
+        var actions: [PopoverSizing.PlaceAction] = []
+        for step in 0..<9 {
+            let decision = Self.decide(step.isMultiple(of: 2) ? .move : .resize, state: state,
+                                       now: 100 + Double(step) * 0.1)
+            #expect(decision.undid)
+            actions.append(decision.action)
+            state = decision.state
+        }
+        #expect(actions == Array(repeating: .place, count: PopoverSizing.maxUndone) + [.giveUp, .skip, .skip])
+    }
+
+    /// Giving up stops only the move/resize fight: the panel still follows
+    /// the content's size (and opens, key and screen changes still place).
+    @Test func aContentChangeStillPlacesAfterGivingUp() {
+        let givenUp = PopoverSizing.UndoState(count: PopoverSizing.maxUndone + 1, last: 100)
+        for reason in [PopoverSizing.PlaceReason.content, .open, .key, .screen] {
+            let decision = Self.decide(reason, state: givenUp, now: 100.2)
+            #expect(decision == PopoverSizing.PlaceDecision(action: .place, undid: true, state: givenUp))
+        }
+        #expect(Self.decide(.move, state: givenUp, now: 100.2).action == .skip)
+    }
+
+    /// Undos further apart than `fightWindow` are separate corrections, not a
+    /// fight, so a long open never accumulates them into giving up; a fight
+    /// given up on is corrected again once it has stopped.
+    @Test func spacedOutUndosNeverGiveUp() {
+        var state = PopoverSizing.UndoState()
+        for step in 0..<20 {
+            let decision = Self.decide(.move, state: state, now: 100 + Double(step) * (PopoverSizing.fightWindow + 1))
+            #expect(decision.action == .place)
+            #expect(decision.state.count == 1)
+            state = decision.state
+        }
+        let givenUp = PopoverSizing.UndoState(count: PopoverSizing.maxUndone + 3, last: 100)
+        #expect(Self.decide(.move, state: givenUp, now: 100 + PopoverSizing.fightWindow + 0.5)
+                == PopoverSizing.PlaceDecision(action: .place, undid: true,
+                                               state: .init(count: 1, last: 100 + PopoverSizing.fightWindow + 0.5)))
+    }
+
+    /// The `fightWindow` edge: an undo exactly `fightWindow` after the last
+    /// continues the count, one just past it starts a new count.
+    @Test func anUndoExactlyAFightWindowLaterStillCounts() {
+        let state = PopoverSizing.UndoState(count: 3, last: 100)
+        let atEdge = 100 + PopoverSizing.fightWindow
+        #expect(Self.decide(.move, state: state, now: atEdge)
+                == PopoverSizing.PlaceDecision(action: .place, undid: true, state: .init(count: 4, last: atEdge)))
+        let pastEdge = atEdge + 0.001
+        #expect(Self.decide(.move, state: state, now: pastEdge)
+                == PopoverSizing.PlaceDecision(action: .place, undid: true, state: .init(count: 1, last: pastEdge)))
+        // At the edge a fight already at the limit gives up rather than resetting.
+        let atLimit = PopoverSizing.UndoState(count: PopoverSizing.maxUndone, last: 100)
+        #expect(Self.decide(.resize, state: atLimit, now: atEdge).action == .giveUp)
+        #expect(Self.decide(.resize, state: atLimit, now: pastEdge).action == .place)
+    }
+
     @Test func moreBelowOnlyWhenContentPassesTheViewport() {
         #expect(PopoverSizing.hasMoreBelow(contentMaxY: 600, viewportHeight: 388))
         #expect(!PopoverSizing.hasMoreBelow(contentMaxY: 388, viewportHeight: 388))

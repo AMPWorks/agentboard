@@ -1125,7 +1125,20 @@ bounds; while a query is set, everything it shows. Unconcluded, Snoozed and Done
 changes under 4 pt are ignored. In that mode the grip changes only the width.
 
 MenuBarExtra sizes its panel to the content only when it opens, so the app sets the panel's frame
-itself whenever the content's size changes, keeping the top edge where the panel opened.
+itself on every open and whenever the content's size changes or the panel is moved or resized by
+anything else, keeping the top edge where the panel opened. The left edge comes from the menu bar
+icon's status item window: AppKit keeps several of those per status item, most of them on no
+screen, so the app takes the icon-sized one on the menu bar of the screen macOS reports it on
+(preferring the popover's display; a window on no screen never counts) and remembers its position.
+One anchor per open sizes the content and places the panel, so the width and the left edge always
+agree; every placement reads it again for the screen the panel is on, so a panel macOS opens on
+another display is placed at that display's icon. The popover's own frame is never used as the
+icon's position: when no status item window can be read the app uses the last icon position it saw
+while a screen with that display's frame still exists (a Dock or menu bar change keeps it, with
+the screen's room re-read), and with none (right after launch, or after the display was unplugged,
+rearranged or changed resolution) it leaves the panel where macOS put it. Each open logs one
+`popover.open` line and each frame the app sets one `popover.place` line (see
+[Diagnostics](#diagnostics)).
 
 ## Search
 
@@ -1354,6 +1367,20 @@ lines while something is streaming them (`log stream --level debug --predicate '
 "io.github.agentboard"'`), so Settings → Diagnostics → **Verbose logging** promotes the polling
 to `notice` and passes `AGENTBOARD_LOG_LEVEL=debug` to every CLI call: one switch turns on both
 sides. **Open log** in the same section reveals `agentboard.log` in Finder.
+
+**Debugging where the popover opened.** The app logs its popover placement at `notice` (category
+`popover`), so the lines are kept without Verbose logging. Open the popover, then run
+`agentboard logs --app --since 5m --grep popover`. Each open writes one `popover.open` line, once
+the panel for that open is up and before that open's first `popover.place` line: the anchor's
+`source` (`statusItem`, `remembered` or `none`), `anchorX`, the screen's `visible` frame, every
+status item window looked at (`candidates=N [frame@screen; ...]`, `none` for a window on no
+screen), the content size, the panel's current `frame` and the `target` frame. Every frame the app
+sets writes one `popover.place` line with the `reason` (`open`, `key`, `content`, `resize`,
+`move`, `screen`), the same anchor fields, `from` and `to`, and `undid=true` when the panel was no
+longer where the app last put it. A move or resize that undid the app's frame is corrected up to
+six times in a row (each within a second of the last); the seventh logs `popover.place gave-up`
+and the app leaves moves and resizes alone until they stop for a second. Content size changes are
+still applied after that. Rects read `x,y wxh` in screen points, y up.
 
 **Debugging a click that focused the wrong tab or stayed on this desktop.** Click the row, then
 run `agentboard logs --grep cli.focus --lines 5`. Each click writes a `cli.focus.begin` line (the

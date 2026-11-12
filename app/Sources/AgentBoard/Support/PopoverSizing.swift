@@ -220,6 +220,175 @@ enum PopoverSizing {
             && abs(a.width - b.width) <= 0.5 && abs(a.height - b.height) <= 0.5
     }
 
+    // MARK: - Anchor
+
+    /// Where this open's anchor (the popover's left edge) came from.
+    enum AnchorSource: String, Equatable, Sendable {
+        /// A status item window (the menu bar icon) read just now.
+        case statusItem
+        /// The last icon position read, kept while no status item window can
+        /// be read. Never the popover's own frame.
+        case remembered
+    }
+
+    /// A screen as a status item window or the anchor sees it.
+    struct Screen: Equatable, Sendable {
+        /// The screen's full frame and its frame less the menu bar and Dock.
+        var frame: CGRect
+        var visible: CGRect
+    }
+
+    /// A window that may be the menu bar icon's status item window, with the
+    /// screen AppKit reports it on. AppKit keeps several `NSStatusBarWindow`s
+    /// per status item, most of them off screen (seen: one on the menu bar
+    /// and six at 0,-33 with no screen, all of them `isVisible`), so the
+    /// class name alone does not find the icon.
+    struct StatusItemCandidate: Equatable, Sendable {
+        var frame: CGRect
+        /// Nil when AppKit puts the window on no screen. Never filled in from
+        /// the frame: an off-screen copy at 0,-33 sits exactly where an icon
+        /// would on the menu bar of a display arranged below the main one.
+        var screen: Screen?
+    }
+
+    /// The anchor the popover is sized and placed against, the full frame
+    /// of its screen, and its source.
+    struct ResolvedAnchor: Equatable {
+        var screen: PopoverScreen
+        var screenFrame: CGRect
+        var source: AnchorSource
+
+        /// What to keep for when no status item window can be read.
+        var remembered: RememberedIcon { RememberedIcon(screenFrame: screenFrame, anchorX: screen.anchorX) }
+
+        /// Whether the anchor moved to another screen (or appeared or went
+        /// away). Compares the screen's full frame, not its visible frame,
+        /// so a Dock or menu bar change on the same display is not a move.
+        static func changedScreen(from before: ResolvedAnchor?, to after: ResolvedAnchor?) -> Bool {
+            before?.screenFrame != after?.screenFrame
+        }
+    }
+
+    /// The last icon position read: its left edge and its screen's full
+    /// frame. Not the visible frame, which changes whenever the Dock is
+    /// shown, hidden, resized or moved, or the menu bar's auto-hide setting
+    /// changes; that is re-read from the current screen with this frame.
+    struct RememberedIcon: Equatable, Sendable {
+        var screenFrame: CGRect
+        var anchorX: CGFloat
+    }
+
+    /// The largest status item window that still counts as the icon. The
+    /// icon is about 38 x 33 pt (a notched display's menu bar is taller).
+    static let maxIconWidth: CGFloat = 160
+    static let maxIconHeight: CGFloat = 60
+
+    /// Icon-sized, on a screen, and on that screen's menu bar: horizontally
+    /// on the screen, its bottom edge within `maxIconHeight` of the screen's
+    /// top and at most at the top (where an auto-hidden menu bar parks it).
+    static func isIconWindow(_ candidate: StatusItemCandidate) -> Bool {
+        guard let screen = candidate.screen?.frame else { return false }
+        let frame = candidate.frame
+        guard frame.width > 0, frame.width <= maxIconWidth, frame.height > 0, frame.height <= maxIconHeight
+        else { return false }
+        return frame.midX >= screen.minX && frame.midX <= screen.maxX
+            && frame.minY >= screen.maxY - maxIconHeight && frame.minY <= screen.maxY + 0.5
+    }
+
+    /// The popover's anchor: the left edge of the status item window that is
+    /// the icon (preferring the one on the popover's screen, when known),
+    /// else `lastKnown` while a screen with its frame is still among
+    /// `screens` (the current screens), with that screen's visible frame as
+    /// it is now, else nil, in which case the panel is left where SwiftUI put
+    /// it. The popover's own frame is never an input, so a panel at a wrong x
+    /// can never become its own anchor, and a display that was unplugged,
+    /// moved or changed resolution since the icon was last read never
+    /// anchors it either. A Dock or menu bar change keeps the remembered icon.
+    static func resolveAnchor(statusItems: [StatusItemCandidate], popoverScreen: CGRect?,
+                              lastKnown: RememberedIcon?, screens: [Screen]) -> ResolvedAnchor? {
+        let icons = statusItems.filter(isIconWindow)
+        let onPopoverScreen = popoverScreen.flatMap { screen in icons.first { $0.screen?.frame == screen } }
+        if let icon = onPopoverScreen ?? icons.first, let screen = icon.screen {
+            return ResolvedAnchor(screen: PopoverScreen(visibleFrame: screen.visible, anchorX: icon.frame.minX),
+                                  screenFrame: screen.frame, source: .statusItem)
+        }
+        guard let lastKnown, let screen = screens.first(where: { $0.frame == lastKnown.screenFrame })
+        else { return nil }
+        return ResolvedAnchor(screen: PopoverScreen(visibleFrame: screen.visible, anchorX: lastKnown.anchorX),
+                              screenFrame: screen.frame, source: .remembered)
+    }
+
+    /// A rect for the log: `x,y wxh`, one decimal at most. Never traps: a
+    /// non-finite or huge value (`CGRect.null` has infinite origin) is
+    /// printed as text.
+    static func describe(_ rect: CGRect) -> String {
+        func number(_ value: CGFloat) -> String {
+            let rounded = (value * 10).rounded() / 10
+            guard rounded.isFinite, abs(rounded) < 1e9 else { return String(describing: Double(value)) }
+            return rounded == rounded.rounded() ? String(Int(rounded)) : String(format: "%.1f", Double(rounded))
+        }
+        return "\(number(rect.minX)),\(number(rect.minY)) \(number(rect.width))x\(number(rect.height))"
+    }
+
+    // MARK: - Undoing someone else's move
+
+    /// Why the placer is placing the panel.
+    enum PlaceReason: String, Sendable {
+        case open, key, content, resize, move, screen
+
+        /// The panel's frame changed under the placer (a move or resize
+        /// notification), so placing again may fight another placer. The
+        /// others are the placer's own events and always place.
+        var isExternalChange: Bool { self == .move || self == .resize }
+    }
+
+    /// Placements in a row that undid someone else's move or resize, each
+    /// within `fightWindow` of the one before, and when the last one was.
+    struct UndoState: Equatable, Sendable {
+        var count = 0
+        var last: TimeInterval?
+    }
+
+    /// After this many undos in a row the placer stops correcting moves and
+    /// resizes until they stop for `fightWindow`, so a fight with another
+    /// placer can never loop.
+    static let maxUndone = 6
+    static let fightWindow: TimeInterval = 1
+
+    enum PlaceAction: Equatable, Sendable {
+        /// Set the frame.
+        case place
+        /// Stop correcting this fight: log it once and leave the frame.
+        case giveUp
+        /// Still in a fight given up on: leave the frame, log nothing.
+        case skip
+    }
+
+    struct PlaceDecision: Equatable, Sendable {
+        var action: PlaceAction
+        /// The panel is no longer at the frame the placer last set.
+        var undid: Bool
+        var state: UndoState
+    }
+
+    /// Whether to set the panel's frame, now at `current`, when the placer
+    /// last set `applied` (nil before its first placement this open). Only
+    /// a move or resize that undid the placer's frame counts towards giving
+    /// up; a content size change, an open, becoming key or a screen change
+    /// always places, so a given-up fight never stops the panel following
+    /// the content's size. An undo more than `fightWindow` after the last
+    /// one starts a new count, so occasional corrections over a long open
+    /// never add up to giving up.
+    static func placeDecision(current: CGRect, applied: CGRect?, reason: PlaceReason, state: UndoState,
+                              now: TimeInterval) -> PlaceDecision {
+        let undid = applied.map { !framesMatch(current, $0) } ?? false
+        guard undid, reason.isExternalChange else { return PlaceDecision(action: .place, undid: undid, state: state) }
+        let inFight = state.last.map { now - $0 <= fightWindow } ?? false
+        let count = inFight ? state.count + 1 : 1
+        let action: PlaceAction = count <= maxUndone ? .place : count == maxUndone + 1 ? .giveUp : .skip
+        return PlaceDecision(action: action, undid: true, state: UndoState(count: count, last: now))
+    }
+
     // MARK: - Finishing a drag
 
     /// What a finished grip drag stores.

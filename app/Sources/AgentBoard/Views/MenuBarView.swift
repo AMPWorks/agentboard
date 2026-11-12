@@ -31,7 +31,8 @@ struct MenuBarView: View {
     @AppStorage(PopoverSizing.widthKey) private var storedWidth: Double = 0
     @AppStorage(PopoverSizing.autoWidthKey) private var autoWidth: Bool = true
     @State private var placer = PopoverWindowPlacer()
-    /// The menu bar icon's screen, read on every open and screen change.
+    /// The placer's anchor (the icon's screen and position), mirrored so the
+    /// width updates when it changes; `place` positions from the same value.
     @State private var screen: PopoverScreen?
     /// Search bar and footer heights, measured; the list gets the rest.
     @State private var searchBarHeight: CGFloat = 60
@@ -167,8 +168,8 @@ struct MenuBarView: View {
             readScreen()
         })
         .onAppear {
-            placer.reset()
-            placer.onScreenChange = { readScreen() }
+            placer.onAnchorChange = { readScreen() }
+            placer.opened()
             readScreen()
             updatesOpenThisVisit = false
             store.setVisible(true)
@@ -241,8 +242,10 @@ struct MenuBarView: View {
         var mouse: CGPoint
     }
 
+    /// Reads the placer's anchor; never resolves one of its own, so the
+    /// content width and the panel's origin come from one anchorX.
     private func readScreen() {
-        screen = placer.currentScreen()
+        screen = placer.screen
     }
 
     /// The tallest list that fits under the menu bar on this screen.
