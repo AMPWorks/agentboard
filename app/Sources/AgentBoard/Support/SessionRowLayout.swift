@@ -6,12 +6,13 @@ import Foundation
 enum SessionRowLayout {
     /// The row's text lines, top to bottom.
     enum Line: Hashable {
-        /// The status text, else the title, with the tags and the time.
+        /// The status text, else the title (on a Needs you row the title
+        /// first, `SessionDisplay.primaryTitle`), with the tags and the time.
         case title
         /// project · branch, with tmux, PR and model tags on the right.
         /// Always the second line, so the repo is where the eye expects it.
         case repo
-        /// The session's own title, under a status text that leads.
+        /// The other of the two (`SessionDisplay.secondaryTitle`).
         case secondaryTitle
         /// What the session needs, or why it is in Review.
         case reason
@@ -33,6 +34,18 @@ enum SessionRowLayout {
         case autoDone
         /// A Review row whose process has exited (its amber color).
         case closed
+    }
+
+    /// The repo line's trailing items, leading to trailing.
+    enum RepoTag: Hashable {
+        case tmux
+        /// A Running row's background tasks, folded from its reason line
+        /// (`backgroundTaskCount`).
+        case background
+        /// Model and context (`SessionModelTag`).
+        case model
+        /// The PR buttons (`PRLinkButtons`, which draws nothing without a PR).
+        case prs
     }
 
     /// The quick buttons a row shows while the mouse is over it.
@@ -108,8 +121,44 @@ enum SessionRowLayout {
     static func lines(for session: Session) -> [Line] {
         var lines: [Line] = [.title, .repo]
         if SessionDisplay.secondaryTitle(session) != nil { lines.append(.secondaryTitle) }
-        if SessionDisplay.reasonText(session) != nil { lines.append(.reason) }
+        if SessionDisplay.reasonText(session) != nil, backgroundTaskCount(session) == nil { lines.append(.reason) }
         return lines
+    }
+
+    /// A Running row's "Waiting on N background task(s)[: types]" reason
+    /// (reconcile.BACKGROUND_WAIT_REASON) as its count: the row shows it as
+    /// a small tag on the repo line instead of a line of its own, so the
+    /// row is a line shorter. Nil for any other reason or state.
+    static func backgroundTaskCount(_ session: Session) -> Int? {
+        guard session.state == .running,
+              let raw = session.waitingReason?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        let prefix = "Waiting on "
+        guard raw.hasPrefix(prefix) else { return nil }
+        let rest = raw.dropFirst(prefix.count)
+        let digits = rest.prefix(while: { $0.isASCII && $0.isNumber })
+        guard let count = Int(digits), count > 0 else { return nil }
+        let after = rest.dropFirst(digits.count)
+        guard after.hasPrefix(" background task") else { return nil }
+        let tail = after.dropFirst(" background task".count)
+        guard tail.isEmpty || tail == "s" || tail.hasPrefix(":") || tail.hasPrefix("s:") else { return nil }
+        return count
+    }
+
+    /// The tag's text: "1 task", "3 tasks" (the tooltip has the reason).
+    static func backgroundTagText(_ count: Int) -> String {
+        count == 1 ? "1 task" : "\(count) tasks"
+    }
+
+    /// The PR buttons are always last, at the row's trailing edge, so they
+    /// sit in the same place whether or not the row has a tmux or model tag
+    /// (an optional tag after them used to push them left).
+    static func repoTags(for session: Session) -> [RepoTag] {
+        var tags: [RepoTag] = []
+        if session.tmuxTag != nil { tags.append(.tmux) }
+        if backgroundTaskCount(session) != nil { tags.append(.background) }
+        if SessionModelTag.text(session) != nil { tags.append(.model) }
+        tags.append(.prs)
+        return tags
     }
 
     static func iconColumn(for session: Session) -> [Icon] {

@@ -88,6 +88,24 @@ class CaptureScenariosTest(unittest.TestCase):
             self.assertTrue(Path(path).is_file(), line)
             self.assertIn("appearance=string:", settings)
 
+    def test_the_polish_scenarios_show_what_they_are_named_for(self):
+        fixtures = self.fixtures()
+        mixed = fixtures["updates-always-mixed"]["sessions"]
+        kinds = [n["kind"] for s in mixed for n in s["notes"]]
+        self.assertEqual(sorted(kinds), ["error", "needs_you", "update"])
+        self.assertTrue(any(s["state"] == "needs_you" and not s["notes"] for s in mixed))
+        settings = {n: d for n, _snap, d, _q in self.mod.scenarios(self.sample)}
+        self.assertIn("updatesPanelMode=string:alwaysShown", settings["updates-always-mixed"])
+        self.assertIn("updatesPanelMode=string:alwaysShown", settings["two-notes-one-project"])
+        two = fixtures["two-notes-one-project"]["sessions"]
+        self.assertEqual(len({s["project"] for s in two}), 1)
+        self.assertEqual(len({s["title"] for s in two}), 2)
+        self.assertTrue(all(len(s["notes"]) == 1 for s in two))
+        rows = fixtures["row-pr-no-model"]["sessions"]
+        self.assertTrue(all(any(link["kind"] == "pr" for link in s["links"]) for s in rows))
+        self.assertEqual(sum(1 for s in rows if s.get("model") is None), 2)
+        self.assertEqual(sum(1 for s in rows if s.get("model")), 2)
+
     def test_only_filters_by_name(self):
         out = Path(self.tmp.name) / "only"
         self.assertEqual(self.mod.main([str(SAMPLE), str(out), "--only", "^empty$"]), 0)

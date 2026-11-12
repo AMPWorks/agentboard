@@ -180,6 +180,52 @@ def scenarios(sample):
     modes.append(board.session(40, "interrupted", tool="claude", key="claude:mode-int",
                                permission_mode="plan"))
     add("row-modes", board.snapshot(modes), fixed)
+
+    def note(note_id, kind, text, minutes_ago, count=1):
+        return {"id": note_id, "kind": kind, "text": text, "ts": board.ts(minutes_ago),
+                "last_ts": board.ts(minutes_ago), "count": count, "source": "stop"}
+
+    def with_notes(session, *notes):
+        session["notes"] = list(notes)
+        session["notes_count"] = len(notes)
+        return session
+
+    # Always shown with an hours-old info note and sessions that need you:
+    # the needs_you and error notes sit above the sections, the info note
+    # after them.
+    add("updates-always-mixed", board.snapshot([
+        with_notes(board.session(0, "needs_you"),
+                   note(301, "needs_you", "USER_ACTION: approve the schema migration", 4)),
+        board.session(7, "needs_you"),
+        with_notes(board.session(2, "review"),
+                   note(302, "update", "**PR #57 opened** for the rollup writeup; CI is green", 300)),
+        with_notes(board.session(3, "running"),
+                   note(303, "error", "Request timed out while calling the model API.", 20, count=4)),
+        board.session(8, "running"),
+    ]), fixed + shown)
+    # Two notes of one project from two sessions: the row header names each
+    # session's title after the project; one note repeated ("seen 3 times").
+    add("two-notes-one-project", board.snapshot([
+        with_notes(board.session(0, "review", project=PROJECTS[0], cwd="/Users/dev/projects/" + PROJECTS[0]),
+                   note(311, "update", "Tests pass; the branch is ready for review", 12, count=3)),
+        with_notes(board.session(1, "review", project=PROJECTS[0], cwd="/Users/dev/projects/" + PROJECTS[0]),
+                   note(312, "update", "Tests pass; the branch is ready for review", 30)),
+    ]), fixed + shown)
+    # PR buttons on rows with and without a model tag: they stay at the
+    # trailing edge either way.
+    pr = {"kind": "pr", "ref": "#231", "url": "https://github.com/example/billing-api/pull/231",
+          "state": "OPEN", "title": "Fix missing switch case for block counter"}
+    def no_model(session):
+        # After board.session, which gives every Claude row a model.
+        session.update(model=None, context_tokens=None)
+        return session
+
+    add("row-pr-no-model", board.snapshot([
+        board.session(2, "review", tool="claude", links=[dict(pr)]),
+        no_model(board.session(9, "review", tool="claude", links=[dict(pr, ref="#232")])),
+        board.session(4, "running", tool="claude", links=[dict(pr, ref="#233")]),
+        no_model(board.session(5, "running", tool="claude", links=[dict(pr, ref="#234")])),
+    ]), fixed)
     add("banner", "{ this is not a snapshot", fixed)
     return out
 

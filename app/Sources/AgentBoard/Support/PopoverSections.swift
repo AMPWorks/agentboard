@@ -229,10 +229,11 @@ enum UpdatesFeed {
 
     /// An Updates header: the uncapped total, with how many are listed when
     /// the per-session cap leaves some out, e.g. "Updates (3)" or
-    /// "Updates (20 of 25)". The popover and the session detail both use it.
-    static func header(listed: Int, total: Int) -> String {
+    /// "Updates (20 of 25)". The popover and the session detail both use it;
+    /// the popover's split Always-shown panel passes its own `title`.
+    static func header(listed: Int, total: Int, title: String = "Updates") -> String {
         let total = max(total, listed)
-        return listed < total ? "Updates (\(listed) of \(total))" : "Updates (\(total))"
+        return listed < total ? "\(title) (\(listed) of \(total))" : "\(title) (\(total))"
     }
 
     /// The popover section header for this feed.
@@ -291,6 +292,50 @@ extension UpdatesFeed {
         }
         /// "×12 notes" on a group row, nil otherwise.
         var groupLabel: String? { isGroup ? "×\(total) notes" : nil }
+
+        /// The row header's lead: the project, else the session's title.
+        var headerTitle: String {
+            project.isEmpty ? session.displayTitle : project
+        }
+
+        /// What follows the project in the row header, so two rows of one
+        /// project tell apart: the session's title, else its branch; nil when
+        /// the project is empty (the title already leads) or there is neither.
+        var headerDetail: String? {
+            guard !project.isEmpty else { return nil }
+            let title = session.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty { return title }
+            let branch = session.branch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return branch.isEmpty ? nil : branch
+        }
+    }
+
+    /// The Always-shown panel, split so an hours-old info note never sits
+    /// above a session that needs the user: `above` (rendered before the
+    /// session sections, every row shown) holds the needs_you rows and any
+    /// row whose glyph is an error, a group with an error among its notes
+    /// included; `below` (rendered after the last section, compact) holds
+    /// the rest. Both keep feed order.
+    static func partitionForAlwaysShown(_ rows: [Row]) -> (above: [Row], below: [Row]) {
+        var above: [Row] = []
+        var below: [Row] = []
+        for row in rows {
+            if row.isNeedsYou || row.glyphKind == .error { above.append(row) } else { below.append(row) }
+        }
+        return (above, below)
+    }
+
+    /// Listed notes and open notes (uncapped) that `rows` stand for: the
+    /// "N of M" of a part of the split panel.
+    static func counts(of rows: [Row]) -> (listed: Int, total: Int) {
+        rows.reduce((0, 0)) { sum, row in (sum.0 + row.notes.count, sum.1 + max(row.total, row.notes.count)) }
+    }
+
+    /// The split panel's part titles: "Urgent updates" above and "Other
+    /// updates" below while both parts have rows, else plain "Updates".
+    static func partTitle(above: Bool, otherPartHasRows: Bool) -> String {
+        guard otherPartHasRows else { return "Updates" }
+        return above ? "Urgent updates" : "Other updates"
     }
 
     /// A session's open update/error notes, uncapped. The snapshot never
@@ -369,6 +414,16 @@ extension UpdatesFeed {
         let title: String
         let help: String
         let dismissals: [NoteDismissal]
+    }
+
+    /// One part of the split Always-shown panel clears only its own rows,
+    /// listed under "Show all" or not, so clearing the info notes below
+    /// never dismisses a needs_you note above. A part alone keeps `whole`.
+    static func partClearPlan(_ rows: [Row], whole: ClearPlan, otherPartHasRows: Bool) -> ClearPlan {
+        guard otherPartHasRows else { return whole }
+        return ClearPlan(title: "Clear these",
+                         help: "Dismiss the updates in this list only",
+                         dismissals: rows.map(\.dismissal))
     }
 
     /// With no query, "Clear all" dismisses every open note: past the

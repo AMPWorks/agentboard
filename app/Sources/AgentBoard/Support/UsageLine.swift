@@ -72,14 +72,21 @@ enum UsageLine {
         return hours < 24 ? "\(hours)h" : "\(hours / 24)d"
     }
 
-    /// `Claude · 5h 57% · 7d 70% · resets in 1h 55m`, or nil when no window
-    /// is left to show. Stale numbers read `Claude as of 3h ago · ...`, up
-    /// front so a truncated line never loses it.
+    /// The line's lead: the source's label and "usage", so the line never
+    /// reads as a session count or a context size. A label that already
+    /// says "usage" is kept as it is.
+    static func heading(_ source: UsageSource) -> String {
+        source.label.localizedCaseInsensitiveContains("usage") ? source.label : "\(source.label) usage"
+    }
+
+    /// `Claude usage · 5h 57% · 7d 70% · resets in 1h 55m`, or nil when no
+    /// window is left to show. Stale numbers read `Claude usage as of 3h
+    /// ago · ...`, up front so a truncated line never loses it.
     static func text(_ source: UsageSource, now: Date) -> String? {
         let shown = shownWindows(source, now: now)
         guard !shown.isEmpty else { return nil }
-        let head = staleAge(source, now: now).map { "\(source.label) as of \($0) ago" }
-            ?? source.label
+        let head = staleAge(source, now: now).map { "\(heading(source)) as of \($0) ago" }
+            ?? heading(source)
         var parts = [head] + shown.map(part)
         let soonest = shown.compactMap(\.resetsDate).filter { $0 > now }.min()
         if let soonest {

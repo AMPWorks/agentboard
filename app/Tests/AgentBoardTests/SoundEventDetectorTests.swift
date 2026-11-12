@@ -231,6 +231,26 @@ struct SoundEventDetectorTests {
         #expect(alertTurn.beeps == 1)
     }
 
+    /// A quiet snapshot (nothing finished, nobody newly needs you) never
+    /// asks for a sound, which resolves a file; the bookkeeping still runs,
+    /// so a later rising denial plays exactly once.
+    @Test func aQuietSnapshotNeverAsksWhichEventsHaveASound() {
+        var detector = primed(row("a", denials: [(5, before)]))
+        var asked: [AttentionEvent] = []
+        let quiet = detector.feed(row("a", denials: [(5, before)]), sounds: { asked.append($0); return true })
+        #expect(quiet.isEmpty)
+        #expect(asked.isEmpty)
+        // The denial high-water mark kept up: a new denial plays once.
+        let rose = detector.feed(row("a", denials: [(6, t1), (5, before)]), sounds: { asked.append($0); return true })
+        #expect(rose == [.denied])
+        #expect(asked.isEmpty)
+        #expect(detector.feed(row("a", denials: [(6, t1), (5, before)])).isEmpty)
+        // A finished turn asks about turn-finished only.
+        _ = detector.feed(row("a", "review", denials: [(6, t1), (5, before)], finished: t2), finished: ["a"],
+                          sounds: { asked.append($0); return true })
+        #expect(asked == [.turnFinished])
+    }
+
     @Test func aRunningReviewFlapWithAnUnchangedTurnIsSilent() {
         var detector = primed(row("a", "running"))
         let review = row("a", "review", finished: t1, reason: "PR o/r#7 awaits your review", awaitsPR: true)

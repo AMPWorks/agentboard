@@ -437,7 +437,11 @@ A turn that failed on an API error (Claude Code's `StopFailure`) is `needs_you` 
 `error` note under Updates (repeats bump its count). The app shows `waiting_reason` in plain words
 (display only; the JSON is unchanged): "Turn failed (rate limit): …" for a failure, "Needs
 permission: Bash" for a bare tool name on a `needs_you` session, and a sentence for a raw
-notification type such as `permission_prompt`. A usage-limit pause that needs you
+notification type such as `permission_prompt`. A glyph leads the line by kind
+(`SessionDisplay.reasonKind`, from the same raw prefixes): a lock for a permission prompt, a
+question bubble for a question, plan approval, link or input request, a warning triangle for a
+failed turn; an MCP server's "<server>: <question>" gets none, since the snapshot cannot tell it
+from other text. A usage-limit pause that needs you
 (`quota_auto_resume_stale`: the limit reset while the Mac slept and the wait needs Enter;
 `quota_auto_resume_disabled`: auto-resume is off) is `needs_you` too; an auto-resume
 (`quota_auto_resume_fired`) or any new activity makes the session `running` again. An MCP server
@@ -460,7 +464,8 @@ A loop session (its last prompt starts with a `note_unattended_prefixes` entry, 
 crons its last Stop listed in `session_crons`) idling between ticks is not waiting on you: it is
 `running` with "Loop idle between ticks" while its process is alive. A session whose last Stop
 listed background tasks still in flight (Claude Code's `background_tasks`: subagents, shells,
-monitors, ...) is `running` with "Waiting on N background task(s): <types>" until they finish,
+monitors, ...) is `running` with "Waiting on N background task(s): <types>" (in the app, an
+hourglass "N tasks" tag on the row's repo line instead of a reason line) until they finish,
 then "Your turn". A background agent finishing after the turn, a compaction (including a
 `/compact` typed at an idle prompt), a `cd` at an idle prompt, a local-only command typed at an
 idle prompt (`/compact`, `/model`, a bare `/plan`, ...), a model switch (at any time) and a
@@ -552,7 +557,9 @@ these generic mechanisms, all handled in `core/agentboard/links.py`:
    A PR reported this way counts as the session's own work (see below). `--branch` records the
    PR's head branch (default: the session's current branch); a link keeps its branch when the
    session later moves on. A status text is shown as the row's title while it lasts, with the
-   session's own title under it. `--model` (any model id) and `--context-tokens` (the session's
+   session's own title under it; on a Needs you row the title leads and the status text is under
+   it (`SessionDisplay.primaryTitle`), so a status set while the session worked never stands in
+   red for what it needs now. `--model` (any model id) and `--context-tokens` (the session's
    context size now) fill the row's model · context tag for an agent AgentBoard cannot read
    itself; give any of `--text`, `--model` and `--context-tokens`, and a context size never
    replaces a newer measurement (see [Plan usage and context](#plan-usage-and-context)). `agentboard title` names the session until the work moves on
@@ -623,7 +630,8 @@ like anyone else's.
 
 **PR buttons.** Popover and dashboard rows show one small button per PR that is not merged or closed (`#N`, green open,
 gray while its state is unknown, outlined when it awaits you) that opens it in the browser without
-focusing the terminal. Merged and closed PRs get no button by default; **Settings → General →
+focusing the terminal. They are the repo line's last item (`SessionRowLayout.repoTags`), after the
+tmux, background-task and model tags, so they sit at the same place on every row. Merged and closed PRs get no button by default; **Settings → General →
 Show closed and merged PRs** (`showClosedAndMergedPRs`, off by default) adds them, purple merged
 and red closed. Past three shown PRs a "+N" (counting only shown PRs) opens the detail view, whose
 Links section lists every link with its state either way. The setting is display-only: the
@@ -755,7 +763,7 @@ references already seen ("Tick: PR #4 is in hand; the plan is ready for your rev
 ordinals such as "step #2" are not references. A
 repeat of an open note (same session, same kind, same first 200 characters once timestamps, clock
 times, durations and tick counts are ignored; errors compare their first line only) bumps its count
-(shown as `×N`) instead of adding a row; a repeat of a dismissed note starts a new one.
+(shown as "seen N times") instead of adding a row; a repeat of a dismissed note starts a new one.
 
 **Injected prompts are not replies.** Claude Code starts some turns itself: a background task
 finishing (`<task-notification>`), a message from another agent (`<agent-message ...>`) or
@@ -836,7 +844,14 @@ you, and the button or the panel's **Hide** closes it. Settings → Popover → 
 picks when it shows: **Hidden until clicked** (default; `updatesPanelMode` `hiddenUntilClicked`)
 closes it again every time the popover opens, **Remember last state** (`rememberLast`) keeps it
 open or closed across opens and restarts (stored under `updatesPanelLastShown`), and **Always
-shown** (`alwaysShown`) is the earlier layout with no button. **Updates text size** (`updatesFontSize`:
+shown** (`alwaysShown`) shows it with no button, split in two
+(`UpdatesFeed.partitionForAlwaysShown`): `needs_you` rows and error rows (a grouped row with an
+error among its notes included) sit above the sections with no compact limit, and the rest follow
+the last section with the compact limit and their own **Show all N**, so an hours-old info note
+never sits above a session that needs you. Each part has its own header ("Urgent updates" and
+"Other updates" while both have rows, else "Updates") at the session headers' fixed caption size
+rather than the Updates text size, no card, and a **Clear these** button that dismisses only its
+own rows (a part alone keeps **Clear all** / **Clear matching**). **Updates text size** (`updatesFontSize`:
 `small`, `default`, `large`; rows get more padding as the text grows) and **Updates listed before
 Show all** (`updatesCompactLimit`: 3, 5 or 10, default 3) shape the panel. While the panel is closed
 the popover lists no updates at all. The button turns red (`SessionColor.needsYou`) while any
@@ -848,8 +863,9 @@ and the panel is closed, a line under the search field says how many updates mat
 to open the panel; an open panel whose query keeps no update says so instead of disappearing.
 
 The panel has a count and a clear button: each row shows the
-kind (red bubble for needs you, red triangle for an error), the project, one line of the message (its first marker line, `USER_ACTION:` by default, when it
-has one; otherwise its first line: the snapshot's `headline`), `×N` and the time; a click opens the dashboard on the owning session, scrolled to that note's full text
+kind (red bubble for needs you, red triangle for an error), the project followed by the session's
+title (else its branch, so two notes of one project tell apart), one line of the message (its first marker line, `USER_ACTION:` by default, when it
+has one; otherwise its first line: the snapshot's `headline`), "seen N times" for a repeated note and the time; a click opens the dashboard on the owning session, scrolled to that note's full text
 and outlined (the session's context menu still has Focus), the chevron expands the full text in
 place, and (x) dismisses it. The section is compact so it never pushes the sessions out of view: it lists
 every `needs_you` note, but at most 3 other rows (`updatesCompactLimit`), with **Show all N** to expand it in place and
@@ -926,12 +942,13 @@ icon or notifications, but a new one can play an optional sound (see [Sounds](#s
 ## Plan usage and context
 
 **Plan usage.** The popover footer (above its buttons) and the dashboard sidebar (under the color
-key) show one line per usage source that has numbers, led by the source's name, such as
-`Claude · 5h 57% · 7d 70% · resets in 1h 55m` or `Codex · 5h 12% · 7d 31%`: the used percentage
+key) show one line per usage source that has numbers, led by the source's name and "usage"
+(`UsageLine.heading`; a label that already says usage is kept as is), such as
+`Claude usage · 5h 57% · 7d 70% · resets in 1h 55m` or `Codex usage · 5h 12% · 7d 31%`: the used percentage
 of each limit window, in the source's order, and when the soonest one resets. A line turns orange
 at 80% and red at 95% on any window. Hover it for each window's reset time, the file the numbers
 came from and how old they are; once they are over an hour old the line says so
-(`Claude as of 3h ago · ...`), because a source is only as fresh as its last report on this Mac
+(`Claude usage as of 3h ago · ...`), because a source is only as fresh as its last report on this Mac
 (use on another app or machine is missing until then). A window whose reset time has passed is
 left out until newer numbers arrive; a spend window with dollars shows as `spend limit $314 of
 $500`. Nothing about a plan, a billing model or a window name is built in: windows are labelled
@@ -1129,6 +1146,15 @@ edge for 320 pt, the popover moves left just enough to stay on screen. Double-cl
 Settings → Popover size → **Reset size**, for the default height and the full width. Session rows wrap
 a long title, status, branch or waiting reason onto more lines instead of truncating it.
 
+The stored height is a cap, not a floor: with **Fit height to active sessions** off the list is
+`min(stored height, content + 8 pt)`, clamped to 240 pt and the screen
+(`PopoverSizing.fittedHeight`), so a board with no session or a row or two shrinks to its content
+instead of standing mostly blank. The content is measured over everything the list renders (every
+section header and row, the empty-board note, both Updates parts), not only the active sections
+auto-expand fits. Until that measurement arrives (the first frame of an open) the list shows the
+stored height, so a full board never opens short and jumps taller. A grip drag still stores its height; the list grows to it once the content fills
+it.
+
 The app stores the size in its defaults (`io.github.agentboard`): `popoverHeight` (list height
 in points, default 388), `popoverWidth` (points; 0 until the grip is dragged sideways) and
 `popoverAutoWidth` (default true; dragging the width sets it false, the Settings toggle **Use the
@@ -1138,8 +1164,9 @@ screen allows is shrunk for display only, so it returns on the larger display: a
 drag leaves the stored height alone, and a VoiceOver adjust step stores a new size only when it
 actually changes the shown one. With **Fit height to active
 sessions** (`popoverAutoExpand`, default false) the list is as tall as the Needs you, Review and
-Running sections (plus the Updates panel when shown), within the same
-bounds; while a query is set, everything it shows. Unconcluded, Snoozed and Done never count, and
+Running sections (plus the Updates panel when shown; with the panel **Always shown**, only its upper
+part of needs_you and error updates, since the other updates come after every section and fitting
+them would fit the whole board), within the same bounds; while a query is set, everything it shows. Unconcluded, Snoozed and Done never count, and
 changes under 4 pt are ignored. In that mode the grip changes only the width.
 
 MenuBarExtra sizes its panel to the content only when it opens, so the app sets the panel's frame

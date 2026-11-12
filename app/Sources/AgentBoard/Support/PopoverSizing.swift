@@ -95,6 +95,23 @@ enum PopoverSizing {
         clamp(height: contentBottom.map { $0 + bottomPadding } ?? 0, max: upper)
     }
 
+    /// The list height with auto-expand off: the stored height is a cap,
+    /// not a floor, so a popover with little to show (no session, one row)
+    /// shrinks to its content instead of standing mostly blank.
+    /// `contentBottom` is the bottom of everything the list renders (every
+    /// section header, row, empty state and Updates part, not only the
+    /// active sections auto-expand fits), so nothing is ever cut by the
+    /// shrink. Clamped like every height: never below `minHeight`, never
+    /// past the screen. Nil (not measured yet, the first frame of an open)
+    /// is the stored height, so a full board opens at its size and only a
+    /// short one shrinks once measured, never a jump up from the minimum;
+    /// 0 (measured, nothing rendered) is the minimum.
+    static func fittedHeight(stored: CGFloat, contentBottom: CGFloat?, bottomPadding: CGFloat = listPadding,
+                             max upper: CGFloat) -> CGFloat {
+        guard let contentBottom else { return clamp(height: stored, max: upper) }
+        return clamp(height: min(stored, contentBottom + bottomPadding), max: upper)
+    }
+
     /// The auto height to show next: `previous` unless `measured` moved by
     /// at least `autoThreshold`.
     static func settledAutoHeight(previous: CGFloat?, measured: CGFloat) -> CGFloat {

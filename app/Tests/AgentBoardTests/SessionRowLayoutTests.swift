@@ -133,4 +133,89 @@ struct SessionRowLayoutTests {
         #expect(SessionDisplay.reasonIsActionable(Fixtures.decoded("c", "review")))
         #expect(!SessionDisplay.reasonIsActionable(Fixtures.decoded("d", "running")))
     }
+
+    @Test func reasonKindFollowsTheRawPrefix() {
+        func kind(_ raw: String, _ state: String = "needs_you") -> SessionDisplay.ReasonKind? {
+            SessionDisplay.reasonKind(Fixtures.decoded("a", state, extra: ["waiting_reason": raw]))
+        }
+        #expect(kind("permission_prompt") == .permission)
+        #expect(kind("permission_prompt: Claude needs your permission to use Bash") == .permission)
+        #expect(kind("Bash") == .permission)
+        #expect(kind("mcp__github__create_issue") == .permission)
+        for raw in ["elicitation_dialog", "elicitation_dialog: Confirm the migration?", "elicitation_url_dialog",
+                    "agent_needs_input", "question", "plan approval"] {
+            #expect(kind(raw) == .question, "\(raw)")
+        }
+        for raw in ["StopFailure: uncaught ValueError", "rate_limit: API Error: Rate limit reached",
+                    "server_error", "overloaded: upstream busy"] {
+            #expect(kind(raw) == .failure, "\(raw)")
+        }
+        // An idle prompt, free text (an MCP question reads like any other
+        // text), a near-miss error type, a blank reason: no glyph.
+        for raw in ["idle_prompt", "github: Which repo?", "rate_limited_but_not_a_type: x", "  ",
+                    "question: not a tool reason", "Claude needs your permission to use Bash"] {
+            #expect(kind(raw) == nil, "\(raw)")
+        }
+        // A bare tool name is a permission prompt only on a Needs you row.
+        #expect(kind("Summary", "review") == nil)
+        #expect(SessionDisplay.reasonKind(Fixtures.decoded("i", "interrupted")) == nil)
+        #expect(SessionDisplay.reasonKind(Fixtures.decoded("r", "running")) == nil)
+        // A one-word needs_you note headline is the note's text, not a tool.
+        let note: [String: Any] = ["id": 1, "kind": "needs_you", "text": "**Blocked**",
+                                   "ts": "2026-10-15T00:00:00Z", "last_ts": "2026-10-15T00:00:00Z"]
+        let headline = Fixtures.decoded("d", "needs_you", extra: ["waiting_reason": "Blocked", "notes": [note]])
+        #expect(SessionDisplay.reasonKind(headline) == nil)
+    }
+
+    @Test func reasonKindsHaveDistinctGlyphs() {
+        let glyphs = SessionDisplay.ReasonKind.allCases.map(\.systemImage)
+        #expect(Set(glyphs).count == glyphs.count)
+    }
+
+    /// The PR buttons stay at the trailing edge whatever optional tags the
+    /// row has, so they line up from row to row.
+    @Test(arguments: [false, true], [false, true])
+    func thePRButtonsAreAlwaysLast(model: Bool, tmux: Bool) {
+        var extra: [String: Any] = ["links": [["kind": "pr", "ref": "o/r#7", "url": "https://example.com/pr/7"]]]
+        if model { extra["model"] = "claude-opus-5-5" }
+        if tmux {
+            extra["tmux"] = true
+            extra["tmux_session"] = "work"
+        }
+        let tags = SessionRowLayout.repoTags(for: Fixtures.decoded("s1", "running", alive: true, extra: extra))
+        #expect(tags.last == .prs)
+        #expect(tags.contains(.model) == model)
+        #expect(tags.contains(.tmux) == tmux)
+        #expect(tags.firstIndex(of: .prs) == tags.count - 1)
+    }
+
+    /// A Running row's background-task reason is a tag on line 2, not a
+    /// line of its own, on every row whatever the session count.
+    @Test func aRunningRowFoldsItsBackgroundTasksIntoARepoTag() {
+        func row(_ reason: String?, _ state: String = "running") -> Session {
+            var extra: [String: Any] = ["title": "Fix the hook", "branch": "main"]
+            if let reason { extra["waiting_reason"] = reason }
+            return Fixtures.decoded("s1", state, alive: true, extra: extra)
+        }
+        for (reason, count) in [("Waiting on 1 background task", 1), ("Waiting on 1 background task: shell", 1),
+                                ("Waiting on 3 background tasks: shell, subagent", 3),
+                                ("Waiting on 12 background tasks", 12)] {
+            let session = row(reason)
+            #expect(SessionRowLayout.backgroundTaskCount(session) == count, "\(reason)")
+            #expect(SessionRowLayout.lines(for: session) == [.title, .repo], "\(reason)")
+            #expect(SessionRowLayout.repoTags(for: session) == [.background, .prs], "\(reason)")
+        }
+        #expect(SessionRowLayout.backgroundTagText(1) == "1 task")
+        #expect(SessionRowLayout.backgroundTagText(3) == "3 tasks")
+        // Another reason, another state, or a near miss keeps its line.
+        for session in [row("Loop idle between ticks"), row("Waiting on 0 background tasks"),
+                        row("Waiting on the CI"), row("Waiting on 2 background taskforce"),
+                        row("Waiting on 2 background tasksmith"), row("Waiting on 2 background tasks still pending"),
+                        row("Waiting on 2 background tasks", "review")] {
+            #expect(SessionRowLayout.backgroundTaskCount(session) == nil)
+            #expect(SessionRowLayout.lines(for: session).last == .reason)
+            #expect(!SessionRowLayout.repoTags(for: session).contains(.background))
+        }
+        #expect(SessionRowLayout.backgroundTaskCount(row(nil)) == nil)
+    }
 }
