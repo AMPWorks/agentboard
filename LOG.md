@@ -737,3 +737,42 @@ renamed symbol cannot slip past the test. The dashboard's button list moved into
 session shows; a new button widens every row instead of overflowing. The trade-off is width: the
 popover text column always loses what hovering used to take (about 48pt with the gap), and a
 dashboard row about 114pt, which makes the narrow dashboard list column's truncation worse.
+
+## 2026-11-12 00:07:43 UTC — Popover anchor: never the panel's own frame, placed on every open
+
+The popover was seen opening about 990 pt wide with its right edge near the menu bar icon and its
+left edge far to the left, when it should start at the icon and run to the screen's right edge.
+Two faults combined. The icon was found as the first app window whose class name contains
+`StatusBarWindow`, but AppKit keeps several `NSStatusBarWindow`s per status item: on a test Mac,
+one icon-sized window on the menu bar and six more at y -33 on no screen. When one of those came
+first, the lookup failed and the placer fell back to the popover's own frame as the "icon", so a
+panel that MenuBarExtra had put at a wrong x kept that x and sized itself from it. And nothing
+placed the panel on a reopen: placement ran on a content size change, a resize or the panel
+becoming key, but not after a same-size move, so MenuBarExtra's own positioning on reopen stood.
+
+Anchor selection is now the pure `PopoverSizing.resolveAnchor`: of the status item windows (the
+popover's excluded), only icon-sized ones on their screen's menu bar count, the one on the
+popover's display wins, and with none the last icon position read is used (`remembered`); with
+nothing known the panel is left where SwiftUI put it rather than anchored to itself (the user's
+choice over anchoring at the click point). The placer owns that one anchor per open; the view
+reads it for the width and `place` uses it for the origin, so the two can no longer come from
+separate reads. Every placement (the deferred one on open, becoming key, a move, a resize, a
+content size change, a screen change) re-reads the anchor for the panel's current screen first, so
+a panel MenuBarExtra opens on another display is anchored there whatever order AppKit sends
+didMove and didChangeScreen in. A status item window keeps only the screen AppKit reports: the
+copies all report `isVisible`, so visibility cannot tell them apart, and on a display arranged
+below the main one a copy at 0,-33 sits exactly where an icon would, so giving a screenless window
+a screen from its frame would let one win. A remembered position keeps its screen's full frame and
+is dropped once no current screen has that frame (unplugged, rearranged, new resolution); its
+visible frame is re-read from that screen, since a Dock or menu bar auto-hide change alters the
+visible frame without moving the icon's display. Fighting another placer is the pure
+`PopoverSizing.placeDecision`: only moves and resizes that undid the app's frame count, six in a
+row (each within a second of the last) are corrected and the seventh gives up until they stop,
+while content size changes, opens and screen changes always place, so giving up never leaves the
+panel at a stale size. Each open logs a `popover.open` line (from the first placement with that
+open's panel up, before its first `popover.place` line, not from `onAppear`, where the window is
+still the last open's) and each frame change a `popover.place` line at `notice`, with every
+candidate window's frame and screen, so the next report can be read from
+`agentboard logs --app --grep popover`. The thresholds (160 x 60 pt for "icon-sized") are generous
+guesses: a status item with a long text label would not count and the panel would keep its
+remembered or SwiftUI position, which the log would show.
