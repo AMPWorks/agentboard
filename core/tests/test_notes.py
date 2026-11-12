@@ -354,6 +354,53 @@ class RecordNoteTests(AgentBoardTestCase):
             notes.record_note(self.conn, "claude", "s1", "update", "  ", "cli", T1)
 
 
+class DismissSourcesTests(AgentBoardTestCase):
+    def _record(self, source, kind="needs_you", session="s1"):
+        return notes.record_note(self.conn, "claude", session, kind, f"USER_ACTION: from {source}",
+                                 source, T1)
+
+    def test_sources_narrow_the_dismissal(self):
+        self.conn.execute("BEGIN")
+        for source in notes.SOURCES:
+            self._record(source)
+        dismissed = notes.dismiss(self.conn, T2, session=("claude", "s1"), kinds=["needs_you"],
+                                  sources=["stop", "backfill"])
+        self.conn.execute("COMMIT")
+        self.assertEqual(dismissed, 2)
+        self.assertEqual(sorted(r["source"] for r in open_notes(self.conn)),
+                         ["cli", "inbox", "provider"])
+
+    def test_unknown_or_empty_sources_dismiss_nothing(self):
+        self.conn.execute("BEGIN")
+        self._record("stop")
+        self.assertEqual(notes.dismiss(self.conn, T2, sources=[]), 0)
+        self.assertEqual(notes.dismiss(self.conn, T2, sources=["elsewhere"]), 0)
+        self.conn.execute("COMMIT")
+        self.assertEqual(len(open_notes(self.conn)), 1)
+
+    def test_clear_needs_you_keeps_other_kinds_sessions_and_sources(self):
+        self.conn.execute("BEGIN")
+        self._record("stop")
+        self._record("backfill", kind="update")
+        self._record("cli")
+        self._record("stop", session="s2")
+        cleared = notes.clear_needs_you(self.conn, T2, "claude", "s1")
+        self.conn.execute("COMMIT")
+        self.assertEqual(cleared, 1)
+        self.assertEqual(
+            [(r["session_id"], r["kind"], r["source"]) for r in open_notes(self.conn)],
+            [("s1", "update", "backfill"), ("s1", "needs_you", "cli"), ("s2", "needs_you", "stop")],
+        )
+
+    def test_prompt_clears_needs_you_only_for_human_or_unclassified_text(self):
+        self.assertTrue(notes.prompt_clears_needs_you("human", "approved"))
+        self.assertTrue(notes.prompt_clears_needs_you(None, "approved"))
+        for kind in ("loop", "cron", "injected"):
+            self.assertFalse(notes.prompt_clears_needs_you(kind, "tick"))
+        self.assertFalse(notes.prompt_clears_needs_you("human", None))
+        self.assertFalse(notes.prompt_clears_needs_you("human", ""))
+
+
 class ConfigTests(AgentBoardTestCase):
     def test_load_config_missing_and_bad(self):
         self.assertEqual(notes.load_config(self.agentboard_home), {})
@@ -476,6 +523,205 @@ class ClassifyPromptsTests(AgentBoardTestCase):
         self.assertEqual(note["kind"], "update")
         self.assertEqual(self.kinds()[:2], ["loop", "injected"])
 
+
+
+class RebuildClearsNeedsYouTests(AgentBoardTestCase):
+    """notes.rebuild replays the hook's prompt clear and `mark`'s
+    done/snooze clear, so a reset rebuild does not reopen answered notes."""
+
+    ASK = "USER_ACTION: approve the plan"
+
+    def event(self, event, text, ts, kind=None, session_id="s1", agent_id=None):
+        return self.conn.execute(
+            "INSERT INTO events(ts, tool, session_id, event, agent_id, text, prompt_kind) "
+            "VALUES (?, 'claude', ?, ?, ?, ?, ?)",
+            (ts, session_id, event, agent_id, text, kind),
+        ).lastrowid
+
+    def stop(self, ts, text=ASK, session_id="s1"):
+        return self.event("Stop", text, ts, session_id=session_id)
+
+    def prompt(self, text, ts, kind=None, session_id="s1", agent_id=None):
+        return self.event("UserPromptSubmit", text, ts, kind=kind, session_id=session_id,
+                          agent_id=agent_id)
+
+    def rows(self):
+        return [(r["kind"], r["dismissed_at"], r["last_event_id"])
+                for r in self.conn.execute("SELECT * FROM notes ORDER BY id")]
+
+    def test_human_prompt_after_the_request_dismisses_it(self):
+        self.stop(T1)
+        self.prompt("approved", T2)
+        stats = notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual(self.rows(), [("needs_you", T2, 1)])
+        self.assertEqual(stats["cleared"], 1)
+
+    def test_unclassified_prompt_dismisses_and_loop_cron_injected_do_not(self):
+        self.stop(T1)
+        self.prompt("# Autonomous loop tick", T2)
+        self.prompt("check the deploy", T2, kind="cron")
+        self.prompt("<task-notification>done</task-notification>", T2)
+        self.prompt("subagent says hi", T2, agent_id="a1")
+        notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual(self.rows(), [("needs_you", None, 1)])
+        # A legacy prompt the classifier leaves human (NULL until it runs).
+        self.prompt("ok, go", T3)
+        notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual([r[1] for r in self.rows()], [T3])
+
+    def test_repeat_after_the_prompt_is_a_new_open_row(self):
+        self.stop(T1)
+        self.prompt("one question first", T2)
+        self.stop(T3)
+        notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual(self.rows(), [("needs_you", T2, 1), ("needs_you", None, 3)])
+
+    def test_reset_rebuild_agrees_with_the_hook(self):
+        self.stop(T1)
+        self.prompt("approved", T2)
+        notes.rebuild(self.conn, {}, reset=True)
+        first = self.rows()
+        notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual(self.rows(), first)
+
+    def test_prompt_in_another_session_or_cli_notes_are_left_alone(self):
+        self.stop(T1)
+        self.conn.execute("BEGIN")
+        notes.record_note(self.conn, "claude", "s1", "needs_you", "USER_ACTION: from cli", "cli", T1)
+        self.conn.execute("COMMIT")
+        self.prompt("unrelated", T2, session_id="s2")
+        notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual(sorted((r["source"], r["dismissed_at"]) for r in self.conn.execute(
+            "SELECT * FROM notes")), [("backfill", None), ("cli", None)])
+
+    def test_plain_rebuild_clears_an_older_open_note_at_a_later_prompt(self):
+        # An open note from an earlier rebuild (event 3), an older prompt
+        # (event 2) that cannot clear it, then a newer one (event 4) that does.
+        self.prompt("set it up", T1)
+        self.prompt("# Autonomous loop tick", T1)
+        self.stop(T2)
+        self.prompt("approved", T3)
+        self.conn.execute("UPDATE notes_meta SET value=3 WHERE key='hook_from'")
+        notes.rebuild(self.conn, {})
+        self.assertEqual(self.rows(), [("needs_you", None, 3)])
+        self.conn.execute("UPDATE notes_meta SET value=4 WHERE key='hook_from'")
+        notes.rebuild(self.conn, {})
+        self.assertEqual(self.rows(), [("needs_you", T3, 3)])
+
+    def mark(self, status, at, session_id="s1"):
+        self.conn.execute(
+            "INSERT INTO triage(tool, session_id, status, until, updated_at) VALUES ('claude', ?, ?, NULL, ?)",
+            (session_id, status, at),
+        )
+
+    def test_done_or_snoozed_session_has_its_older_requests_dismissed(self):
+        self.stop(T1)
+        self.stop(T1, session_id="s2")
+        self.stop(T1, session_id="s3")
+        self.mark("done", T2)
+        self.mark("snoozed", T2, session_id="s2")
+        self.mark("open", T2, session_id="s3")
+        stats = notes.rebuild(self.conn, {}, reset=True)
+        got = {r["session_id"]: r["dismissed_at"] for r in self.conn.execute("SELECT * FROM notes")}
+        self.assertEqual(got, {"s1": T2, "s2": T2, "s3": None})
+        self.assertEqual(stats["cleared"], 2)
+
+    def test_request_after_the_mark_stays_open(self):
+        self.stop(T3)
+        self.mark("done", T2)
+        notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual(self.rows(), [("needs_you", None, 1)])
+
+    def test_repeat_after_the_mark_stays_open_in_either_shape(self):
+        # [Stop at T1, mark done at T2, Stop with the same marker at T3].
+        self.stop(T1)
+        self.stop(T3)
+        self.mark("done", T2)
+        # Pre-change shape: no row the mark dismissed, so the replay bumps
+        # one note to last_ts T3 (count 2), which is after the mark.
+        notes.rebuild(self.conn, {}, reset=True)
+        rows = self.conn.execute("SELECT count, last_ts, dismissed_at FROM notes").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [(2, T3, None)])
+        # Post-change shape: the mark dismissed the T1 note and the T3 Stop
+        # opened a new one; a reset keeps one dismissed and one open row.
+        self.conn.execute("DELETE FROM notes")
+        self.conn.execute("BEGIN")
+        notes.record_note(self.conn, "claude", "s1", "needs_you", self.ASK, "stop", T1, event_id=1)
+        notes.clear_needs_you(self.conn, T2, "claude", "s1")
+        notes.record_note(self.conn, "claude", "s1", "needs_you", self.ASK, "stop", T3, event_id=2)
+        self.conn.execute("COMMIT")
+        notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual(self.rows(), [("needs_you", T2, 1), ("needs_you", None, 2)])
+
+    def test_plain_rebuild_with_nothing_to_replay_still_runs_the_triage_clear(self):
+        # A note the hook recorded (not a replayed one), on a session marked
+        # done after it, with rebuilt_through already at hook_from.
+        event_id = self.stop(T1)
+        self.conn.execute("BEGIN")
+        notes.record_note(self.conn, "claude", "s1", "needs_you", self.ASK, "stop", T1,
+                          event_id=event_id)
+        self.conn.execute("COMMIT")
+        self.mark("done", T2)
+        self.conn.execute("UPDATE notes_meta SET value=0 WHERE key='hook_from'")
+        self.conn.execute(
+            "INSERT INTO notes_meta(key, value) VALUES ('rebuilt_through', 0) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        stats = notes.rebuild(self.conn, {})
+        self.assertEqual((stats["lower"], stats["upper"]), (0, 0))
+        self.assertEqual(stats["cleared"], 1)
+        self.assertEqual(self.rows(), [("needs_you", T2, event_id)])
+
+    def test_note_without_an_event_id_is_placed_by_its_ts(self):
+        # The hook clears every open stop/backfill note at a human prompt;
+        # the replay agrees for an event-less note last seen before it and
+        # leaves one last seen after it.
+        self.conn.execute("BEGIN")
+        notes.record_note(self.conn, "claude", "s1", "needs_you", "USER_ACTION: older", "backfill", T1)
+        notes.record_note(self.conn, "claude", "s1", "needs_you", "USER_ACTION: newer", "backfill", T3)
+        self.conn.execute("COMMIT")
+        self.prompt("approved", T2)
+        self.conn.execute("UPDATE notes_meta SET value=1 WHERE key='hook_from'")
+        stats = notes.rebuild(self.conn, {})
+        self.assertEqual(self.rows(), [("needs_you", T2, None), ("needs_you", None, None)])
+        self.assertEqual(stats["cleared"], 1)
+
+    def test_event_less_note_keeps_its_session_past_an_id_d_note(self):
+        # _clearable_needs_you records math.inf for an event-less note: the
+        # T2 prompt is past the id'd note, so a finite maximum would drop the
+        # session there and the T4 prompt would never clear the T3 note.
+        t4 = "2026-10-20T13:00:00.000000Z"
+        self.event("SessionStart", None, T1)  # events.id 1, the id'd note's event
+        self.conn.execute("BEGIN")
+        notes.record_note(self.conn, "claude", "s1", "needs_you", "USER_ACTION: older", "backfill", T1,
+                          event_id=1)
+        notes.record_note(self.conn, "claude", "s1", "needs_you", "USER_ACTION: newer", "backfill", T3)
+        self.conn.execute("COMMIT")
+        self.prompt("approved", T2)
+        last = self.prompt("go on", t4)
+        self.conn.execute("UPDATE notes_meta SET value=? WHERE key='hook_from'", (last,))
+        stats = notes.rebuild(self.conn, {})
+        self.assertEqual(self.rows(), [("needs_you", T2, 1), ("needs_you", t4, None)])
+        self.assertEqual(stats["cleared"], 2)
+
+    def test_timestamps_compare_as_instants_not_strings(self):
+        # A mark without a fraction half a second before a request: as
+        # strings "10:00:00.500000Z" <= "10:00:00Z", as instants it is after.
+        self.stop("2026-10-20T10:00:00.500000Z")
+        self.mark("done", "2026-10-20T10:00:00Z")
+        notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual(self.rows(), [("needs_you", None, 1)])
+        # And a millisecond mark at the same instant as the request clears it.
+        self.conn.execute("UPDATE triage SET updated_at='2026-10-20T10:00:00.500Z'")
+        notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual(self.rows(), [("needs_you", "2026-10-20T10:00:00.500Z", 1)])
+
+    def test_ts_at_or_before(self):
+        self.assertTrue(notes._ts_at_or_before("2026-10-20T10:00:00Z", "2026-10-20T10:00:00.000000Z"))
+        self.assertFalse(notes._ts_at_or_before("2026-10-20T10:00:00Z", "2026-10-20T10:00:00.000000Z",
+                                                strict=True))
+        self.assertFalse(notes._ts_at_or_before("2026-10-20T10:00:00.5Z", "2026-10-20T10:00:00Z"))
+        self.assertFalse(notes._ts_at_or_before(None, T1))
+        self.assertFalse(notes._ts_at_or_before(T1, "garbage"))
 
 if __name__ == "__main__":
     unittest.main()

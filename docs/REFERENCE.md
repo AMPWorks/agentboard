@@ -511,6 +511,8 @@ Mark a session's own triage state directly:
 agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
 ```
 
+`done` and `snooze` also dismiss the session's open `needs_you` updates (see
+[Updates](#updates-retained-notes)); `open` brings none back.
 A new prompt in a session that was marked `done` reopens it automatically; a prompt Claude Code
 injected itself (a finished background task, another agent's message; see [Updates](#updates-retained-notes)) does not.
 
@@ -808,8 +810,23 @@ when it is `0`), along with every note of a pruned session.
 **An open `needs_you` note puts its session in `needs_you`** (red icon, notification, Needs you
 section, the note's marker line as the waiting reason) until a newer prompt arrives in that
 session or you dismiss the note. Manual done and snooze still win, and a permission prompt's own
-reason wins over the note's. The note stays in Updates after a prompt releases the state; if the
-next turn repeats the request, the note's count goes up and the session is red again.
+reason wins over the note's.
+
+**An open `needs_you` note clears by itself** (it is dismissed, exactly as if you clicked its x)
+when you answer in its session or close the session out:
+
+- a parent `UserPromptSubmit` whose prompt kind is `human` (or unclassified) dismisses the
+  session's open `needs_you` notes the hook or a rebuild recorded (`source` `stop` or `backfill`).
+  A loop tick, a cron firing, an injected prompt (`<task-notification>`, another agent's message),
+  a subagent's prompt and a local-only command (`/model`, `/clear`, ...) leave them open;
+- `agentboard mark TOOL ID done` and `mark ... snooze` (the app's **Mark done** and **Snooze**)
+  dismiss the same notes; marking the session open again does not bring them back.
+
+Focusing a session from AgentBoard does not clear anything. Notes from `agentboard note`, the
+inbox or a provider are left alone (they would come back on the next refresh). A request the next
+turn repeats after a clear is a new open note, so the session is red again; a repeat while the note
+is still open raises its count. `notes --rebuild` applies the same rules while it replays, so a
+`--reset` rebuild does not reopen an answered request.
 
 In the popover, updates sit behind the **Updates** button next to the search field, so the
 popover opens on the sessions. The button shows whenever any note is open, with the count the
@@ -821,11 +838,12 @@ closes it again every time the popover opens, **Remember last state** (`remember
 open or closed across opens and restarts (stored under `updatesPanelLastShown`), and **Always
 shown** (`alwaysShown`) is the earlier layout with no button. **Updates text size** (`updatesFontSize`:
 `small`, `default`, `large`; rows get more padding as the text grows) and **Updates listed before
-Show all** (`updatesCompactLimit`: 3, 5 or 10, default 3) shape the panel. While the panel is closed,
-a `needs_you` note whose session is not in Needs you or Interrupted (marked done, snoozed, or
-answered by a newer prompt, all of which keep the note open) stays visible above the sessions as
-**Update that needs you**, whatever the search query, so a request is never hidden behind the
-button or a query kept from an earlier open. While a query is set
+Show all** (`updatesCompactLimit`: 3, 5 or 10, default 3) shape the panel. While the panel is closed
+the popover lists no updates at all. The button turns red (`SessionColor.needsYou`) while any
+session has an open `needs_you` note, counted with no query (`PopoverUpdatesSettings.openNeedsYouCount`, tinted by
+`PopoverUpdatesSettings.buttonTint`, red even while the panel is open),
+so a query kept from an earlier open never turns it grey, and its tooltip says how many need you;
+the session's own row still shows Needs you while the note holds it there. While a query is set
 and the panel is closed, a line under the search field says how many updates match, with **Show**
 to open the panel; an open panel whose query keeps no update says so instead of disappearing.
 
@@ -848,8 +866,8 @@ which. The session detail and the dashboard are not grouped or capped. The popov
 matches its own text or its session's fields (never a sibling note's text; a session's waiting
 reason and last assistant message can repeat its newest note, so a term from them keeps all of its
 notes). When a query hides an open `needs_you` note on a session in Review, Snoozed or Done, the
-notice under the search field counts it in red ("1 update needs you") while the Updates panel is
-open (closed, the note is pinned above the sessions, so the notice leaves it out), and the dashboard sidebar
+notice under the search field counts it in red ("1 update needs you"), whether the Updates panel is
+open or closed, and the dashboard sidebar
 warns the same way; a hidden session in Needs you or Interrupted is counted once, as a session. A
 session row shows a small badge with its number of open updates. Clicking it (popover or dashboard
 row) selects the session in the dashboard and scrolls its detail to its newest open `needs_you`
@@ -1120,7 +1138,7 @@ screen allows is shrunk for display only, so it returns on the larger display: a
 drag leaves the stored height alone, and a VoiceOver adjust step stores a new size only when it
 actually changes the shown one. With **Fit height to active
 sessions** (`popoverAutoExpand`, default false) the list is as tall as the Needs you, Review and
-Running sections (plus the pinned updates and the Updates panel when shown), within the same
+Running sections (plus the Updates panel when shown), within the same
 bounds; while a query is set, everything it shows. Unconcluded, Snoozed and Done never count, and
 changes under 4 pt are ignored. In that mode the grip changes only the width.
 

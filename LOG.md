@@ -776,3 +776,40 @@ candidate window's frame and screen, so the next report can be read from
 `agentboard logs --app --grep popover`. The thresholds (160 x 60 pt for "icon-sized") are generous
 guesses: a status item with a long text label would not count and the panel would keep its
 remembered or SwiftUI position, which the log would show.
+## 2026-11-12 00:21:44 UTC — Needs-you updates clear on an answer and stop pinning to the popover
+
+With the Updates panel closed, the popover used to pin every needs_you update whose session was
+no longer red (done, snoozed or answered) above the sessions, so a request was never hidden behind
+the button. In practice the strip stayed on screen long after the request was handled, because a
+needs_you note only cleared by dismissal. Both halves changed. The strip is gone: the Updates
+button turns red while any session has an open needs_you note, counted with no query so a kept
+search never turns it grey, and the filter notice now counts a query-hidden needs_you note whether
+the panel is open or closed. The session's own row still shows Needs you while the note holds it
+there.
+
+The note now clears by itself. A parent prompt classified human (or left unclassified) dismisses
+the session's open needs_you notes that came from its own Stop messages, inside the hook's
+transaction under a savepoint like the note writer, so a failure never drops the event. A loop
+tick, a cron firing, an injected prompt, a subagent's prompt and a local-only command do not count
+as an answer. `agentboard mark done|snooze` (the app's buttons) does the same; marking the session
+open again brings nothing back. Notes from `agentboard note`, the inbox or a provider are left
+alone, since a provider would re-record them on its next refresh and the note would flap. Focusing
+a session from AgentBoard deliberately clears nothing: looking is not answering. Clearing reuses
+dismissal rather than a new resolved state, so the dashboard and the Updates list drop the note
+exactly as if its x were clicked.
+
+`notes --rebuild` replays both rules so a `--reset` rebuild agrees with the hook: a human prompt
+dismisses the session's open notes last seen before it, by event id, and a session whose triage is
+done or snoozed has the notes last seen at or before the mark dismissed. Only the current triage
+row exists, so a mark that was later undone cannot be replayed; the notes it dismissed at the time
+stay dismissed anyway, because a reset never deletes dismissed notes. Running the reset once after
+installing clears needs_you notes answered before this change.
+
+Review follow-up: the done/snooze replay runs on every rebuild, outside the event window and
+whatever `--days` says, because it is what clears notes left open on sessions marked before this
+change; it is idempotent. Note timestamps and the mark's time are compared as parsed instants,
+not ISO strings, since a fraction-less or millisecond value would otherwise mis-order within a
+second. A note without an event id is placed against a prompt by its `last_ts`, so the replay
+agrees with the hook, which clears every open one. The hook calls the same prompt predicate the
+replay uses, and the Updates button's red/accent/grey choice is one tested helper
+(`PopoverUpdatesSettings.buttonTint`).

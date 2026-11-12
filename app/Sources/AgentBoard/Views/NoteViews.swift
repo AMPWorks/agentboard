@@ -146,39 +146,6 @@ struct UpdatesSectionView: View {
     }
 }
 
-/// With the Updates panel closed, the needs_you updates whose session is
-/// not red (`PopoverUpdatesSettings.pinnedRows`), so a request is never
-/// hidden behind the button.
-struct PinnedUpdatesView: View {
-    let rows: [UpdatesFeed.Row]
-    @ObservedObject var store: SnapshotStore
-    var fontSize: UpdatesFontSize = .standard
-    let showAll: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(rows.count == 1 ? "Update that needs you" : "Updates that need you (\(rows.count))")
-                    .font(fontSize.text.bold())
-                    .foregroundStyle(.secondary)
-                    .help("Requests from sessions that are not in Needs you (done, snoozed, or answered since); dismiss one once it is handled")
-                Spacer()
-                Button("Show all updates") { showAll() }
-                    .buttonStyle(.plain)
-                    .font(fontSize.text)
-                    .foregroundStyle(.secondary)
-                    .help("Open the Updates panel with every open update")
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 4)
-            ForEach(rows) { row in
-                UpdateRowView(row: row, store: store, fontSize: fontSize)
-                    .padding(.horizontal, 4)
-            }
-        }
-    }
-}
-
 /// One row of the popover feed: a single note, or a session's grouped
 /// update/error notes. A click opens the dashboard on the owning session,
 /// scrolled to the note's full text (a group: its newest note; a line of an

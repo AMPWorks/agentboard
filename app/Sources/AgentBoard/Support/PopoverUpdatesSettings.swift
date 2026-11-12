@@ -123,6 +123,38 @@ enum PopoverUpdatesSettings {
         UpdatesFeed.total(from: sessions, query: SessionSearch("")) > 0
     }
 
+    /// Open needs_you notes across every session, whatever the popover
+    /// query (`SessionSearch("")`, the rule `hasOpenUpdates` uses), so a
+    /// query kept from an earlier open never hides a request. The snapshot
+    /// never caps out a needs_you note, so the listed notes are all of them.
+    static func openNeedsYouCount(_ sessions: [Session]) -> Int {
+        let all = SessionSearch("")
+        return sessions.reduce(0) { sum, session in
+            sum + session.notes.filter { $0.kind == .needsYou && all.matches($0, in: session) }.count
+        }
+    }
+
+    /// How the Updates button is tinted.
+    enum ButtonTint: Equatable, Sendable {
+        /// Red: some session has an open needs_you note.
+        case needsYou
+        /// The accent colour: the panel is open.
+        case accent
+        /// Grey.
+        case plain
+    }
+
+    /// The Updates button's tint from `needsYou` (`openNeedsYouCount`,
+    /// unfiltered) and whether the panel is open: red whenever any session
+    /// has an open needs_you note (on a session in any state, done and
+    /// snoozed ones included), which beats the accent tint of an open panel;
+    /// with the panel closed nothing else in the popover lists these notes,
+    /// so the button is where they show.
+    static func buttonTint(needsYou: Int, shown: Bool) -> ButtonTint {
+        if needsYou > 0 { return .needsYou }
+        return shown ? .accent : .plain
+    }
+
     /// The Updates button shows whenever there is any open update (with or
     /// without a query, so the search row does not shift while typing), and
     /// never in `.alwaysShown`, which has nothing to toggle.
@@ -144,40 +176,39 @@ enum PopoverUpdatesSettings {
         count > 99 ? "99+" : "\(count)"
     }
 
-    /// The Updates button's tooltip.
-    static func toggleHelp(shown: Bool, count: Int, filtering: Bool) -> String {
-        if shown { return "Hide the Updates panel" }
-        if filtering && count == 0 { return "No updates match the filter; show the Updates panel anyway" }
-        let noun = count == 1 ? "update" : "updates"
-        return filtering
-            ? "Show \(count) \(noun) that match the filter"
-            : "Show \(count) open \(noun): what sessions said that is worth keeping"
+    /// "1 needs you" / "3 need you": what the red button adds to its words.
+    static func needsYouPhrase(_ needsYou: Int) -> String {
+        needsYou == 1 ? "1 needs you" : "\(needsYou) need you"
+    }
+
+    /// The Updates button's tooltip. `needsYou` (open needs_you notes,
+    /// unfiltered; the button is red when above zero) is appended.
+    static func toggleHelp(shown: Bool, count: Int, filtering: Bool, needsYou: Int = 0) -> String {
+        let base: String
+        if shown {
+            base = "Hide the Updates panel"
+        } else if filtering && count == 0 {
+            base = "No updates match the filter; show the Updates panel anyway"
+        } else {
+            let noun = count == 1 ? "update" : "updates"
+            base = filtering
+                ? "Show \(count) \(noun) that match the filter"
+                : "Show \(count) open \(noun): what sessions said that is worth keeping"
+        }
+        return needsYou > 0 ? "\(base) (\(needsYouPhrase(needsYou)))" : base
     }
 
     /// The Updates button's VoiceOver label, worded like its tooltip.
-    static func toggleAccessibilityLabel(shown: Bool, count: Int, filtering: Bool) -> String {
-        if shown { return "Hide updates" }
-        if filtering && count == 0 { return "Show updates; none match the filter" }
-        return count == 1 ? "Show 1 update" : "Show \(count) updates"
-    }
-
-    /// The needs_you rows that stay above the sessions while the panel is
-    /// closed: those whose session is not itself in Needs you or
-    /// Interrupted. A session marked done or snoozed, or one answered by a
-    /// newer prompt, keeps its open needs_you note without turning red
-    /// (`reconcile.compute_state`), so hiding the note behind the button
-    /// would hide a request. Read from the unfiltered feed, like the menu
-    /// bar icon, so a popover query kept from an earlier open never hides
-    /// one. Empty while the panel is open (it lists them).
-    /// Built from those notes alone, never the whole feed: a needs_you note
-    /// is always a row of its own (`UpdatesFeed.rows`), so these are the
-    /// feed's needs_you rows in feed order, without sorting every open note
-    /// on each popover body evaluation.
-    static func pinnedRows(from sessions: [Session], panelShown: Bool) -> [UpdatesFeed.Row] {
-        guard !panelShown else { return [] }
-        return UpdatesFeed.make(from: sessions, query: SessionSearch("")) { note, session in
-            note.kind == .needsYou && session.state != .needsYou && session.state != .interrupted
-        }.map(UpdatesFeed.single)
+    static func toggleAccessibilityLabel(shown: Bool, count: Int, filtering: Bool, needsYou: Int = 0) -> String {
+        let base: String
+        if shown {
+            base = "Hide updates"
+        } else if filtering && count == 0 {
+            base = "Show updates; none match the filter"
+        } else {
+            base = count == 1 ? "Show 1 update" : "Show \(count) updates"
+        }
+        return needsYou > 0 ? "\(base), \(needsYouPhrase(needsYou))" : base
     }
 
     /// Under the search field while a query is active and the panel is

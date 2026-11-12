@@ -200,7 +200,8 @@ renames a long-running session. [More](docs/REFERENCE.md#links--integrations)
 the few messages worth reading (a request marked `USER_ACTION:`, a PR opened or merged, CI going
 red) as updates until you dismiss them, one click away behind the **Updates** button next to the
 popover's search field (Settings → Popover can keep the panel open instead). An open request turns
-its session red.
+its session and the Updates button red, and clears by itself once you reply in that session or mark
+it done or snoozed.
 [More](docs/REFERENCE.md#updates-retained-notes)
 
 **Plan usage, model and context.** When Claude Code or Codex reports plan usage on this Mac, the

@@ -898,6 +898,41 @@ def _record_stop_note(conn, tool, session_id, text, now, event_id) -> None:
               exc=type(exc).__name__, msg=str(exc))
 
 
+def _clear_needs_you_notes(conn, tool, session_id, now, prompt_kind, text) -> None:
+    """A parent prompt that `notes.prompt_clears_needs_you` calls the user
+    answering (a human prompt, never a loop tick, cron or injected one, nor
+    a local-only command, whose text is None) dismisses the session's open
+    needs_you notes that came from its own Stop messages
+    (notes.clear_needs_you); notes --rebuild replays the same predicate.
+    Runs inside process_payload's transaction under a savepoint, like
+    _record_stop_note, so a failure is logged and rolled back on its own
+    without losing the event."""
+    try:
+        from . import notes
+
+        if not notes.prompt_clears_needs_you(prompt_kind, text):
+            return
+        conn.execute("SAVEPOINT needs_you_clear")
+    except Exception as exc:
+        _diag("warn", "notes", session=f"{tool}:{session_id}", outcome="error",
+              exc=type(exc).__name__, msg=str(exc))
+        return
+    try:
+        cleared = notes.clear_needs_you(conn, now, tool, session_id)
+        if cleared:
+            _diag("debug", "notes_cleared", session=f"{tool}:{session_id}", count=cleared,
+                  reason="prompt")
+        conn.execute("RELEASE needs_you_clear")
+    except Exception as exc:
+        try:
+            conn.execute("ROLLBACK TO needs_you_clear")
+            conn.execute("RELEASE needs_you_clear")
+        except Exception:
+            pass
+        _diag("warn", "notes", session=f"{tool}:{session_id}", outcome="error",
+              exc=type(exc).__name__, msg=str(exc))
+
+
 def _record_failure_note(conn, tool, session_id, error, text, now, event_id) -> None:
     """Keep a parent StopFailure (an API error that ended the turn) as an
     `error` note, attended or not, so Updates shows API failures. Same
@@ -1109,6 +1144,10 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
         if event == "StopFailure" and not is_subagent_tagged:
             _record_failure_note(conn, tool, session_id, payload.get("error"), text, now,
                                  cursor.lastrowid)
+
+        # The user answering clears the session's open needs_you notes.
+        if event == "UserPromptSubmit" and not is_subagent_tagged:
+            _clear_needs_you_notes(conn, tool, session_id, now, prompt_kind, text)
 
         if event == "UserPromptSubmit" and not is_subagent_tagged and not injected:
             conn.execute(

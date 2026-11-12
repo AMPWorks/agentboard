@@ -207,12 +207,12 @@ struct SettingsView: View {
     }
 
     static func popoverFootnote(_ mode: UpdatesPanelMode) -> String {
-        let pinned = "A request from a session that is no longer in Needs you (done, snoozed or answered) stays above the sessions until you dismiss it."
+        let red = "The Updates button turns red while any update needs you."
         switch mode {
         case .hiddenUntilClicked:
-            return "The popover opens on the sessions. Click Updates next to the search field to show the panel; it hides again the next time the popover opens. " + pinned
+            return "The popover opens on the sessions. Click Updates next to the search field to show the panel; it hides again the next time the popover opens. " + red
         case .rememberLast:
-            return "The panel stays open or closed the way you last left it with the Updates button. " + pinned
+            return "The panel stays open or closed the way you last left it with the Updates button. " + red
         case .alwaysShown:
             return "The panel sits above the sessions whenever there are updates, and there is no Updates button."
         }

@@ -578,7 +578,11 @@ inside its transaction (`needs_you` for a line starting with a `config.json` `no
 entry, default `USER_ACTION:`, in any turn; `update`/`error` only in a turn whose latest parent
 (non-subagent) prompt starts with a `note_unattended_prefixes` entry, default `# Autonomous
 loop`); a failure there never drops the event. A repeat of an open note bumps `count`/`last_ts`; a repeat of a dismissed one
-is a new row. `notes --rebuild` replays events at or below the `hook_from` mark recorded by the
+is a new row. (Added later.) A parent human (or unclassified) prompt, and `mark done`/`mark snooze`,
+dismiss the session's open `needs_you` notes with source `stop`/`backfill`; `notes --rebuild`
+replays the same rule (prompts by event id, or by `last_ts` for a note without one, inside the
+replay window; done/snooze from the session's current triage row on every rebuild, whatever the
+window or `--days`, with timestamps compared as instants). `notes --rebuild` replays events at or below the `hook_from` mark recorded by the
 migration; inbox drops and provider rows accept an optional `"notes": [{"kind", "text"}]`.
 
 ## Mac app (SwiftUI, `app/`)
@@ -606,7 +610,9 @@ migration; inbox drops and provider rows accept an optional `"notes": [{"kind", 
   of the (filtered) sessions newest first: kind glyph, project, the note's `headline` (its first
   marker line when it has one, otherwise its first line), `×N`, relative time;
   click focuses the owning session, a chevron expands the full text, (x) dismisses, and the
-  header has a count and "Clear all" (`agentboard notes --dismiss`).
+  header has a count and "Clear all" (`agentboard notes --dismiss`). (Added later.) It sits behind
+  an **Updates** button by default, red while any session has an open `needs_you` note; with the
+  panel closed the popover lists no updates.
   Row click = focus; context menu & hover buttons: Focus, Resume, Copy resume cmd, Mark done,
   Snooze 1d, Open PR/ticket. Footer: "Open Dashboard", "Refresh", "Quit".
 - Dashboard `Window` scene: NavigationSplitView — sidebar of states with counts + filter by
