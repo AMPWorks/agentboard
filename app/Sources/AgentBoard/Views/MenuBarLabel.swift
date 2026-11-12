@@ -89,12 +89,13 @@ struct MenuBarLabel: View {
             )
             notifications.notify(newlyNeedingYou: entered, in: newValue, enabled: notifyOnNeedsYou)
             notifications.notify(turns: turnChanges, enabled: notifyOnTurnFinished, context: context)
+            // `player.sounds` resolves a sound only for an event that fired.
             let player = SoundPlayer.shared
-            let sounding = Set(AttentionEvent.allCases.filter { player.sounds($0) })
-            player.play(sounds.note(
+            let events = sounds.note(
                 newValue, needsYouEntered: entered, turns: turnChanges, context: context,
-                sounds: sounding.contains
-            ))
+                sounds: player.sounds
+            )
+            if !events.isEmpty { player.play(events) }
             if let key = notifications.takePendingOpenKey() {
                 Self.openSession(key, store: store)
             }

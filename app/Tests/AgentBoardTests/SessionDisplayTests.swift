@@ -25,6 +25,34 @@ struct SessionDisplayTests {
         #expect(SessionDisplay.secondaryTitle(session) == nil)
     }
 
+    /// A status text never leads a Needs you row: the title does, and the
+    /// status (possibly stale) is the subtitle. Other states keep the order.
+    @Test func onANeedsYouRowTheTitleLeadsAndTheStatusIsTheSubtitle() {
+        let extra: [String: Any] = ["title": "Fix the hook", "status_text": "Running the test suite"]
+        let waiting = Fixtures.decoded("s1", "needs_you", extra: extra)
+        #expect(SessionDisplay.primaryTitle(waiting) == "Fix the hook")
+        #expect(waiting.displayTitle == "Fix the hook")
+        #expect(SessionDisplay.secondaryTitle(waiting) == "Running the test suite")
+        #expect(SessionRowLayout.lines(for: waiting).contains(.secondaryTitle))
+        for state in ["running", "review", "interrupted", "unconcluded"] {
+            let other = Fixtures.decoded("s2", state, extra: extra)
+            #expect(SessionDisplay.primaryTitle(other) == "Running the test suite", "\(state)")
+            #expect(SessionDisplay.secondaryTitle(other) == "Fix the hook", "\(state)")
+        }
+    }
+
+    @Test func aNeedsYouRowWithNoTitleStillShowsItsStatus() {
+        let blank = Fixtures.decoded("s1", "needs_you", extra: ["title": " ", "status_text": "Waiting on CI"])
+        #expect(SessionDisplay.primaryTitle(blank) == "Waiting on CI")
+        #expect(SessionDisplay.secondaryTitle(blank) == nil)
+        let same = Fixtures.decoded("s2", "needs_you", extra: ["title": "Same", "status_text": "Same"])
+        #expect(SessionDisplay.primaryTitle(same) == "Same")
+        #expect(SessionDisplay.secondaryTitle(same) == nil)
+        let none = Fixtures.decoded("s3", "needs_you", extra: ["title": "Only the title"])
+        #expect(SessionDisplay.primaryTitle(none) == "Only the title")
+        #expect(SessionDisplay.secondaryTitle(none) == nil)
+    }
+
     @Test func searchMatchesBothTheStatusAndTheTitle() {
         let session = Fixtures.decoded("s1", extra: ["title": "Old summary", "status_text": "Current work"])
         #expect(SessionSearch("current").filter([session]).count == 1)

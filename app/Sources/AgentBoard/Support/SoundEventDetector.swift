@@ -41,6 +41,9 @@ struct SoundEventDetector {
     /// (`SoundPlayer.sounds`): a review-ready session that also finished
     /// its turn or newly needs you is dropped only when that other event
     /// will play, so a review with Turn finished set to None still sounds.
+    /// It is asked only about an event that fired in this snapshot (it
+    /// resolves a sound file), so a quiet snapshot never calls it; the
+    /// per-session bookkeeping below still runs on every snapshot.
     mutating func note(
         _ snapshot: Snapshot,
         needsYouEntered: Set<String>,
@@ -61,8 +64,8 @@ struct SoundEventDetector {
         }
         // Sessions whose review-ready sound another event already covers.
         var covered: Set<String> = []
-        if sounds(.turnFinished) { covered.formUnion(turns.finished.map(\.key)) }
-        if sounds(.needsYou) { covered.formUnion(needsYouEntered) }
+        if !turns.finished.isEmpty, sounds(.turnFinished) { covered.formUnion(turns.finished.map(\.key)) }
+        if !needsYouEntered.isEmpty, sounds(.needsYou) { covered.formUnion(needsYouEntered) }
 
         for session in snapshot.sessions {
             let key = session.key

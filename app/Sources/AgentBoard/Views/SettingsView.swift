@@ -29,6 +29,10 @@ struct SettingsView: View {
     @AppStorage(PopoverSizing.widthKey) private var popoverWidth: Double = 0
     @State private var launchAtLogin: Bool = false
     @State private var systemSounds: [String] = SoundChoice.systemSoundNames()
+    /// The Settings window, so opening it can leave nothing focused.
+    @State private var window: NSWindow?
+    /// Set on each open and spent the first time the window becomes key.
+    @State private var clearFocusOnNextKey = false
 
     var body: some View {
         Form {
@@ -203,7 +207,38 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 420)
         .padding()
-        .onAppear { launchAtLogin = LaunchAtLogin.isEnabled }
+        .background(WindowReader { window = $0 })
+        .onAppear {
+            launchAtLogin = LaunchAtLogin.isEnabled
+            clearFocusOnNextKey = true
+            clearInitialFocus()
+        }
+        // AppKit picks the first key view (with keyboard navigation on, the
+        // Appearance header's ? button) when the window first becomes key,
+        // which can be after onAppear; clear it then too.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+            guard clearFocusOnNextKey, let window, note.object as? NSWindow === window else { return }
+            clearFocusOnNextKey = false
+            clearInitialFocus()
+        }
+        // Closing re-arms the clear for the next open, so it does not
+        // depend on SwiftUI tearing this view down and running onAppear
+        // again: the next time the window becomes key is that reopen.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
+            guard let window, note.object as? NSWindow === window else { return }
+            clearFocusOnNextKey = true
+        }
+    }
+
+    /// Opening Settings focuses nothing: the window itself takes first
+    /// responder, so no control wears a focus ring it was never given (and
+    /// that a click on the form's background would not clear). Tab still
+    /// moves into the controls from there. `defaultFocus` cannot do this:
+    /// it needs a focusable target, which would wear the ring instead.
+    private func clearInitialFocus() {
+        DispatchQueue.main.async {
+            window?.makeFirstResponder(nil)
+        }
     }
 
     static func popoverFootnote(_ mode: UpdatesPanelMode) -> String {

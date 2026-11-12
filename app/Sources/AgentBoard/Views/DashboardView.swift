@@ -1,5 +1,17 @@
 import SwiftUI
 
+/// The dashboard's middle column (the session list and the Denials list).
+/// A dashboard row spends about 167pt on its padding, dot, icon column and
+/// the reserved hover slot (`SessionRowLayout.hoverSlotWidth(compact: false)`,
+/// 106pt), so the text gets the rest: about 113pt at the minimum, 273pt at
+/// the ideal and 553pt at the maximum. The old ideal of 340 left 173pt, a
+/// few characters of title, branch and repo.
+enum DashboardLayout {
+    static let listColumnMin: CGFloat = 280
+    static let listColumnIdeal: CGFloat = 440
+    static let listColumnMax: CGFloat = 720
+}
+
 struct DashboardView: View {
     @ObservedObject var store: SnapshotStore
     @State private var sidebarSelection: SidebarFilter? = .all
@@ -223,7 +235,8 @@ struct DashboardView: View {
             StatusBannerView(store: store, insets: EdgeInsets(top: 8, leading: 8, bottom: 4, trailing: 8))
             sessionList(sessions)
         }
-        .navigationSplitViewColumnWidth(min: 280, ideal: 340)
+        .navigationSplitViewColumnWidth(min: DashboardLayout.listColumnMin, ideal: DashboardLayout.listColumnIdeal,
+                                        max: DashboardLayout.listColumnMax)
     }
 
     private func denialList(total: Int, query: SessionSearch) -> some View {
@@ -241,7 +254,8 @@ struct DashboardView: View {
                 store: store
             )
         }
-        .navigationSplitViewColumnWidth(min: 280, ideal: 340)
+        .navigationSplitViewColumnWidth(min: DashboardLayout.listColumnMin, ideal: DashboardLayout.listColumnIdeal,
+                                        max: DashboardLayout.listColumnMax)
     }
 
     private func sessionList(_ sessions: [Session]) -> some View {

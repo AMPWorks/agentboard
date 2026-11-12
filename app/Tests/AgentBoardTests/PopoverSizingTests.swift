@@ -94,6 +94,33 @@ struct PopoverSizingTests {
         #expect(PopoverSizing.autoHeight(contentBottom: 895, max: 900) == 900)
     }
 
+    /// Auto-expand off: the stored height caps the list and the list
+    /// shrinks to its content, never below the minimum or past the screen.
+    @Test func fittedHeightShrinksToContentUnderTheStoredHeight() {
+        // Not measured yet (the first frame of an open): the stored height,
+        // clamped, so a full board never opens at the minimum and jumps.
+        #expect(PopoverSizing.fittedHeight(stored: 388, contentBottom: nil, max: 900) == 388)
+        #expect(PopoverSizing.fittedHeight(stored: 1200, contentBottom: nil, max: 900) == 900)
+        #expect(PopoverSizing.fittedHeight(stored: 100, contentBottom: nil, max: 900) == 240)
+        // Measured with nothing rendered: the minimum.
+        #expect(PopoverSizing.fittedHeight(stored: 388, contentBottom: 0, max: 900) == 240)
+        // No session (an empty-board note) or one row: still the minimum.
+        #expect(PopoverSizing.fittedHeight(stored: 388, contentBottom: 96, max: 900) == 240)
+        // Content between the minimum and the stored height: content plus
+        // the list's bottom padding.
+        #expect(PopoverSizing.fittedHeight(stored: 388, contentBottom: 300, max: 900) == 308)
+        #expect(PopoverSizing.fittedHeight(stored: 388, contentBottom: 300, bottomPadding: 0, max: 900) == 300)
+        // Many sessions: the stored height, as before.
+        #expect(PopoverSizing.fittedHeight(stored: 388, contentBottom: 1200, max: 900) == 388)
+        #expect(PopoverSizing.fittedHeight(stored: 600, contentBottom: 500, max: 900) == 508)
+        // A stored height under the content wins; the screen wins over both.
+        #expect(PopoverSizing.fittedHeight(stored: 300, contentBottom: 500, max: 900) == 300)
+        #expect(PopoverSizing.fittedHeight(stored: 1200, contentBottom: 2400, max: 900) == 900)
+        #expect(PopoverSizing.fittedHeight(stored: 1200, contentBottom: 1000, max: 700) == 700)
+        // A stored height under the minimum still shows the minimum.
+        #expect(PopoverSizing.fittedHeight(stored: 100, contentBottom: 500, max: 900) == 240)
+    }
+
     @Test func autoHeightIgnoresSmallWobbles() {
         #expect(PopoverSizing.settledAutoHeight(previous: nil, measured: 300) == 300)
         #expect(PopoverSizing.settledAutoHeight(previous: 300, measured: 302.5) == 300)

@@ -65,6 +65,109 @@ struct UpdatesRowsTests {
         #expect(rows[2].glyphKind == .error)
     }
 
+    /// Always shown: needs_you and error rows (a group with an error too)
+    /// go above the sessions; plain updates and plain groups go below.
+    @Test func alwaysShownPartitionKeepsUrgentRowsAbove() {
+        let sessions = Fixtures.snapshot([
+            session("asks", "needs_you", notes: [note(1, "needs_you", "USER_ACTION: approve", minute: 10)]),
+            session("broke", notes: [note(2, "error", "API Error: overloaded", minute: 20)]),
+            session("loop", notes: [
+                note(3, "update", "Newest tick", minute: 30),
+                note(4, "error", "API Error: overloaded", minute: 25),
+            ]),
+            session("calm", notes: [
+                note(5, "update", "Newer tick", minute: 50),
+                note(6, "update", "Older tick", minute: 40),
+            ]),
+            session("info", notes: [note(7, "update", "PR #9 merged", minute: 55)]),
+        ]).sessions
+        let rows = UpdatesFeed.rows(from: sessions, query: all)
+        let split = UpdatesFeed.partitionForAlwaysShown(rows)
+        // Feed order (newest first) within each part.
+        #expect(split.above.map(\.id) == ["group:loop", "note:2", "note:1"])
+        #expect(split.below.map(\.id) == ["note:7", "group:calm"])
+        #expect(split.above.count + split.below.count == rows.count)
+        #expect(UpdatesFeed.counts(of: split.above) == (listed: 4, total: 4))
+        #expect(UpdatesFeed.counts(of: split.below) == (listed: 3, total: 3))
+        #expect(UpdatesFeed.partitionForAlwaysShown([]).above.isEmpty)
+    }
+
+    @Test func splitPartsTitleAndClearOnlyThemselvesWhileBothHaveRows() {
+        let sessions = Fixtures.snapshot([
+            session("asks", "needs_you", notes: [note(1, "needs_you", "USER_ACTION: approve", minute: 10)]),
+            session("info", notes: [note(7, "update", "PR #9 merged", minute: 55)], notesCount: 1),
+        ]).sessions
+        let split = UpdatesFeed.partitionForAlwaysShown(UpdatesFeed.rows(from: sessions, query: all))
+        let whole = UpdatesFeed.clearPlan(from: sessions, query: all)
+        #expect(UpdatesFeed.partTitle(above: true, otherPartHasRows: true) == "Urgent updates")
+        #expect(UpdatesFeed.partTitle(above: false, otherPartHasRows: true) == "Other updates")
+        #expect(UpdatesFeed.partTitle(above: false, otherPartHasRows: false) == "Updates")
+        let below = UpdatesFeed.partClearPlan(split.below, whole: whole, otherPartHasRows: true)
+        #expect(below.dismissals == [.ids([7])])
+        #expect(below.title == "Clear these")
+        // A part alone clears like the whole panel did.
+        #expect(UpdatesFeed.partClearPlan(split.below, whole: whole, otherPartHasRows: false) == whole)
+        #expect(UpdatesFeed.header(listed: 1, total: 1, title: "Urgent updates") == "Urgent updates (1)")
+        #expect(UpdatesFeed.header(listed: 3, total: 5, title: "Other updates") == "Other updates (3 of 5)")
+    }
+
+    /// A session with a needs_you note and a group of update notes: the
+    /// lower part's clear dismisses the group by kind (update and error
+    /// only), never the session's needs_you note and never everything; the
+    /// upper part's clear holds only the needs_you note.
+    @Test func clearingTheLowerPartNeverDismissesTheSameSessionsRequest() {
+        let sessions = Fixtures.snapshot([
+            session("loop", "needs_you", notes: [
+                note(3, "update", "Newest tick", minute: 50),
+                note(2, "needs_you", "USER_ACTION: approve the plan", minute: 40),
+                note(1, "update", "Older tick", minute: 30),
+            ]),
+        ]).sessions
+        let split = UpdatesFeed.partitionForAlwaysShown(UpdatesFeed.rows(from: sessions, query: all))
+        let whole = UpdatesFeed.clearPlan(from: sessions, query: all)
+        #expect(split.above.map(\.id) == ["note:2"])
+        #expect(split.below.map(\.id) == ["group:loop"])
+        let below = UpdatesFeed.partClearPlan(split.below, whole: whole, otherPartHasRows: true)
+        #expect(below.dismissals == [.session(tool: "claude", sessionId: "loop", kinds: [.update, .error])])
+        let above = UpdatesFeed.partClearPlan(split.above, whole: whole, otherPartHasRows: true)
+        #expect(above.dismissals == [.ids([2])])
+    }
+
+    /// Two notes of one project from different sessions tell apart by the
+    /// session's title (else its branch) after the project.
+    @Test func theRowHeaderTellsTwoNotesOfOneProjectApart() {
+        func s(_ key: String, title: String, branch: String? = nil, project: String = "agentboard",
+               note n: [String: Any]) -> [String: Any] {
+            var extra: [String: Any] = ["project": project, "title": title, "notes": [n], "notes_count": 1]
+            if let branch { extra["branch"] = branch }
+            return Fixtures.session(key, "review", extra: extra)
+        }
+        let sessions = Fixtures.snapshot([
+            s("a", title: "Fix the hook", branch: "main", note: note(1, "update", "Done", minute: 1)),
+            s("b", title: "Widen the list", branch: "main", note: note(2, "update", "Done", minute: 2)),
+            s("c", title: " ", branch: "popover-polish", note: note(3, "update", "Done", minute: 3)),
+            s("d", title: "Untitled project", project: "", note: note(4, "update", "Done", minute: 4)),
+        ]).sessions
+        let rows = Dictionary(uniqueKeysWithValues: UpdatesFeed.rows(from: sessions, query: all).map { ($0.sessionKey, $0) })
+        #expect(rows["a"]?.headerTitle == "agentboard")
+        #expect(rows["a"]?.headerDetail == "Fix the hook")
+        #expect(rows["b"]?.headerDetail == "Widen the list")
+        #expect(rows["c"]?.headerDetail == "popover-polish")
+        #expect(rows["d"]?.headerTitle == "Untitled project")
+        #expect(rows["d"]?.headerDetail == nil)
+    }
+
+    @Test func aRepeatedNoteSaysHowOftenInWords() {
+        let repeated = Fixtures.decoded("a", extra: ["notes": [
+            ["id": 1, "kind": "update", "text": "Tick", "ts": "2026-10-15T10:00:00Z",
+             "last_ts": "2026-10-15T10:05:00Z", "count": 3, "source": "stop"],
+            ["id": 2, "kind": "update", "text": "Once", "ts": "2026-10-15T10:00:00Z",
+             "last_ts": "2026-10-15T10:00:00Z", "count": 1, "source": "stop"],
+        ]])
+        #expect(NoteStyle.countLabel(repeated.notes[0]) == "seen 3 times")
+        #expect(NoteStyle.countLabel(repeated.notes[1]) == nil)
+    }
+
     @Test func needsYouNotesAreNeverGrouped() {
         let sessions = Fixtures.snapshot([
             session("asks", "needs_you", notes: [

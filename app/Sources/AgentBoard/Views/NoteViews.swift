@@ -53,8 +53,10 @@ enum NoteStyle {
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    /// "seen 3 times" for a note that repeated, nil otherwise. In words,
+    /// so it never reads like a group row's "×N notes".
     static func countLabel(_ note: Note) -> String? {
-        note.count > 1 ? "×\(note.count)" : nil
+        note.count > 1 ? "seen \(note.count) times" : nil
     }
 }
 
@@ -63,10 +65,14 @@ enum NoteStyle {
 /// list out of view: every needs_you row, and at most `compactLimit`
 /// others until "Show all N" expands it. With `onHide` (the panel was
 /// opened from the Updates button) it sits on a tinted card with a Hide
-/// button; without it (Settings → Popover → Always shown) it is the plain
-/// section it always was.
+/// button; without it (Settings → Popover → Always shown) it is a plain
+/// section with a fixed-size header like the session sections', and the
+/// popover splits it in two (`UpdatesFeed.partitionForAlwaysShown`), each
+/// part its own `UpdatesSectionView` with its own `title`.
 struct UpdatesSectionView: View {
     let rows: [UpdatesFeed.Row]
+    /// The header's word ("Updates", or a split panel's part title).
+    var title: String = "Updates"
     /// Listed notes the rows stand for (the header's "N of M").
     let listed: Int
     /// Open notes the query keeps, uncapped (`UpdatesFeed.total`).
@@ -83,15 +89,18 @@ struct UpdatesSectionView: View {
 
     var body: some View {
         let compact = UpdatesFeed.compact(rows, expanded: expanded, limit: compactLimit)
+        // Always shown (no Hide): the header keeps the session section
+        // headers' fixed size, so Large text never makes it loom over them.
+        let headerFont: Font = onHide == nil ? .caption : fontSize.text
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Text(UpdatesFeed.header(listed: listed, total: total))
-                    .font(fontSize.text.bold())
+                Text(UpdatesFeed.header(listed: listed, total: total, title: title))
+                    .font(headerFont.bold())
                     .foregroundStyle(.secondary)
                     .help("Open updates: what sessions said that is worth keeping, until you dismiss it")
                 HelpButton(topic: .updates, tooltip: "Explain the Updates feed in AgentBoard Help",
                            closesHostWindow: true)
-                    .font(fontSize.text)
+                    .font(headerFont)
                 Spacer()
                 if !rows.isEmpty {
                     Button(clearPlan.title) {
@@ -107,7 +116,7 @@ struct UpdatesSectionView: View {
                 }
             }
             .buttonStyle(.plain)
-            .font(fontSize.text)
+            .font(headerFont)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
             .padding(.top, onHide == nil ? 4 : 6)
@@ -176,20 +185,33 @@ struct UpdateRowView: View {
                         .background(row.session.tool == "codex" ? Color.purple.opacity(0.25) : Color.blue.opacity(0.25))
                         .clipShape(Circle())
                         .help(SessionRowView.toolHelp(row.session))
-                    Text(row.project.isEmpty ? row.session.displayTitle : row.project)
+                    Text(row.headerTitle)
                         .font(fontSize.text.bold())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .layoutPriority(1)
+                    // The session's title (else branch), so two notes of one
+                    // project tell apart; it truncates first.
+                    if let detail = row.headerDetail {
+                        Text(detail)
+                            .font(fontSize.text)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .help(detail)
+                    }
                     if let group = row.groupLabel {
                         Text(group)
                             .font(fontSize.minor.monospacedDigit())
                             .foregroundStyle(.secondary)
+                            .fixedSize()
                             .help("\(row.total) open updates from this session")
                     } else if let count = NoteStyle.countLabel(row.note) {
                         Text(count)
                             .font(fontSize.minor.monospacedDigit())
                             .foregroundStyle(.secondary)
-                            .help("Seen \(row.note.count) times")
+                            .fixedSize()
+                            .help("The same update was posted \(row.note.count) times")
                     }
                     Spacer(minLength: 4)
                     Text(RelativeTime.string(from: row.note.lastTs))

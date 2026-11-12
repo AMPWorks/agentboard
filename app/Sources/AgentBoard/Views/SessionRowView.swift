@@ -109,32 +109,70 @@ struct SessionRowView: View {
                 .foregroundStyle(.secondary)
                 .wrapsInPopover(compact)
             Spacer(minLength: 4)
-            if let tag = session.tmuxTag {
-                Label(tag, systemImage: "rectangle.split.3x1")
-                    .labelStyle(.titleAndIcon)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .help(SessionActionHelp.tmuxTag(session))
-            }
-            PRLinkButtons(session: session, onOverflow: showDetail)
-            // Model and context: always the rightmost item. A long branch
-            // wraps (dashboard rows truncate it) before this does;
-            // SessionModelTag caps the model part, so this stays short.
-            if let tag = SessionModelTag.text(session) {
-                Text(tag)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .layoutPriority(1)
-                    .help(SessionModelTag.help(session))
+            // SessionRowLayout.repoTags order: the PR buttons last, so they
+            // never move with the optional tags.
+            ForEach(SessionRowLayout.repoTags(for: session), id: \.self) { tag in
+                switch tag {
+                case .tmux: tmuxTag
+                case .background: backgroundTag
+                case .model: modelTag
+                case .prs: PRLinkButtons(session: session, onOverflow: showDetail)
+                }
             }
         }
     }
 
-    /// The session's own title, under a status text that leads the row.
+    @ViewBuilder
+    private var tmuxTag: some View {
+        if let tag = session.tmuxTag {
+            Label(tag, systemImage: "rectangle.split.3x1")
+                .labelStyle(.titleAndIcon)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize()
+                .help(SessionActionHelp.tmuxTag(session))
+        }
+    }
+
+    /// A Running row's background tasks (SessionRowLayout.backgroundTaskCount),
+    /// folded from its reason line; the tooltip keeps the full reason.
+    @ViewBuilder
+    private var backgroundTag: some View {
+        if let count = SessionRowLayout.backgroundTaskCount(session) {
+            Label(SessionRowLayout.backgroundTagText(count), systemImage: "hourglass")
+                .labelStyle(.titleAndIcon)
+                .font(.caption2)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(SessionColor.running.opacity(0.15), in: Capsule())
+                .foregroundStyle(SessionColor.runningText)
+                .lineLimit(1)
+                .fixedSize()
+                .help(session.waitingReason ?? "")
+                .accessibilityLabel(session.waitingReason ?? "")
+        }
+    }
+
+    /// Model and context. A long branch wraps (dashboard rows truncate it)
+    /// before this does; SessionModelTag caps the model part, so this stays
+    /// short.
+    @ViewBuilder
+    private var modelTag: some View {
+        if let tag = SessionModelTag.text(session) {
+            Text(tag)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize()
+                .layoutPriority(1)
+                .help(SessionModelTag.help(session))
+        }
+    }
+
+    /// The line under the title (SessionDisplay.secondaryTitle): the
+    /// session's own title under a status text, or on a Needs you row the
+    /// status text under the title.
     @ViewBuilder
     private var secondaryTitleLine: some View {
         if let title = SessionDisplay.secondaryTitle(session) {
@@ -151,11 +189,20 @@ struct SessionRowView: View {
     private var reasonLine: some View {
         if let reason = SessionDisplay.reasonText(session) {
             let raw = session.waitingReason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? reason
-            Text(reason)
-                .font(SessionDisplay.reasonIsActionable(session) ? .caption.weight(.medium) : .caption)
-                .foregroundStyle(.secondary)
-                .wrapsInPopover(compact)
-                .help(raw == reason ? raw : "\(reason) (\(raw))")
+            // A glyph for the kind (lock, question bubble, warning), so a
+            // permission prompt, a question and a failure tell apart at a glance.
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                if let kind = SessionDisplay.reasonKind(session) {
+                    Image(systemName: kind.systemImage)
+                        .font(.caption2)
+                        .accessibilityLabel(kind.label)
+                }
+                Text(reason)
+                    .font(SessionDisplay.reasonIsActionable(session) ? .caption.weight(.medium) : .caption)
+                    .wrapsInPopover(compact)
+            }
+            .foregroundStyle(.secondary)
+            .help(raw == reason ? raw : "\(reason) (\(raw))")
         }
     }
 

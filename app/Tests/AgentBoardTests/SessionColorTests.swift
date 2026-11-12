@@ -43,4 +43,24 @@ struct SessionColorTests {
             }
         }
     }
+
+    /// The hue of an sRGB color in degrees (0-360).
+    static func hue(hex: UInt32) -> Double {
+        let r = Double((hex >> 16) & 0xFF) / 255, g = Double((hex >> 8) & 0xFF) / 255, b = Double(hex & 0xFF) / 255
+        let hi = max(r, g, b), lo = min(r, g, b), delta = hi - lo
+        guard delta > 0 else { return 0 }
+        var h: Double
+        if hi == r { h = (g - b) / delta } else if hi == g { h = (b - r) / delta + 2 } else { h = (r - g) / delta + 4 }
+        h *= 60
+        return h < 0 ? h + 360 : h
+    }
+
+    /// Interrupted and a closed Review row read as different colors in light
+    /// mode, not two shades of brown (they were 13° apart).
+    @Test func lightInterruptedAndClosedAreDifferentHues() {
+        let interrupted = SessionColor.lightTextHex["interrupted"]!
+        let closed = SessionColor.lightTextHex["closed"]!
+        #expect(interrupted != closed)
+        #expect(abs(Self.hue(hex: closed) - Self.hue(hex: interrupted)) >= 20)
+    }
 }

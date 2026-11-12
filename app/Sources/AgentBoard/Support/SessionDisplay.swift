@@ -6,6 +6,12 @@ import Foundation
 /// leads; the session's own title (custom, generated, `agentboard title`,
 /// Claude's summary or the first prompt, as the CLI resolved it) is then
 /// the subtitle.
+///
+/// A Needs you row is the exception: its title leads and the status text
+/// is the subtitle. The status was set while the session worked and may no
+/// longer be true now that it waits (the snapshot has no time it was set,
+/// so staleness cannot be judged), and it must never stand in red for
+/// what the session needs; the reason line says that.
 enum SessionDisplay {
     static func statusLine(_ session: Session) -> String? {
         guard let text = session.statusText?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -13,16 +19,25 @@ enum SessionDisplay {
         return text
     }
 
-    static func primaryTitle(_ session: Session) -> String {
-        statusLine(session) ?? session.title
+    /// True when the session's own title leads over its status text.
+    private static func titleLeads(_ session: Session) -> Bool {
+        session.state == .needsYou && !session.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// The session title under a status line, or nil when the title is
-    /// already the primary line (or would only repeat it).
+    static func primaryTitle(_ session: Session) -> String {
+        guard let status = statusLine(session), !titleLeads(session) else { return session.title }
+        return status
+    }
+
+    /// The line under the primary one: the session title under a status
+    /// line, or on a Needs you row the status text under the title. Nil when
+    /// there is no status, or when one of the two is empty or repeats the
+    /// other.
     static func secondaryTitle(_ session: Session) -> String? {
         guard let status = statusLine(session) else { return nil }
         let title = session.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return title.isEmpty || title == status ? nil : title
+        guard !title.isEmpty, title != status else { return nil }
+        return titleLeads(session) ? status : title
     }
 }
 
@@ -122,6 +137,58 @@ extension SessionDisplay {
             return false
         }
         return text.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == "_" }
+    }
+
+    /// What kind of thing the reason line reports, for its glyph.
+    enum ReasonKind: Equatable, CaseIterable {
+        /// A permission prompt (a raw `permission_prompt`, or a bare tool
+        /// name on a Needs you row).
+        case permission
+        /// A question, a plan to approve, a link to open or input to give.
+        case question
+        /// A failed turn (`StopFailure`, a Claude Code error type).
+        case failure
+
+        var systemImage: String {
+            switch self {
+            case .permission: "lock"
+            case .question: "questionmark.bubble"
+            case .failure: "exclamationmark.triangle"
+            }
+        }
+
+        /// The glyph's spoken name.
+        var label: String {
+            switch self {
+            case .permission: "Permission"
+            case .question: "Question"
+            case .failure: "Failure"
+            }
+        }
+    }
+
+    /// Notification types (bare or with a message) that ask the user
+    /// something; `toolReasons` (exact values only) ask too.
+    static let questionNotifications: Set<String> = [
+        "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input",
+    ]
+
+    /// The reason's kind from its raw prefix, with the same rules as
+    /// `reasonText`; nil for anything else (an idle prompt, a review reason,
+    /// a Running row's background tasks, free text such as an MCP question,
+    /// which the snapshot cannot tell apart from other text).
+    static func reasonKind(_ session: Session) -> ReasonKind? {
+        guard let raw = session.waitingReason?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        func matches(_ type: String) -> Bool { raw == type || raw.hasPrefix(type + ": ") }
+        if matches("permission_prompt") { return .permission }
+        if toolReasons[raw] != nil || questionNotifications.contains(where: matches) { return .question }
+        if notificationReasons.keys.contains(where: matches) { return nil }
+        if raw.hasPrefix("StopFailure: ") || failureReasons.keys.contains(where: matches) { return .failure }
+        if session.state == .needsYou, isToolName(raw), !isNeedsYouNoteHeadline(raw, of: session) {
+            return .permission
+        }
+        return nil
     }
 
     /// A reason the user acts on (Needs you, Interrupted, Review) is set in

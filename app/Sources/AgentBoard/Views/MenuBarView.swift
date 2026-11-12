@@ -40,6 +40,11 @@ struct MenuBarView: View {
     /// Auto-expand: the bottom of the content the list must fit, settled
     /// so changes under `PopoverSizing.autoThreshold` are ignored.
     @State private var contentBottom: CGFloat?
+    /// Auto-expand off: the bottom of everything the list renders (every
+    /// section, row, empty state and Updates part), settled the same way,
+    /// so the stored height caps the list instead of padding it with blank
+    /// space (`PopoverSizing.fittedHeight`).
+    @State private var fullContentBottom: CGFloat?
     /// The size while the grip is dragged (list height, popover width).
     @State private var dragSize: CGSize?
     @State private var dragOrigin: DragOrigin?
@@ -93,9 +98,20 @@ struct MenuBarView: View {
                         // Above Needs you: what sessions said that is worth
                         // keeping, behind the Updates button unless Settings →
                         // Popover says otherwise. Compact (UpdatesSectionView),
-                        // so it never pushes the sessions out of view.
-                        if PopoverUpdatesSettings.panelVisible(mode: mode, shown: shown, hasUpdates: feed.hasUpdates,
-                                                               hasRows: !updates.isEmpty) {
+                        // so it never pushes the sessions out of view. Always
+                        // shown, only needs_you and error rows sit up here;
+                        // the rest follow the last section (`belowUpdates`).
+                        let panelVisible = PopoverUpdatesSettings.panelVisible(
+                            mode: mode, shown: shown, hasUpdates: feed.hasUpdates, hasRows: !updates.isEmpty)
+                        let split = mode == .alwaysShown
+                            ? UpdatesFeed.partitionForAlwaysShown(updates) : (above: updates, below: [])
+                        if panelVisible && mode == .alwaysShown {
+                            if !split.above.isEmpty {
+                                alwaysShownUpdates(split.above, otherPart: split.below, above: true,
+                                                   sessions: sessions, query: query)
+                                    .reportsContentBottom()
+                            }
+                        } else if panelVisible {
                             UpdatesSectionView(
                                 rows: updates,
                                 listed: updates.reduce(0) { $0 + $1.notes.count },
@@ -105,7 +121,7 @@ struct MenuBarView: View {
                                 fontSize: updatesFont,
                                 compactLimit: PopoverUpdatesSettings.compactLimit(updatesLimitRaw),
                                 emptyText: "No updates match “\(store.popoverQuery)”",
-                                onHide: mode == .alwaysShown ? nil : { setUpdatesShown(false) }
+                                onHide: { setUpdatesShown(false) }
                             )
                             .reportsContentBottom()
                         }
@@ -133,6 +149,16 @@ struct MenuBarView: View {
                             noMatches
                                 .reportsContentBottom()
                         }
+                        // Always shown: info notes after every section, so they
+                        // never outrank a session. Auto-expand does not fit
+                        // them (they are not active sessions).
+                        if panelVisible && mode == .alwaysShown && !split.below.isEmpty {
+                            alwaysShownUpdates(split.below, otherPart: split.above, above: false,
+                                               sessions: sessions, query: query)
+                        }
+                    }
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.listSpace)).maxY } action: { bottom in
+                        fullContentBottom = PopoverSizing.settledAutoHeight(previous: fullContentBottom, measured: bottom)
                     }
                     .padding(.vertical, PopoverSizing.listPadding)
                     .coordinateSpace(name: Self.listSpace)
@@ -208,6 +234,29 @@ struct MenuBarView: View {
         }
     }
 
+    /// One part of the split Always-shown Updates panel: card-less, with
+    /// its own header and count. The part above lists every row (needs_you
+    /// and errors); the part below keeps the stored compact limit and its
+    /// "Show all".
+    private func alwaysShownUpdates(_ rows: [UpdatesFeed.Row], otherPart: [UpdatesFeed.Row], above: Bool,
+                                    sessions: [Session], query: SessionSearch) -> some View {
+        let counts = UpdatesFeed.counts(of: rows)
+        let otherHasRows = !otherPart.isEmpty
+        return UpdatesSectionView(
+            rows: rows,
+            title: UpdatesFeed.partTitle(above: above, otherPartHasRows: otherHasRows),
+            listed: counts.listed,
+            total: counts.total,
+            clearPlan: UpdatesFeed.partClearPlan(rows, whole: UpdatesFeed.clearPlan(from: sessions, query: query),
+                                                 otherPartHasRows: otherHasRows),
+            store: store,
+            fontSize: updatesFont,
+            compactLimit: above ? Int.max : PopoverUpdatesSettings.compactLimit(updatesLimitRaw),
+            emptyText: "No updates match “\(store.popoverQuery)”",
+            onHide: nil
+        )
+    }
+
     // MARK: - Size
 
     fileprivate static let listSpace = "popoverList"
@@ -258,7 +307,8 @@ struct MenuBarView: View {
             return PopoverSizing.autoHeight(contentBottom: contentBottom, max: maxListHeight)
         }
         if let dragSize { return dragSize.height }
-        return PopoverSizing.clamp(height: PopoverSizing.storedHeight(storedHeight), max: maxListHeight)
+        return PopoverSizing.fittedHeight(stored: PopoverSizing.storedHeight(storedHeight),
+                                          contentBottom: fullContentBottom, max: maxListHeight)
     }
 
     private var popoverWidth: CGFloat {
@@ -625,15 +675,13 @@ struct MenuBarView: View {
             // Plan usage, one line per source, above the button row.
             UsageLineView(usage: store.snapshot.usage)
             HStack {
-                Button("Open Dashboard") {
+                FooterButton(title: "Open Dashboard", help: "Open the dashboard window with every session (⌃⌥⌘A)") {
                     DashboardWindowController.show()
                 }
-                .help("Open the dashboard window with every session (⌃⌥⌘A)")
                 Spacer()
-                Button("Refresh") {
+                FooterButton(title: "Refresh", help: "Reload every session's state now") {
                     Task { await store.refresh() }
                 }
-                .help("Reload every session's state now")
                 GearMenu(store: store, closesHostWindow: true)
             }
             // Room for the corner grip, which overlays the bottom-right corner.
@@ -682,6 +730,38 @@ private struct SummaryButton: View {
         }
         .help("Scroll to \(item.kind.title) (\(item.count))")
         .accessibilityLabel(item.text)
+    }
+}
+
+/// A footer action (Open Dashboard, Refresh): plain text at rest, with
+/// the same hover capsule and pointing hand as `SummaryButton`, so it reads
+/// as a control and not as a label.
+private struct FooterButton: View {
+    let title: String
+    let help: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(.quaternary.opacity(hovering ? 0.9 : 0)))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .onHover { inside in
+            guard inside != hovering else { return }
+            hovering = inside
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .onDisappear {
+            if hovering { NSCursor.pop() }
+            hovering = false
+        }
+        .help(help)
     }
 }
 

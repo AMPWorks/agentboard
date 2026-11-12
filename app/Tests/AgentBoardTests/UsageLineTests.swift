@@ -32,16 +32,24 @@ struct UsageLineTests {
         #expect(UsageLine.shownWindows(s, now: now).map(\.label)
             == ["7d", "5h", "spend limit", "zeta window"])
         #expect(UsageLine.text(s, now: now)
-            == "Claude · 7d 70% · 5h 57% · spend limit 10% · zeta window 5% · resets in 1h 55m")
+            == "Claude usage · 7d 70% · 5h 57% · spend limit 10% · zeta window 5% · resets in 1h 55m")
     }
 
     @Test func eachSourceIsLabelledByItsOwnLabel() {
         let codex = source([w("5h", 12)], label: "Codex", origin: nil)
         let acme = source([w("daily", 3)], label: "Acme agent", origin: nil)
-        #expect(UsageLine.text(codex, now: now) == "Codex · 5h 12%")
-        #expect(UsageLine.text(acme, now: now) == "Acme agent · daily 3%")
+        #expect(UsageLine.text(codex, now: now) == "Codex usage · 5h 12%")
+        #expect(UsageLine.text(acme, now: now) == "Acme agent usage · daily 3%")
         #expect(UsageLine.detail(acme, now: now, timeZone: utc, locale: posix)
             .hasSuffix("Reported by Acme agent."))
+    }
+
+    @Test func theLineSaysItIsUsage() {
+        #expect(UsageLine.heading(source([w("5h", 1)])) == "Claude usage")
+        // A label that already says so is not doubled.
+        let labelled = source([w("daily", 3)], label: "Acme Usage", origin: nil)
+        #expect(UsageLine.heading(labelled) == "Acme Usage")
+        #expect(UsageLine.text(labelled, now: now) == "Acme Usage · daily 3%")
     }
 
     @Test func shownSourcesSkipThoseWithNothingLeft() {
@@ -53,7 +61,7 @@ struct UsageLineTests {
 
     @Test func expiredWindowIsOmitted() {
         let s = source([w("5h", 57, resets: -60), w("7d", 70, resets: 2 * 3_600 + 5 * 60)])
-        #expect(UsageLine.text(s, now: now) == "Claude · 7d 70% · resets in 2h 5m")
+        #expect(UsageLine.text(s, now: now) == "Claude usage · 7d 70% · resets in 2h 5m")
     }
 
     @Test func allExpiredIsNil() {
@@ -68,20 +76,20 @@ struct UsageLineTests {
     }
 
     @Test func noResetTimeMeansNoResetPart() {
-        #expect(UsageLine.text(source([w("5h", 33.25)]), now: now) == "Claude · 5h 33.3%")
+        #expect(UsageLine.text(source([w("5h", 33.25)]), now: now) == "Claude usage · 5h 33.3%")
     }
 
     @Test func spendWindowWithDollars() {
         let s = source([UsageWindow(label: "spend limit", usedPercentage: 62.8, usedUsd: 314.2,
                                     limitUsd: 500, period: "monthly")])
-        #expect(UsageLine.text(s, now: now) == "Claude · spend limit $314 of $500")
+        #expect(UsageLine.text(s, now: now) == "Claude usage · spend limit $314 of $500")
         #expect(UsageLine.detail(s, now: now, timeZone: utc, locale: posix)
             .hasPrefix("Claude spend limit: 62.8% used ($314 of $500, monthly)."))
     }
 
     @Test func spendOverTheLimitShowsAboveHundred() {
         let s = source([w("spend limit", 130)])
-        #expect(UsageLine.text(s, now: now) == "Claude · spend limit 130%")
+        #expect(UsageLine.text(s, now: now) == "Claude usage · spend limit 130%")
         #expect(UsageLine.tint(s, now: now) == .critical)
     }
 
@@ -113,7 +121,7 @@ struct UsageLineTests {
     @Test func staleNumbersShowTheirAge() {
         let windows = [w("5h", 57, resets: 6_900)]
         let stale = source(windows, label: "Codex", updatedAt: iso(-3 * 3_600))
-        #expect(UsageLine.text(stale, now: now) == "Codex as of 3h ago · 5h 57% · resets in 1h 55m")
+        #expect(UsageLine.text(stale, now: now) == "Codex usage as of 3h ago · 5h 57% · resets in 1h 55m")
         let detail = UsageLine.detail(stale, now: now, timeZone: utc, locale: posix)
         #expect(detail.split(separator: "\n").last?
             .hasPrefix("These numbers are only as fresh as Codex's last report") == true)
@@ -121,7 +129,7 @@ struct UsageLineTests {
             == "2d")
         // Within the hour (or no updated_at): the line is unchanged.
         for fresh in [source(windows, updatedAt: iso(-3_600)), source(windows)] {
-            #expect(UsageLine.text(fresh, now: now) == "Claude · 5h 57% · resets in 1h 55m")
+            #expect(UsageLine.text(fresh, now: now) == "Claude usage · 5h 57% · resets in 1h 55m")
             #expect(!UsageLine.detail(fresh, now: now, timeZone: utc, locale: posix)
                 .contains("only as fresh"))
         }

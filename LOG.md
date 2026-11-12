@@ -813,3 +813,46 @@ second. A note without an event id is placed against a prompt by its `last_ts`, 
 agrees with the hook, which clears every open one. The hook calls the same prompt predicate the
 replay uses, and the Updates button's red/accent/grey choice is one tested helper
 (`PopoverUpdatesSettings.buttonTint`).
+
+## 2026-11-12 06:56:22 UTC — Popover and dashboard polish: density, Updates order, rows, footer
+
+One UI pass over the findings the popover usability review deferred, plus two app nits; no new
+settings or config keys. **Density**: with auto-expand off the stored list height is now a cap,
+not a floor. `PopoverSizing.fittedHeight` shows `min(stored, content + padding)` clamped to the
+minimum and the screen, measured over everything the list renders (auto-expand's measurement
+covers only the active sections, which would cut an expanded Unconcluded group or the empty-board
+note). A grip drag still stores its height and the list grows back to it as content arrives; the
+trade-off is that dragging taller than the content snaps back on release. Before the first
+measurement the list shows the stored height, so only a short board resizes after opening and a
+full one never opens at the minimum and jumps. A Running row's
+"Waiting on N background tasks" reason became an hourglass "N tasks" tag on the repo line, on every
+row rather than only on crowded boards, so those rows lose a line.
+
+**Updates in Always-shown mode**: the whole panel sat above Needs you, so an hours-old info note
+outranked a waiting session and, at Large text, pushed it below the fold. The panel now splits:
+needs_you and error rows (a grouped row with an error included) stay above the sections, all
+listed; the rest follow the last section with the compact limit. Each part has its own header at
+the session headers' fixed size and clears only its own rows, so clearing old info never dismisses
+a request. Auto-expand fits only the upper part: the lower one follows every section, so fitting
+it would fit the whole board. Capping the panel by text size was rejected: it would still rank info above sessions.
+An update row adds the session's title (else branch) after the project, and a repeat count reads
+"seen N times" instead of a bare "×N" beside a group's "×N notes".
+
+**Rows**: the PR buttons are now the repo line's last item, so an optional model or tmux tag no
+longer moves them (reserving the tag's width cannot work, since its width varies by row anyway). The
+reason line leads with a kind glyph (lock, question bubble, warning) from
+`SessionDisplay.reasonKind`; an MCP elicitation stays glyph-less because telling it apart needs an
+additive snapshot field, left out to keep this pass app-only. A Needs you row now leads with its
+title and shows the status text under it: the snapshot carries no time the status was set, so a
+stale one cannot be detected, and the reason line already says what the session needs. Light-mode
+closed text moved from 0x8F5F00 to an olive 0x766300 (hue about 50°, against Interrupted's 26°)
+because darkened orange and amber both read as brown at 4.5:1; a test now keeps the two hues 20°
+apart.
+
+**Elsewhere**: the footer's Open Dashboard and Refresh get the summary buttons' hover capsule, and
+plan-usage lines lead with "<source> usage". The dashboard list column opens at 440 pt (up from 340)
+and can grow to 720 pt; the reserved hover slot had left about 173 pt of text at the old width.
+Settings no longer opens with a focus ring on the first help button: with keyboard navigation on,
+AppKit made it the initial key view. `defaultFocus` would only move the ring to another control, so
+the view clears the first responder on appear and on the window's first key change. Sound choices
+are resolved only for an event that fired, not for all four on every snapshot.

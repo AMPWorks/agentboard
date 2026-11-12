@@ -43,10 +43,12 @@ enum SessionColor {
 
     /// The light-appearance text colors as sRGB hex, one per text color
     /// below; SessionColorTests checks each reaches 4.5:1 on the light
-    /// popover background.
+    /// popover background. Darkened orange and amber both drift to brown,
+    /// so closed is an olive gold (hue about 50°) well clear of
+    /// interrupted's burnt orange (about 26°); the test keeps them apart.
     static let lightTextHex: [String: UInt32] = [
         "needsYou": 0xC4161C, "interrupted": 0xA84A00, "running": 0x1A7430,
-        "reviewOpen": 0x00737A, "closed": 0x8F5F00,
+        "reviewOpen": 0x00737A, "closed": 0x766300,
     ]
 
     private static func lightText(_ name: String) -> NSColor { srgb(lightTextHex[name]!) }
