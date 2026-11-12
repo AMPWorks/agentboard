@@ -51,11 +51,10 @@ struct MenuBarView: View {
     /// the list can fade its bottom while more is below.
     @State private var contentMaxY: CGFloat = 0
 
-    /// While the panel is closed the needs_you notes the query would hide
-    /// are pinned above the sessions, so the notice leaves them out.
+    /// The notice counts the needs_you notes the query hides whether the
+    /// Updates panel is open or closed: nothing else lists them.
     private var sections: PopoverSections {
-        PopoverSections.make(from: store.snapshot.sessions, query: SessionSearch(store.popoverQuery),
-                             needsYouNotesPinned: !updatesShown)
+        PopoverSections.make(from: store.snapshot.sessions, query: SessionSearch(store.popoverQuery))
     }
 
     private var updatesMode: UpdatesPanelMode { UpdatesPanelMode.parse(updatesModeRaw) }
@@ -78,9 +77,9 @@ struct MenuBarView: View {
         let feed = UpdatesState(
             hasUpdates: PopoverUpdatesSettings.hasOpenUpdates(sessions),
             matching: UpdatesFeed.total(from: sessions, query: query),
+            needsYou: PopoverUpdatesSettings.openNeedsYouCount(sessions),
             shown: shown
         )
-        let pinned = PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: shown)
         ScrollViewReader { scroller in
             VStack(spacing: 0) {
                 searchBar(sections, feed: feed, mode: mode) { kind in
@@ -95,12 +94,6 @@ struct MenuBarView: View {
                         // keeping, behind the Updates button unless Settings →
                         // Popover says otherwise. Compact (UpdatesSectionView),
                         // so it never pushes the sessions out of view.
-                        if !pinned.isEmpty {
-                            PinnedUpdatesView(rows: pinned, store: store, fontSize: updatesFont) {
-                                setUpdatesShown(true)
-                            }
-                            .reportsContentBottom()
-                        }
                         if PopoverUpdatesSettings.panelVisible(mode: mode, shown: shown, hasUpdates: feed.hasUpdates,
                                                                hasRows: !updates.isEmpty) {
                             UpdatesSectionView(
@@ -369,6 +362,9 @@ struct MenuBarView: View {
         let hasUpdates: Bool
         /// Open updates the query keeps, uncapped (`UpdatesFeed.total`).
         let matching: Int
+        /// Open needs_you notes, whatever the query: the button is red
+        /// while there are any (`PopoverUpdatesSettings.buttonTint`).
+        let needsYou: Int
         let shown: Bool
     }
 
@@ -381,9 +377,12 @@ struct MenuBarView: View {
     }
 
     /// The one-click Updates button next to the search field: the bubble,
-    /// the word and the count, tinted while the panel is open.
+    /// the word and the count, red while any session has an open needs_you
+    /// update (with the panel closed nothing else lists them), else tinted
+    /// while the panel is open.
     private func updatesButton(_ feed: UpdatesState, filtering: Bool) -> some View {
-        Button {
+        let tint = PopoverUpdatesSettings.buttonTint(needsYou: feed.needsYou, shown: feed.shown)
+        return Button {
             setUpdatesShown(!feed.shown)
         } label: {
             HStack(spacing: 3) {
@@ -394,20 +393,37 @@ struct MenuBarView: View {
                     .fontWeight(.semibold)
             }
             .font(.caption)
-            .foregroundStyle(feed.shown ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+            .foregroundStyle(Self.updatesButtonForeground(tint))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(
-                Capsule().fill(feed.shown ? AnyShapeStyle(Color.accentColor.opacity(0.18))
-                                          : AnyShapeStyle(.quaternary.opacity(0.8)))
-            )
+            .background(Capsule().fill(Self.updatesButtonBackground(tint)))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .fixedSize()
-        .help(PopoverUpdatesSettings.toggleHelp(shown: feed.shown, count: feed.matching, filtering: filtering))
+        .help(PopoverUpdatesSettings.toggleHelp(shown: feed.shown, count: feed.matching, filtering: filtering,
+                                                needsYou: feed.needsYou))
         .accessibilityLabel(PopoverUpdatesSettings.toggleAccessibilityLabel(shown: feed.shown, count: feed.matching,
-                                                                             filtering: filtering))
+                                                                             filtering: filtering,
+                                                                             needsYou: feed.needsYou))
+    }
+
+    /// Red text, accent, or secondary grey for `buttonTint`.
+    private static func updatesButtonForeground(_ tint: PopoverUpdatesSettings.ButtonTint) -> AnyShapeStyle {
+        switch tint {
+        case .needsYou: return AnyShapeStyle(SessionColor.needsYouText)
+        case .accent: return AnyShapeStyle(Color.accentColor)
+        case .plain: return AnyShapeStyle(.secondary)
+        }
+    }
+
+    /// The capsule behind the button: the tint at 18%, or a grey fill.
+    private static func updatesButtonBackground(_ tint: PopoverUpdatesSettings.ButtonTint) -> AnyShapeStyle {
+        switch tint {
+        case .needsYou: return AnyShapeStyle(SessionColor.needsYou.opacity(0.18))
+        case .accent: return AnyShapeStyle(Color.accentColor.opacity(0.18))
+        case .plain: return AnyShapeStyle(.quaternary.opacity(0.8))
+        }
     }
 
     private func searchBar(_ sections: PopoverSections, feed: UpdatesState, mode: UpdatesPanelMode,

@@ -57,15 +57,11 @@ struct PopoverSections: Sendable, Equatable {
     /// query (see `UpdatesFeed.hiddenNeedsYouNotes`). A session in Review,
     /// Snoozed or Done can hold one, so the state count above misses it;
     /// notes on Needs you / Interrupted sessions are left to that count.
-    /// Zero when `needsYouNotesPinned`: those notes are then on screen.
+    /// Counted whether the Updates panel is open or closed: with it closed
+    /// the popover lists no updates at all (the Updates button turns red).
     let hiddenNeedsYouNotes: Int
 
-    /// `needsYouNotesPinned`: the popover shows every such note above the
-    /// sessions whatever the query (the Updates panel is closed, see
-    /// `PopoverUpdatesSettings.pinnedRows`), so the query hides none of them
-    /// and the notice must not count them.
-    static func make(from sessions: [Session], query: SessionSearch,
-                     needsYouNotesPinned: Bool = false) -> PopoverSections {
+    static func make(from sessions: [Session], query: SessionSearch) -> PopoverSections {
         let filtering = !query.isEmpty
         let matched = filtering ? sessions.filter(query.matches) : sessions
         let kinds = Kind.allCases.filter { filtering || !$0.queryOnly }
@@ -90,8 +86,7 @@ struct PopoverSections: Sendable, Equatable {
             snapshotIsEmpty: sessions.isEmpty,
             hiddenCount: hidden,
             hiddenNeedingAttention: hiddenAttention,
-            hiddenNeedsYouNotes: needsYouNotesPinned
-                ? 0 : UpdatesFeed.hiddenNeedsYouNotes(from: sessions, query: query)
+            hiddenNeedsYouNotes: UpdatesFeed.hiddenNeedsYouNotes(from: sessions, query: query)
         )
     }
 
@@ -188,14 +183,11 @@ enum UpdatesFeed {
     /// (`SessionSearch.matches(_:in:)`), so a query for a PR number lists
     /// the note that mentions it, not its siblings. Ties on time keep the
     /// higher note id (the newer row) first.
-    /// `including` narrows the notes considered before the query (pinned
-    /// rows take only needs_you notes).
-    static func make(from sessions: [Session], query: SessionSearch,
-                     including include: (Note, Session) -> Bool = { _, _ in true }) -> [Item] {
+    static func make(from sessions: [Session], query: SessionSearch) -> [Item] {
         // Each note's date is parsed once, not on every comparison.
         let keyed = sessions.flatMap { session in
             session.notes
-                .filter { include($0, session) && query.matches($0, in: session) }
+                .filter { query.matches($0, in: session) }
                 .map { (date: $0.lastDate ?? .distantPast, item: Item(note: $0, session: session)) }
         }
         return keyed.sorted { a, b in

@@ -706,6 +706,28 @@ def _usage_table_line(usage, now=None):
 
 # -- mark ---------------------------------------------------------------------
 
+def _clear_needs_you_on_mark(conn, tool, session_id, now):
+    """Marking a session done or snoozed closes out its requests: dismiss
+    its open needs_you notes from its own Stop messages
+    (notes.clear_needs_you), under a savepoint so a failure is logged and
+    rolled back on its own and the mark still lands. Returns the number
+    dismissed (0 on failure)."""
+    conn.execute("SAVEPOINT needs_you_clear")
+    try:
+        cleared = notes_mod.clear_needs_you(conn, now, tool, session_id)
+        conn.execute("RELEASE needs_you_clear")
+        return cleared
+    except Exception as exc:
+        try:
+            conn.execute("ROLLBACK TO needs_you_clear")
+            conn.execute("RELEASE needs_you_clear")
+        except Exception:
+            pass
+        diag.warn("cli", "notes_clear", key=f"{tool}:{session_id}", outcome="error",
+                  exc=type(exc).__name__, msg=str(exc))
+        return 0
+
+
 def cmd_mark(args):
     conn = db.connect()
     try:
@@ -730,12 +752,15 @@ def cmd_mark(args):
             "note=COALESCE(excluded.note, triage.note), updated_at=excluded.updated_at",
             (args.tool, args.session_id, status, until, args.note, now),
         )
+        cleared = 0
+        if status in ("done", "snoozed"):
+            cleared = _clear_needs_you_on_mark(conn, args.tool, args.session_id, now)
         conn.execute("COMMIT")
     finally:
         conn.close()
     diag.info(
         "cli", "mark", key=f"{args.tool}:{args.session_id}", action=args.action,
-        status=status, until=until,
+        status=status, until=until, cleared=cleared,
         note=None if args.note is None else f"<redacted:{len(args.note)} chars>",
     )
     return 0
@@ -958,7 +983,8 @@ def cmd_notes(args):
             else:
                 print(
                     f"rebuilt notes: scanned={stats['scanned']} recorded={stats['recorded']} "
-                    f"skipped_dismissed={stats['skipped_dismissed']} deleted={stats['deleted']}"
+                    f"skipped_dismissed={stats['skipped_dismissed']} deleted={stats['deleted']} "
+                    f"cleared={stats['cleared']}"
                 )
             return 0
 

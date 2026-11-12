@@ -837,6 +837,65 @@ class MarkTests(AgentBoardTestCase):
         self.assertEqual(row["status"], "open")
         self.assertIsNone(row["until"])
 
+    # -- done / snooze clear the session's needs_you notes -----------------------
+
+    def _note(self, kind, text, source, session_id="s1", event_id=None):
+        from agentboard import notes
+
+        notes.record_note(self.conn, "claude", session_id, kind, text, source,
+                          "2026-06-15T10:00:00.000000Z", event_id=event_id)
+
+    def _open_notes(self):
+        return sorted((r["session_id"], r["kind"], r["source"])
+                      for r in _notes_rows(self.conn, "dismissed_at IS NULL"))
+
+    def _mark(self, *argv):
+        cli.cmd_mark(cli.build_parser().parse_args(["mark", "claude", "s1", *argv]))
+
+    def _seed(self):
+        insert_session(self.conn, session_id="s1")
+        self._note("needs_you", "USER_ACTION: approve the plan", "stop", event_id=1)
+        self._note("needs_you", "USER_ACTION: an older request", "backfill", event_id=1)
+        self._note("needs_you", "USER_ACTION: from the inbox", "inbox")
+        self._note("update", "PR #4 opened", "stop", event_id=1)
+        self._note("needs_you", "USER_ACTION: elsewhere", "stop", session_id="s2", event_id=1)
+
+    def test_done_and_snooze_clear_the_sessions_stop_needs_you_notes(self):
+        for action in (["done"], ["snooze", "--hours", "2"]):
+            with self.subTest(action=action[0]):
+                self.conn.execute("DELETE FROM notes")
+                self.conn.execute("DELETE FROM triage")
+                self.conn.execute("DELETE FROM sessions")
+                self._seed()
+                self._mark(*action)
+                self.assertEqual(self._open_notes(), [
+                    ("s1", "needs_you", "inbox"), ("s1", "update", "stop"), ("s2", "needs_you", "stop"),
+                ])
+                stamp = self.conn.execute("SELECT updated_at FROM triage").fetchone()[0]
+                dismissed = {r[0] for r in self.conn.execute(
+                    "SELECT dismissed_at FROM notes WHERE dismissed_at IS NOT NULL")}
+                self.assertEqual(dismissed, {stamp})
+
+    def test_mark_open_clears_nothing_and_undoing_done_does_not_reopen(self):
+        self._seed()
+        self._mark("open")
+        self.assertEqual(len(self._open_notes()), 5)
+        self._mark("done")
+        self._mark("open")
+        self.assertEqual(len(self._open_notes()), 3)
+        # A reset rebuild keeps them dismissed too.
+        _run_cmd(["notes", "--rebuild", "--reset"])
+        self.assertNotIn(("s1", "needs_you", "stop"), self._open_notes())
+
+    def test_clear_failure_still_marks_the_session(self):
+        self._seed()
+        with mock.patch("agentboard.notes.clear_needs_you", side_effect=RuntimeError("boom")):
+            self._mark("done")
+        row = self.conn.execute("SELECT status FROM triage").fetchone()
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(len(self._open_notes()), 5)
+        self.assertIn("notes_clear", (self.agentboard_home / "agentboard.log").read_text())
+
 
 def _no_shellouts(*args, **kwargs):
     raise AssertionError("subprocess.run should not be called here")

@@ -327,18 +327,6 @@ struct UpdatesFeedSortTests {
         #expect(feed.last?.note.lastDate == nil)
     }
 
-    /// Pinned rows skip the full feed; they must still be exactly its
-    /// needs_you rows of sessions that are not red, in feed order.
-    @Test func pinnedRowsMatchTheFeedsNeedsYouRows() {
-        let sessions = Self.manyNotes(sessions: 9, perSession: 6)
-        let expected = UpdatesFeed.rows(from: sessions, query: SessionSearch("")).filter { row in
-            row.isNeedsYou && row.session.state != .needsYou && row.session.state != .interrupted
-        }
-        #expect(!expected.isEmpty)
-        #expect(PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: false) == expected)
-        #expect(PopoverUpdatesSettings.pinnedRows(from: sessions, panelShown: true).isEmpty)
-    }
-
     @Test func dateParsingKeepsItsFormats() {
         #expect(ISO8601DateParsing.date(from: "2026-10-15T10:00:00Z")?.timeIntervalSince1970 == 1_792_058_400)
         #expect(ISO8601DateParsing.date(from: "2026-10-15T10:00:00.500000Z")?.timeIntervalSince1970

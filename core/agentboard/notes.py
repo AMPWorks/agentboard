@@ -16,12 +16,18 @@ outage.
 """
 
 import json
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 KINDS = ("needs_you", "update", "error")
 SOURCES = ("stop", "cli", "inbox", "provider", "backfill")
+# Sources of the needs_you notes that clear by themselves when the user
+# answers in the session or marks it done/snoozed: the ones classified from
+# the session's own Stop messages. Notes from `agentboard note`, the inbox or
+# a provider are left alone (a provider would re-record them on refresh).
+CLEARABLE_SOURCES = ("stop", "backfill")
 
 MAX_TEXT_CHARS = 4000
 FINGERPRINT_CHARS = 200
@@ -539,11 +545,12 @@ def is_valid_note(note) -> bool:
 
 # -- dismiss / rebuild ----------------------------------------------------------------
 
-def dismiss(conn, now_iso, ids=None, session=None, kinds=None) -> int:
+def dismiss(conn, now_iso, ids=None, session=None, kinds=None, sources=None) -> int:
     """Set dismissed_at on open notes: the given ids, or every open note
-    when ids is None, narrowed to one (tool, session_id)'s with `session`
-    and to the given kinds with `kinds`. Returns the number dismissed. Must
-    run inside the caller's transaction."""
+    when ids is None, narrowed to one (tool, session_id)'s with `session`,
+    to the given kinds with `kinds` and to the given `source` values with
+    `sources`. Returns the number dismissed. Must run inside the caller's
+    transaction."""
     if ids is not None:
         ids = [int(i) for i in ids]
         if not ids:
@@ -565,7 +572,29 @@ def dismiss(conn, now_iso, ids=None, session=None, kinds=None) -> int:
             return 0
         query += f" AND kind IN ({','.join('?' for _ in kinds)})"
         params.extend(kinds)
+    if sources is not None:
+        sources = [source for source in sources if source in SOURCES]
+        if not sources:
+            return 0
+        query += f" AND source IN ({','.join('?' for _ in sources)})"
+        params.extend(sources)
     return conn.execute(query, params).rowcount
+
+
+def clear_needs_you(conn, now_iso, tool, session_id) -> int:
+    """Dismiss the session's open needs_you notes from CLEARABLE_SOURCES:
+    the user answered in the session or marked it done or snoozed. Returns
+    the number dismissed. Must run inside the caller's transaction."""
+    return dismiss(conn, now_iso, session=(tool, session_id), kinds=("needs_you",),
+                   sources=CLEARABLE_SOURCES)
+
+
+def prompt_clears_needs_you(kind, text) -> bool:
+    """Whether a parent prompt is the user answering, so it clears the
+    session's needs_you notes: a non-empty prompt classified human, or not
+    classified at all (legacy, or the classifier failed). A loop tick, a cron
+    firing and an injected prompt never are."""
+    return bool(text) and kind in ("human", None)
 
 
 def _meta(conn) -> dict:
@@ -608,6 +637,90 @@ def _replay_note(conn, stats, tool, session_id, kind, text, ts, event_id) -> boo
     return True
 
 
+def _clearable_sources_sql() -> str:
+    return ",".join(f"'{source}'" for source in CLEARABLE_SOURCES)
+
+
+def _ts_at_or_before(earlier, later, *, strict=False) -> bool:
+    """Whether timestamp `earlier` is at or before (strictly before, with
+    `strict`) `later`, compared as instants through _parse_ts rather than
+    as strings: events.ts, notes.last_ts and triage.updated_at are all
+    written in the `%f` microsecond form today, but a string comparison
+    would mis-order a millisecond or fraction-less value within the same
+    second. False when either side is missing or does not parse."""
+    first, second = _parse_ts(earlier), _parse_ts(later)
+    if first is None or second is None:
+        return False
+    return first < second if strict else first <= second
+
+
+def _clearable_needs_you(conn) -> dict:
+    """{(tool, session_id): newest last_event_id} of the open needs_you notes
+    a prompt could clear, so the replay updates only sessions that have one
+    and stops once a prompt is past all of them. A note without an event id
+    (no writer of these sources makes one today) keeps its session in the
+    map for the whole replay (math.inf), since only its ts can place it."""
+    clearable = {}
+    for tool, session_id, event_id in conn.execute(
+        "SELECT tool, session_id, last_event_id FROM notes WHERE dismissed_at IS NULL "
+        f"AND kind='needs_you' AND source IN ({_clearable_sources_sql()})"
+    ):
+        key = (tool, session_id)
+        clearable[key] = max(clearable.get(key, 0), math.inf if event_id is None else event_id)
+    return clearable
+
+
+def _replay_prompt_clear(conn, tool, session_id, event_id, ts) -> int:
+    """What the hook did at this human prompt (hook._clear_needs_you_notes):
+    dismiss the session's open clearable needs_you notes last seen before
+    it, stamped with the prompt's time. The hook dismisses every open one,
+    all of which predate the prompt it runs at; here "before" is by event
+    id, or, for a note without one, by last_ts strictly before the prompt's
+    ts (_ts_at_or_before), so hook and replay agree on either shape."""
+    ids = [
+        note_id for note_id, last_event_id, last_ts in conn.execute(
+            "SELECT id, last_event_id, last_ts FROM notes WHERE dismissed_at IS NULL "
+            f"AND tool=? AND session_id=? AND kind='needs_you' AND source IN ({_clearable_sources_sql()})",
+            (tool, session_id),
+        ).fetchall()
+        if (last_event_id < event_id if last_event_id is not None
+            else _ts_at_or_before(last_ts, ts, strict=True))
+    ]
+    for note_id in ids:
+        conn.execute("UPDATE notes SET dismissed_at=? WHERE id=?", (ts, note_id))
+    return len(ids)
+
+
+def _replay_triage_clear(conn) -> int:
+    """What `agentboard mark done|snooze` did (cli.cmd_mark): on a session
+    whose triage is done or snoozed, dismiss its open clearable needs_you
+    notes last seen at or before the mark (compared as instants,
+    _ts_at_or_before), stamped with the mark's time. Only the current
+    triage row is kept, so a mark later undone is not replayed; the notes
+    it dismissed then stay dismissed anyway.
+
+    Scope: rebuild runs this on every call, outside the event replay
+    window: a plain rebuild with nothing left to replay and a `--days N`
+    rebuild included, across every session, and over notes the hook
+    recorded as well as replayed ones. That is deliberate: it is what
+    clears needs_you notes left open on sessions marked done or snoozed
+    before marking cleared them, and it is idempotent (a note it would
+    dismiss is one the mark itself would have dismissed)."""
+    rows = conn.execute(
+        "SELECT n.id, n.last_ts, t.updated_at FROM notes n JOIN triage t "
+        "ON t.tool=n.tool AND t.session_id=n.session_id "
+        "WHERE n.dismissed_at IS NULL AND n.kind='needs_you' "
+        f"AND n.source IN ({_clearable_sources_sql()}) "
+        "AND t.status IN ('done', 'snoozed') AND t.updated_at IS NOT NULL"
+    ).fetchall()
+    cleared = 0
+    for note_id, last_ts, marked_at in rows:
+        if _ts_at_or_before(last_ts, marked_at):
+            conn.execute("UPDATE notes SET dismissed_at=? WHERE id=?", (marked_at, note_id))
+            cleared += 1
+    return cleared
+
+
 def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
     """Replay recorded parent Stop events through the classifier, and
     parent StopFailure events as `error` notes (failure_note_text).
@@ -629,13 +742,22 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
     the references of the session's notes that predate it: kept notes first
     seen at an earlier event (or, without an event, an earlier ts) plus the
     notes this replay recorded so far, so a replay agrees with what the hook
-    would have decided at the time. Runs in one IMMEDIATE transaction.
+    would have decided at the time. The replay also clears needs_you notes
+    the way the hook and `mark` do: a parent prompt that
+    `prompt_clears_needs_you` dismisses the session's open stop/backfill
+    needs_you notes last seen before it (at the prompt's ts), and a session
+    whose triage is done or snoozed has those last seen at or before the
+    mark dismissed (at the mark's time), so a reset rebuild does not reopen
+    an answered request. The prompt clear happens inside the replay window;
+    the triage clear (_replay_triage_clear) runs on every rebuild, whatever
+    the window or `days`, over every session. Runs in one IMMEDIATE
+    transaction.
     """
     marker_list = markers(config)
     prefixes = unattended_prefixes(config)
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(days=days) if days is not None else None
-    stats = {"scanned": 0, "recorded": 0, "skipped_dismissed": 0, "deleted": 0}
+    stats = {"scanned": 0, "recorded": 0, "skipped_dismissed": 0, "deleted": 0, "cleared": 0}
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -665,6 +787,7 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
                         (note_row[2], note_row[3], note_refs)
                     )
             replay_refs = {}
+            clearable = _clearable_needs_you(conn)
             rows = conn.execute(
                 "SELECT id, ts, tool, session_id, event, text, prompt_kind, extra FROM events "
                 "WHERE agent_id IS NULL AND id <= ? "
@@ -679,6 +802,10 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
                 if event == "UserPromptSubmit":
                     if text and kind_of_prompt != "injected":
                         last_prompt[key] = (text, kind_of_prompt)
+                    if key in clearable and prompt_clears_needs_you(kind_of_prompt, text):
+                        stats["cleared"] += _replay_prompt_clear(conn, tool, session_id, event_id, ts)
+                        if clearable[key] < event_id:
+                            del clearable[key]
                     continue
                 if event == "StopFailure":
                     # The error note the hook recorded (_record_failure_note).
@@ -712,7 +839,10 @@ def rebuild(conn, config: dict, *, days=None, reset=False, now=None) -> dict:
                     continue
                 if _replay_note(conn, stats, tool, session_id, kind, text, ts, event_id):
                     replay_refs.setdefault(key, set()).update(refs(text))
+                    if kind == "needs_you":
+                        clearable[key] = max(clearable.get(key, 0), event_id)
 
+        stats["cleared"] += _replay_triage_clear(conn)
         new_mark = max(upper, int(meta.get("rebuilt_through", 0))) if not reset else upper
         conn.execute(
             "INSERT INTO notes_meta(key, value) VALUES ('rebuilt_through', ?) "

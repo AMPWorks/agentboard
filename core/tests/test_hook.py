@@ -2094,6 +2094,120 @@ class HookNotesTests(AgentBoardTestCase):
     def _notes_dismissed_all(self):
         self.conn.execute("UPDATE notes SET dismissed_at='2026-10-20T00:00:00.000000Z'")
 
+    # -- a human prompt clears the session's needs_you notes ------------------
+
+    def _open(self, session_id=None):
+        query = "SELECT kind, source, session_id, text FROM notes WHERE dismissed_at IS NULL"
+        params = ()
+        if session_id is not None:
+            query += " AND session_id=?"
+            params = (session_id,)
+        return [tuple(r) for r in self.conn.execute(query + " ORDER BY id", params)]
+
+    def _cli_note(self, kind, text, source, session_id="s1"):
+        from agentboard import notes
+        self.conn.execute("BEGIN")
+        notes.record_note(self.conn, "claude", session_id, kind, text, source,
+                          "2026-10-20T00:00:00.000000Z")
+        self.conn.execute("COMMIT")
+
+    def test_human_prompt_clears_needs_you_notes_but_not_updates_or_errors(self):
+        self._prompt("# Autonomous loop tick")
+        self._stop(self.MILESTONE)
+        self._send({"session_id": "s1", "hook_event_name": "StopFailure",
+                    "error": "rate_limit", "last_assistant_message": "API Error: 529 overloaded"})
+        self._stop("USER_ACTION: approve the plan")
+        self._cli_note("needs_you", "USER_ACTION: replayed request", "backfill")
+        self.assertEqual(sorted(k for k, *_ in self._open()),
+                         ["error", "needs_you", "needs_you", "update"])
+        self._prompt("approved, go ahead")
+        self.assertEqual(sorted(k for k, *_ in self._open()), ["error", "update"])
+        prompt_ts = self.conn.execute(
+            "SELECT ts FROM events WHERE event='UserPromptSubmit' ORDER BY id DESC").fetchone()[0]
+        stamps = {r[0] for r in self.conn.execute(
+            "SELECT dismissed_at FROM notes WHERE kind='needs_you'")}
+        self.assertEqual(stamps, {prompt_ts})
+
+    def test_unattended_and_injected_prompts_leave_needs_you_open(self):
+        cron_prompt = "Sweep the review queue and report anything new.\n" + "Check item. " * 40
+        crons = [{"id": "c1", "schedule": "*/10 * * * *", "recurring": True, "prompt": cron_prompt}]
+        self._prompt("set up the sweep")
+        # Each parent Stop reports the session's crons; the request comes
+        # from the turn that scheduled the sweep.
+        self._stop("Scheduled.\nUSER_ACTION: approve the plan", session_crons=crons)
+        for prompt in ("# Autonomous loop tick",
+                       cron_prompt,
+                       "<task-notification>build finished</task-notification>"):
+            self._prompt(prompt)
+            self.assertEqual([k for k, *_ in self._open()], ["needs_you"], prompt[:30])
+        kinds = [r[0] for r in self.conn.execute(
+            "SELECT prompt_kind FROM events WHERE event='UserPromptSubmit' ORDER BY id")]
+        self.assertEqual(kinds, ["human", "loop", "cron", "injected"])
+
+    def test_hook_uses_the_shared_prompt_predicate(self):
+        # The hook decides with notes.prompt_clears_needs_you, the rule
+        # notes --rebuild replays, so the two cannot drift.
+        self._stop("USER_ACTION: approve the plan")
+        with mock.patch("agentboard.notes.prompt_clears_needs_you", return_value=False) as rule:
+            self._prompt("approved")
+        rule.assert_called_once_with("human", "approved")
+        self.assertEqual([k for k, *_ in self._open()], ["needs_you"])
+        with mock.patch("agentboard.notes.prompt_clears_needs_you", return_value=True):
+            self._prompt("# Autonomous loop tick")
+        self.assertEqual(self._open(), [])
+
+    def test_subagent_prompt_and_local_command_leave_needs_you_open(self):
+        self._stop("USER_ACTION: approve the plan")
+        self._prompt("summarize the diff", agent_id="sub-1")
+        self._prompt("<command-name>/model</command-name><command-args></command-args>")
+        self.assertEqual([k for k, *_ in self._open()], ["needs_you"])
+
+    def test_prompt_leaves_cli_inbox_and_provider_needs_you_open(self):
+        for source in ("cli", "inbox", "provider"):
+            self._cli_note("needs_you", f"USER_ACTION: from {source}", source)
+        self._stop("USER_ACTION: approve the plan")
+        self._prompt("done, approved")
+        self.assertEqual(sorted(s for _, s, *_ in self._open()), ["cli", "inbox", "provider"])
+
+    def test_prompt_in_another_session_changes_nothing(self):
+        self._stop("USER_ACTION: approve the plan")
+        self._prompt("unrelated work", session_id="s2")
+        self.assertEqual([(k, sid) for k, _, sid, _ in self._open()], [("needs_you", "s1")])
+
+    def test_repeat_after_a_clear_is_a_new_open_note(self):
+        self._stop("USER_ACTION: approve the plan")
+        self._prompt("not yet, one question first")
+        self.assertEqual(self._open(), [])
+        self._stop("USER_ACTION: approve the plan")
+        self.assertEqual([k for k, *_ in self._open()], ["needs_you"])
+        rows = self.conn.execute("SELECT count, dismissed_at FROM notes ORDER BY id").fetchall()
+        self.assertEqual([(r[0], r[1] is None) for r in rows], [(1, False), (1, True)])
+
+    def test_clear_failure_keeps_the_prompt_event(self):
+        self._stop("USER_ACTION: approve the plan")
+        with mock.patch("agentboard.notes.clear_needs_you", side_effect=RuntimeError("boom")):
+            self._prompt("approved")
+        self.assertEqual([k for k, *_ in self._open()], ["needs_you"])
+        events = [r[0] for r in self.conn.execute("SELECT event FROM events ORDER BY id")]
+        self.assertEqual(events, ["Stop", "UserPromptSubmit"])
+        row = self.conn.execute("SELECT last_event, last_prompt FROM sessions").fetchone()
+        self.assertEqual((row["last_event"], row["last_prompt"]), ("UserPromptSubmit", "approved"))
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_clearing_prompt_through_run_prints_nothing(self):
+        self._stop("USER_ACTION: approve the plan")
+        payload = json.dumps({"session_id": "s1", "cwd": "/tmp", "hook_event_name": "UserPromptSubmit",
+                              "prompt": "approved"})
+        captured = io.StringIO()
+        with mock.patch("sys.stdout", captured), \
+             mock.patch("agentboard.hook.subprocess.run") as run, \
+             mock.patch("agentboard.hook.subprocess.Popen"):
+            run.return_value = mock.Mock(returncode=0, stdout="")
+            hook.run("claude", stdin_stream=io.StringIO(payload))
+        self.assertEqual(captured.getvalue(), "")
+        self.assertEqual(self._open(), [])
+        self.assertFalse((self.agentboard_home / "hook-errors.log").exists())
+
     def test_classifier_failure_keeps_the_event_and_session_update(self):
         with mock.patch("agentboard.notes.classify", side_effect=RuntimeError("boom")):
             self._stop("USER_ACTION: approve the plan")
