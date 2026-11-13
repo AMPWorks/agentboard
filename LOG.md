@@ -876,3 +876,21 @@ hidden that turn from the new filter. Now `clean_prompt_text` returns None exact
 Events recorded before this change keep NULL text for `/plan <args>` turns and read as local-only;
 that is rare and corrects itself at the session's next prompt, so there is no migration. Codex
 prompts reach the hook as plain text, so only a bare `exit`/`quit` is local-only there.
+
+## 2026-11-13 06:05:13 UTC — App tests keep UserDefaults in memory
+
+Two app test suites made a real `UserDefaults(suiteName:)` per run and removed it with
+`removePersistentDomain` in a `defer`, which still leaves an empty plist in
+`~/Library/Preferences` each time. They now use the in-memory `MemoryDefaults` the sound tests
+already had, moved to a shared `TestDefaults.swift` with the typed `set` overloads overridden
+too: Swift resolves `set(true, forKey:)` and `set(700.0, forKey:)` to the typed methods, so
+overriding only `set(_: Any?, forKey:)` would let literal writes reach the real suite.
+
+Two guards keep it that way. A text scan in `core/tests` fails on `UserDefaults(suiteName:)`,
+`UserDefaults.standard` or a persistent-domain call anywhere in `app/Tests`, without needing
+Swift. It also finds every app API whose defaults parameter defaults to `.standard` and flags a
+test call that omits that argument or passes `.standard`, since either reaches the test runner's
+real domain. `swift-test.sh` lists the matching `~/Library/Preferences` names before and after
+the run and fails a run that added one, naming the files on one line (a failing run names them
+too, so leaks show up while iterating on red tests); it only reads the directory. Removing the plists earlier runs left is a one-off command in docs/DEVELOPMENT.md
+rather than a feature, since it touches the user's preferences directory.

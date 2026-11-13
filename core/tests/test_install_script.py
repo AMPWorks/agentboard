@@ -2600,6 +2600,10 @@ case "$1" in
     echo "Build complete!"
     ;;
   test)
+    if [[ -f "$S/test-leaves" ]]; then
+      mkdir -p "$HOME/Library/Preferences"
+      while IFS= read -r f; do touch "$HOME/Library/Preferences/$f"; done < "$S/test-leaves"
+    fi
     [[ ! -f "$S/test-output" ]] || cat "$S/test-output"
     exit "$(cat "$S/test-rc" 2>/dev/null || echo 0)"
     ;;
@@ -3300,6 +3304,57 @@ class SwiftTestScriptQuietTests(unittest.TestCase):
         self.assertIn("-plugin-path", argv)
         self.assertIn("-rpath", argv)
         self.assertEqual(tc.swift_sdkroot(), tc.sdk("MacOSX26.5.sdk"))
+
+    def _prefs(self):
+        return Path(self.tc.env()["HOME"]) / "Library" / "Preferences"
+
+    def test_a_leaked_userdefaults_plist_fails_the_run(self):
+        self.tc.flag("test-leaves", "agentboard.tests.appearance.X.plist\n"
+                                    "PopoverSizingTests-Y.plist\nunrelated.plist\n")
+        r = self._run(_PASSING_RUN)
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertEqual(_one_line(r.stderr),
+                         "error: the tests left UserDefaults files in ~/Library/Preferences "
+                         "(use TestDefaults, see docs/DEVELOPMENT.md): "
+                         "PopoverSizingTests-Y.plist agentboard.tests.appearance.X.plist")
+
+    def test_a_failing_run_also_names_leaked_plists(self):
+        self.tc.flag("test-leaves", "PopoverSizingTests-Y.plist\n")
+        r = self._run(_FAILING_RUN, 1)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("error: the tests left UserDefaults files in ~/Library/Preferences "
+                      "(use TestDefaults, see docs/DEVELOPMENT.md): PopoverSizingTests-Y.plist",
+                      r.stderr)
+        self.assertIn("full log:", r.stderr)
+
+    def test_a_failing_run_without_leaks_does_not_mention_them(self):
+        r = self._run(_FAILING_RUN, 1)
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("UserDefaults", r.stderr)
+
+    def test_every_guarded_name_pattern_is_caught(self):
+        for name in ("agentboard-tests-Z.plist", "agentboard.render.Z.plist"):
+            with self.subTest(name=name):
+                self.tc.flag("test-leaves", name + "\n")
+                r = self._run(_PASSING_RUN)
+                self.assertEqual(r.returncode, 1)
+                self.assertIn(name, r.stderr)
+                (self._prefs() / name).unlink()
+
+    def test_old_and_unrelated_plists_do_not_fail_the_run(self):
+        prefs = self._prefs()
+        prefs.mkdir(parents=True)
+        (prefs / "agentboard.tests.appearance.OLD.plist").touch()
+        self.tc.flag("test-leaves", "agentboard.tests.appearance.OLD.plist\n"
+                                    "com.example.other.plist\n")
+        r = self._run(_PASSING_RUN)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertIn("Test run with 3 tests", _one_line(r.stdout))
+
+    def test_no_preferences_dir_is_fine(self):
+        self.assertFalse(self._prefs().exists())
+        r = self._run(_PASSING_RUN)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
 
     def test_help(self):
         r = self.tc.run_script(self.co, "swift-test.sh", "--help")

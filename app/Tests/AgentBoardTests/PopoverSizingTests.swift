@@ -36,10 +36,8 @@ struct PopoverSizingTests {
         }
     }
 
-    @Test func resetSizeClearsTheSizeButKeepsAutoExpand() throws {
-        let suite = "PopoverSizingTests-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+    @Test func resetSizeClearsTheSizeButKeepsAutoExpand() {
+        let defaults = TestDefaults().defaults
         defaults.set(700.0, forKey: PopoverSizing.heightKey)
         defaults.set(420.0, forKey: PopoverSizing.widthKey)
         defaults.set(false, forKey: PopoverSizing.autoWidthKey)

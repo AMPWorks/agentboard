@@ -157,25 +157,6 @@ struct AttentionEventTests {
     }
 }
 
-/// Defaults kept in memory only: reads and writes never reach a plist,
-/// the app's own domain or the global domain. A real suite would leave a
-/// file in ~/Library/Preferences even after `removePersistentDomain`.
-final class MemoryDefaults: UserDefaults, @unchecked Sendable {
-    private var values: [String: Any] = [:]
-
-    override func object(forKey defaultName: String) -> Any? { values[defaultName] }
-    override func string(forKey defaultName: String) -> String? { values[defaultName] as? String }
-    override func bool(forKey defaultName: String) -> Bool { values[defaultName] as? Bool ?? false }
-    override func set(_ value: Any?, forKey defaultName: String) { values[defaultName] = value }
-    override func removeObject(forKey defaultName: String) { values[defaultName] = nil }
-}
-
-/// A uniquely named in-memory defaults suite, never the app's own domain;
-/// nothing to clean up.
-struct TestDefaults {
-    let defaults: UserDefaults = MemoryDefaults(suiteName: "agentboard-tests-\(UUID().uuidString)")!
-}
-
 /// A temporary folder of (empty) files standing in for sounds.
 struct TempSoundsDir {
     let url: URL
