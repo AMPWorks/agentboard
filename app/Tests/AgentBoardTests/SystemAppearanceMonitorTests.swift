@@ -6,10 +6,8 @@ import Testing
 struct SystemAppearanceMonitorTests {
     /// Sets the key explicitly each time: a suite's search list falls back to
     /// the global domain, so a removed key would read the real system setting.
-    @Test func readsAppleInterfaceStyle() throws {
-        let suite = "agentboard.tests.appearance.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+    @Test func readsAppleInterfaceStyle() {
+        let defaults = TestDefaults().defaults
 
         defaults.set("Dark", forKey: "AppleInterfaceStyle")
         #expect(SystemAppearanceMonitor.systemIsDark(defaults: defaults))

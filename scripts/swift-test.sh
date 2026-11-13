@@ -30,6 +30,11 @@ wasn't found or a --filter/--skip matched nothing. Only -- --list-tests
 
 Output is always written to $TEST_LOG.
 
+A run that leaves a new UserDefaults plist in ~/Library/Preferences
+(agentboard.tests.*, agentboard-tests-*, PopoverSizingTests*, agentboard.render.*)
+fails, naming the files (a failing run names them too): app tests must use
+TestDefaults (in memory).
+
 Env vars:
   AGENTBOARD_SDKROOT    default|<sdk dir>: skip the SwiftUI-macro SDK check, or force an SDK
   AGENTBOARD_VERBOSE    1: stream the full output
@@ -64,6 +69,17 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Prints, sorted, the names of the files in ~/Library/Preferences that an
+# app test run must never create: the UserDefaults suites tests once made
+# with UserDefaults(suiteName:). Only reads the directory.
+test_prefs_files() {
+  local dir="$HOME/Library/Preferences"
+  [[ -d "$dir" ]] || return 0
+  ls -1 "$dir" 2>/dev/null \
+    | grep -E '^(agentboard[.-]tests|PopoverSizingTests|agentboard\.render)' \
+    | LC_ALL=C sort || true
+}
 
 # Identical to build-app.sh's _swiftui_macro_probe -- see its comment.
 # Duplicated rather than shared so this script keeps working standalone.
@@ -263,6 +279,7 @@ for arg in ${extra[@]+"${extra[@]}"}; do
   fi
 done
 
+PREFS_BEFORE="$(test_prefs_files)"
 mkdir -p "$LOG_DIR"
 RC=0
 if [[ "$VERBOSE" -eq 1 || "$LISTING" -eq 1 ]]; then
@@ -278,6 +295,14 @@ plain_log() {
   sed "s/${ESC}\[[0-9;]*m//g" "$TEST_LOG"
 }
 
+# Checked after every run (pass or fail) except a listing, so leaks are
+# reported while iterating on red tests too.
+LEFT=""
+if [[ "$LISTING" -ne 1 ]]; then
+  LEFT="$(LC_ALL=C comm -13 <(printf '%s\n' "$PREFS_BEFORE") <(test_prefs_files) | grep -v '^$' | tr '\n' ' ')" || LEFT=""
+fi
+LEAK_MSG="error: the tests left UserDefaults files in ~/Library/Preferences (use TestDefaults, see docs/DEVELOPMENT.md): ${LEFT% }"
+
 if [[ "$RC" -ne 0 ]]; then
   if [[ "$VERBOSE" -ne 1 && "$LISTING" -ne 1 ]]; then
     EXCERPT="$(plain_log | grep -E "error:|recorded an issue|failed after|Test .* failed" \
@@ -287,6 +312,7 @@ if [[ "$RC" -ne 0 ]]; then
     fi
     printf '%s\n' "$EXCERPT" >&2
   fi
+  [[ -z "$LEFT" ]] || echo "$LEAK_MSG" >&2
   echo "full log: $TEST_LOG" >&2
   exit "$RC"
 fi
@@ -297,6 +323,11 @@ fi
 
 if ! plain_log | grep -Eq "Test run with [1-9][0-9]* tests?"; then
   echo "error: swift test ran no Swift Testing tests (Testing.framework not found, or a --filter/--skip matched nothing?); full log: $TEST_LOG" >&2
+  exit 1
+fi
+
+if [[ -n "$LEFT" ]]; then
+  echo "$LEAK_MSG" >&2
   exit 1
 fi
 

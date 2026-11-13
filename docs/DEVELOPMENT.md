@@ -80,6 +80,30 @@ plus `-Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib
 where the plugin sits in that subdirectory, and `SDKROOT=<an older SDK>` where the default SDK
 can't expand SwiftUI macros.
 
+### Test isolation: UserDefaults
+
+App tests take their defaults from `TestDefaults().defaults`
+(`app/Tests/AgentBoardTests/TestDefaults.swift`), an in-memory `MemoryDefaults` that never
+reaches a plist, the app's own domain or the global domain. Never use
+`UserDefaults(suiteName:)` or `UserDefaults.standard` in a test: a real suite leaves a plist in
+`~/Library/Preferences` on every run, even after `removePersistentDomain`.
+`core/tests/test_app_test_defaults.py` fails on either in `app/Tests`, and on a test call to an
+app API whose defaults parameter defaults to `.standard` that omits that argument or passes
+`.standard`; `scripts/swift-test.sh` fails a run that adds an `agentboard.tests.*`, `agentboard-tests-*`, `PopoverSizingTests*` or
+`agentboard.render.*` file there.
+
+Test runs before this fix left such plists behind. To remove them once:
+
+```
+rm -f ~/Library/Preferences/agentboard.tests.appearance.*.plist \
+  ~/Library/Preferences/PopoverSizingTests-*.plist \
+  ~/Library/Preferences/agentboard.render.*.plist \
+  ~/Library/Preferences/agentboard-tests-*.plist
+killall cfprefsd
+```
+
+`killall cfprefsd` makes the preferences daemon drop its cached copies; it restarts on its own.
+
 `app/Fixtures/` holds snapshots for running the app without the CLI:
 `AGENTBOARD_FIXTURE_PATH=app/Fixtures/snapshot-needs-you.json app/.build/release/AgentBoard`
 (one session needing you), `snapshot-quiet.json` (only done/snoozed), or `snapshot.json` (a bit of
