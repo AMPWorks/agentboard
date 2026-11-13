@@ -519,7 +519,9 @@ agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
 `done` and `snooze` also dismiss the session's open `needs_you` updates (see
 [Updates](#updates-retained-notes)); `open` brings none back.
 A new prompt in a session that was marked `done` reopens it automatically; a prompt Claude Code
-injected itself (a finished background task, another agent's message; see [Updates](#updates-retained-notes)) does not.
+injected itself (a finished background task, another agent's message; see [Updates](#updates-retained-notes)) does not,
+and neither does a local-only command (`/model`, `/compact`, a bare `/plan` or `exit`, ...), which
+starts no turn. A local-only command is not new work for the "pr merged" rule below either.
 
 A session can also reach `done` on its own, surfaced as `auto_done: true` with a `done_reason` in
 the snapshot; `done_reason: "manual"` and `auto_done: false` means a human marked it done:

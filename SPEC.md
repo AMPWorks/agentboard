@@ -163,7 +163,8 @@ Per session, compute exactly one `state`; the first rule that applies wins. (Rew
 the original spec; every `review` carries a `waiting_reason` that says what to do.)
 
 1. `done` (manual) — triage.status = done. A new UserPromptSubmit after the triage timestamp
-   reopens it (triage reset to open).
+   reopens it (triage reset to open), unless it is injected, subagent-tagged or a local-only
+   command (`hook.is_local_only_prompt`).
 2. `snoozed` — triage.status = snoozed and until > now (falls through when expired).
 3. `needs_you` — last non-subagent event is PermissionRequest, Elicitation (an MCP server asks
    the user), or Notification with type in {permission_prompt, elicitation_dialog,
@@ -178,7 +179,7 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
    limit reached"), which also records an `error` note. A StopFailure stays needs_you until new
    activity, including a `quota_auto_resume_fired` Notification (read as activity). Then the
    registry fallback, then an open (undismissed) note of kind `needs_you` while no parent
-   UserPromptSubmit is newer than the note's `last_ts` (compared as parsed times);
+   UserPromptSubmit with text is newer than the note's `last_ts` (compared as parsed times);
    `waiting_reason` = the note's marker line, else its first line.
 4. `running` — last event is an activity event (UserPromptSubmit, Pre/PostToolUse, Subagent*,
    PreCompact/PostCompact, CwdChanged, ElicitationResult, PermissionDenied) AND process alive (or no pid known and last event < 10 min old).
@@ -197,7 +198,7 @@ the original spec; every `review` carries a `waiting_reason` that says what to d
    the next two rules retires it.
 7. `done` ("pr merged") — the session is on a feature branch (not main/master/develop), at
    least one PR link records that same branch, every such link is MERGED/CLOSED, and no parent
-   prompt is newer than the newest of their `closed_at` (legacy NULL: `checked_at`). A link
+   prompt with text (a local-only command is stored without one) is newer than the newest of their `closed_at` (legacy NULL: `checked_at`). A link
    with no recorded branch never counts. `done` ("link done") — any link reports DONE.
 8. Ended sessions (`ended_at` set). A **clean exit** — Claude `prompt_input_exit`/`logout` (the
    user typed /exit at the prompt, so the turn was over, whatever the events table holds), or

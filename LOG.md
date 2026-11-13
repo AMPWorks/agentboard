@@ -856,3 +856,23 @@ Settings no longer opens with a focus ring on the first help button: with keyboa
 AppKit made it the initial key view. `defaultFocus` would only move the ring to another control, so
 the view clears the first responder on appear and on the window's first key change. Sound choices
 are resolved only for an event that fired, not for all four on every snapshot.
+
+## 2026-11-13 05:55:01 UTC — Local-only slash commands are not new work
+
+A local-only command typed at an idle prompt (`/model`, `/compact`, `/clear`, a bare `/plan` or
+`exit`) starts no model turn, and the hook already kept the finished turn's state for it. Three
+readers still counted it as the user returning: the triage reopen turned a session marked done
+back to open, `links.last_parent_prompt_at`/`_times` (and `newest_parent_prompts`) treated it as
+new work for the "pr merged" rule, as a turn start for `turn_finished_at` and as a release for
+`needs_you` notes, and `mid_turn_checker` read the time after it as mid-turn. The reopen now skips
+`hook.is_local_only_prompt`, and the links readers share one `PROMPT_HAS_TEXT_SQL` filter, since
+the hook stores exactly these prompts with NULL text. So an idle `/compact` now leaves
+`turn_finished_at` at the Stop's time, matching the state that already said "Your turn".
+
+That made `clean_prompt_text` and `is_local_only_prompt` have to agree: the cleaner dropped
+`/plan <args>` (which enters plan mode and submits its args, so it starts a turn) and would have
+hidden that turn from the new filter. Now `clean_prompt_text` returns None exactly when
+`is_local_only_prompt` is true, through one shared command parser, and stores `/plan fix it`.
+Events recorded before this change keep NULL text for `/plan <args>` turns and read as local-only;
+that is rare and corrects itself at the session's next prompt, so there is no migration. Codex
+prompts reach the hook as plain text, so only a bare `exit`/`quit` is local-only there.
