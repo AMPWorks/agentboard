@@ -874,14 +874,20 @@ class GhContext:
 # agent's message): they are not the user (or the next tick) replying.
 NOT_INJECTED_SQL = "(prompt_kind IS NULL OR prompt_kind <> 'injected')"
 
+# Excludes prompts with no text: the hook stores a local-only command
+# (/model, /compact, a bare exit, ...; hook.is_local_only_prompt) with NULL
+# text. It starts no model turn, so it is not new work, a turn start or
+# the user returning.
+PROMPT_HAS_TEXT_SQL = "(text IS NOT NULL AND text <> '')"
+
 
 def last_parent_prompt_at(conn, tool, session_id, *, any_kind=False):
-    """The ts of a session's newest parent UserPromptSubmit that is not
-    injected (any_kind: injected ones too), or None."""
+    """The ts of a session's newest parent UserPromptSubmit that has text
+    and is not injected (any_kind: injected ones too), or None."""
     kind_filter = "" if any_kind else f"AND {NOT_INJECTED_SQL} "
     row = conn.execute(
         "SELECT ts FROM events WHERE tool=? AND session_id=? AND event='UserPromptSubmit' "
-        f"AND agent_id IS NULL {kind_filter}ORDER BY id DESC LIMIT 1",
+        f"AND agent_id IS NULL AND {PROMPT_HAS_TEXT_SQL} {kind_filter}ORDER BY id DESC LIMIT 1",
         (tool, session_id),
     ).fetchone()
     return row[0] if row else None
@@ -896,7 +902,8 @@ def last_parent_prompt_times(conn, *, any_kind=False) -> dict:
         for row in conn.execute(
             "SELECT e.tool, e.session_id, e.ts FROM events e JOIN ("
             "  SELECT MAX(id) AS id FROM events WHERE event='UserPromptSubmit' "
-            f"  AND agent_id IS NULL {kind_filter}GROUP BY tool, session_id"
+            f"  AND agent_id IS NULL AND {PROMPT_HAS_TEXT_SQL} {kind_filter}"
+            "  GROUP BY tool, session_id"
             ") newest ON e.id = newest.id"
         )
     }
@@ -904,7 +911,7 @@ def last_parent_prompt_times(conn, *, any_kind=False) -> dict:
 
 def newest_parent_prompts(conn) -> dict:
     """{(tool, session_id): (id, ts, prompt_kind)} of each session's newest
-    parent prompt of any kind, injected ones included, in one grouped scan
+    parent prompt with text, of any kind (injected ones included), in one grouped scan
     of `events`. The snapshot derives the newest-prompt ts, its kind and
     the background-wait lookup from this one map. A session with no parent
     prompt is absent."""
@@ -913,7 +920,7 @@ def newest_parent_prompts(conn) -> dict:
         for row in conn.execute(
             "SELECT e.tool, e.session_id, e.id, e.ts, e.prompt_kind FROM events e JOIN ("
             "  SELECT MAX(id) AS id FROM events WHERE event='UserPromptSubmit' "
-            "  AND agent_id IS NULL GROUP BY tool, session_id"
+            f"  AND agent_id IS NULL AND {PROMPT_HAS_TEXT_SQL} GROUP BY tool, session_id"
             ") newest ON e.id = newest.id"
         )
     }
@@ -999,7 +1006,9 @@ TURN_END_EVENTS = ("Stop", "StopFailure", "Interrupt", "SessionEnd")
 
 def mid_turn_checker(conn, tool, session_id):
     """A function ts -> True while the session was mid-turn at ts: its
-    newest parent turn event at or before ts is a UserPromptSubmit.
+    newest parent turn event at or before ts is a UserPromptSubmit. A
+    prompt with no text (a local-only command at an idle prompt) starts no
+    turn and is skipped.
 
     With no parent turn events at all (a backfill-origin row, or hooks
     installed late) the turn history is unknown, so every ts counts as
@@ -1015,7 +1024,7 @@ def mid_turn_checker(conn, tool, session_id):
     for row in conn.execute(
         "SELECT ts, event FROM events WHERE tool=? AND session_id=? AND agent_id IS NULL "
         "AND event IN ('UserPromptSubmit','Stop','StopFailure','Interrupt','SessionEnd') "
-        "ORDER BY id",
+        f"AND (event <> 'UserPromptSubmit' OR {PROMPT_HAS_TEXT_SQL}) ORDER BY id",
         (tool, session_id),
     ):
         when = _ts(row["ts"])

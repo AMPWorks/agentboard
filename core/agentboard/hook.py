@@ -219,46 +219,45 @@ _COMMAND_NAME_RE = re.compile(r"<command-name>/(?P<name>[^<]+)</command-name>")
 _COMMAND_ARGS_RE = re.compile(r"<command-args>(?P<args>.*?)</command-args>", re.DOTALL)
 
 
+def _command_prompt(text):
+    """A raw prompt's command form: "/name args" for a <command-name>
+    invocation (args stripped, "" when absent), else the text unchanged,
+    plus the bare command name (None when it is not a command)."""
+    match = _COMMAND_NAME_RE.search(text)
+    if not match:
+        return text, None, ""
+    name = match.group("name").strip()
+    args_match = _COMMAND_ARGS_RE.search(text)
+    args = args_match.group("args").strip() if args_match else ""
+    return f"/{name} {args}".strip(), name, args
+
+
 def clean_prompt_text(text):
     """Resolve raw prompt/content text to the real prompt.
 
     Skill/command invocations (<command-name>/foo</command-name><command-args>ARGS</command-args>)
-    resolve to "/foo ARGS". Local-only commands with no model turn (model,
-    clear, config, mcp, effort, compact, plan) are not prompts at all and
-    resolve to None, neither is a bare exit/quit. Anything else passes
-    through unchanged.
+    resolve to "/foo ARGS". A local-only prompt (is_local_only_prompt: a
+    command with no model turn, or a bare exit/quit) is not a prompt at all
+    and resolves to None; `/plan ARGS` starts a turn and resolves to
+    "/plan ARGS". Anything else passes through unchanged.
     """
-    if text is None:
+    if text is None or is_local_only_prompt(text):
         return None
-    match = _COMMAND_NAME_RE.search(text)
-    if match:
-        name = match.group("name").strip()
-        if name in LOCAL_ONLY_COMMANDS:
-            return None
-        args_match = _COMMAND_ARGS_RE.search(text)
-        args = args_match.group("args").strip() if args_match else ""
-        text = f"/{name} {args}".strip()
-    if text.strip().lower() in EXIT_COMMANDS:
-        return None
-    return text
+    return _command_prompt(text)[0]
 
 
 def is_local_only_prompt(text) -> bool:
     """True for a raw prompt that is a local-only command with no model
     turn: a bare exit/quit, or a <command-name> in LOCAL_ONLY_COMMANDS. A
     `/plan` with non-empty <command-args> is not one: it enters plan mode
-    and submits its args as a prompt, so it starts a turn."""
+    and submits its args as a prompt, so it starts a turn. clean_prompt_text
+    maps exactly these prompts to None."""
     if not isinstance(text, str):
         return False
-    match = _COMMAND_NAME_RE.search(text)
-    if match:
-        name = match.group("name").strip()
-        args_match = _COMMAND_ARGS_RE.search(text)
-        args = args_match.group("args").strip() if args_match else ""
-        if name in LOCAL_ONLY_COMMANDS:
-            return not (name == "plan" and args)
-        text = f"/{name} {args}".strip()
-    return text.strip().lower() in EXIT_COMMANDS
+    resolved, name, args = _command_prompt(text)
+    if name in LOCAL_ONLY_COMMANDS:
+        return not (name == "plan" and args)
+    return resolved.strip().lower() in EXIT_COMMANDS
 
 
 def normalize_branch(branch):
@@ -1149,7 +1148,10 @@ def process_payload(conn, tool: str, payload: dict, now=None) -> None:
         if event == "UserPromptSubmit" and not is_subagent_tagged:
             _clear_needs_you_notes(conn, tool, session_id, now, prompt_kind, text)
 
-        if event == "UserPromptSubmit" and not is_subagent_tagged and not injected:
+        # A local-only command (/model, /compact, exit, ...) starts no turn, so
+        # it is not the user returning: a done session stays done.
+        if (event == "UserPromptSubmit" and not is_subagent_tagged and not injected
+                and not is_local_only_prompt(payload.get("prompt"))):
             conn.execute(
                 "UPDATE triage SET status='open', updated_at=? "
                 "WHERE tool=? AND session_id=? AND status='done'",

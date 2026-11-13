@@ -378,6 +378,25 @@ class SnapshotTests(AgentBoardTestCase):
         self.assertEqual(by_key["claude:s1"]["done_reason"], "pr merged")
         self.assertNotEqual(by_key["claude:legacy"]["state"], "done")
 
+    def test_local_only_command_after_a_merge_is_not_new_work(self):
+        insert_session(self.conn, session_id="s1", branch="feature-x",
+                        last_event="Stop", updated_at="2026-06-15T10:00:00.000000Z")
+        _insert_event(self.conn, "UserPromptSubmit", "ship it", ts="2026-06-15T09:00:00.000000Z")
+        self.conn.execute(
+            "INSERT INTO links(tool, session_id, kind, ref, url, state, title, checked_at, "
+            "closed_at, branch) VALUES ('claude','s1','pr','#1','u','MERGED','t',"
+            "'2026-06-15T10:00:00.000000Z','2026-06-15T09:30:00.000000Z','feature-x')"
+        )
+        # A /model after the merge: the hook stores it with no text.
+        _insert_event(self.conn, "UserPromptSubmit", None, ts="2026-06-15T09:45:00.000000Z")
+        entry = cli.build_snapshot(self.conn, include_all=True)["sessions"][0]
+        self.assertEqual((entry["state"], entry["done_reason"]), ("done", "pr merged"))
+        # A real prompt after the merge is new work.
+        _insert_event(self.conn, "UserPromptSubmit", "one more thing",
+                      ts="2026-06-15T09:50:00.000000Z")
+        entry = cli.build_snapshot(self.conn, include_all=True)["sessions"][0]
+        self.assertNotEqual(entry["state"], "done")
+
     def test_old_dead_session_is_unconcluded_not_interrupted(self):
         old = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         insert_session(
@@ -4928,11 +4947,13 @@ class SnapshotTurnFieldsTests(AgentBoardTestCase):
         self.assertIsNone(entry["background_tasks"])
         self.assertFalse(entry["turn_ends_background_wait"])
 
-    def test_idle_compact_keeps_the_state_but_not_turn_finished_at(self):
-        # An idle /compact: the local-only UserPromptSubmit (prompt-less),
-        # the compaction pair and SessionStart(compact). The hook keeps the
-        # Stop and its last_event_at, so the state still reads Review "Your
-        # turn" at the Stop's time.
+    def test_idle_compact_keeps_the_state_and_turn_finished_at(self):
+        # An idle /compact: the local-only UserPromptSubmit (stored with no
+        # text), the compaction pair and SessionStart(compact). The hook
+        # keeps the Stop and its last_event_at, so the state still reads
+        # Review "Your turn" at the Stop's time, and the notify fields agree:
+        # the text-less /compact is not a turn start, so turn_finished_at is
+        # still the Stop's ts.
         self.prompt()
         stop_ts = self.stop(background=0)
         self.prompt("<command-name>/compact</command-name>\n"
@@ -4949,13 +4970,7 @@ class SnapshotTurnFieldsTests(AgentBoardTestCase):
         entry = self.entry()
         self.assertEqual(entry["state"], "review")
         self.assertEqual(entry["waiting_reason"], "Your turn: Done.")
-        # Pins today's value, which disagrees with the state above:
-        # links.last_parent_prompt_at(any_kind=True) still counts the
-        # prompt-less /compact as a newer turn start, so the notify fields
-        # read "not finished". The todo "Local-only slash commands should
-        # not count as new work" fixes this; that change should turn this
-        # assertion into assertEqual(entry["turn_finished_at"], stop_ts).
-        self.assertIsNone(entry["turn_finished_at"])
+        self.assertEqual(entry["turn_finished_at"], stop_ts)
 
     def test_the_newest_prompt_scan_runs_once_per_snapshot(self):
         # Two sessions, one waiting on a background report-back, so every

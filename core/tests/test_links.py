@@ -922,8 +922,10 @@ class BranchDetectorRefreshTests(AgentBoardTestCase):
     def add_turns(self, *marks):
         for minutes, event in marks:
             self.conn.execute(
-                "INSERT INTO events(ts, tool, session_id, event) VALUES (?,'claude','s1',?)",
-                (iso(NOW - timedelta(minutes=minutes)), event),
+                "INSERT INTO events(ts, tool, session_id, event, text) "
+                "VALUES (?,'claude','s1',?,?)",
+                (iso(NOW - timedelta(minutes=minutes)), event,
+                 "go" if event == "UserPromptSubmit" else None),
             )
 
     def test_user_as_default_login_with_a_separate_author_account(self):
@@ -998,8 +1000,10 @@ class BranchDetectorRefreshTests(AgentBoardTestCase):
         url = self.gh.add_pr(1, author="session-account")
         for minutes, event in ((60, "UserPromptSubmit"), (40, "Stop"), (20, "UserPromptSubmit")):
             self.conn.execute(
-                "INSERT INTO events(ts, tool, session_id, event) VALUES (?,'claude','s1',?)",
-                (iso(NOW - timedelta(minutes=minutes)), event),
+                "INSERT INTO events(ts, tool, session_id, event, text) "
+                "VALUES (?,'claude','s1',?,?)",
+                (iso(NOW - timedelta(minutes=minutes)), event,
+                 "go" if event == "UserPromptSubmit" else None),
             )
         # Mid-turn (the session itself commenting): not a response.
         self.gh.comment(url, "session-account", NOW - timedelta(minutes=50))
@@ -1195,7 +1199,8 @@ class LastParentPromptTimesTests(AgentBoardTestCase):
         ]
         for tool, session_id, minutes, event, agent_id in rows:
             self.conn.execute(
-                "INSERT INTO events(ts, tool, session_id, event, agent_id) VALUES (?,?,?,?,?)",
+                "INSERT INTO events(ts, tool, session_id, event, agent_id, text) "
+                "VALUES (?,?,?,?,?,'go')",
                 (iso(NOW - timedelta(minutes=minutes)), tool, session_id, event, agent_id),
             )
         batch = links.last_parent_prompt_times(self.conn)
@@ -1210,8 +1215,8 @@ class LastParentPromptTimesTests(AgentBoardTestCase):
         rows = [(50, "human"), (40, None), (30, "loop"), (20, "injected"), (10, "injected")]
         for minutes, kind in rows:
             self.conn.execute(
-                "INSERT INTO events(ts, tool, session_id, event, prompt_kind) "
-                "VALUES (?, 'claude', 's1', 'UserPromptSubmit', ?)",
+                "INSERT INTO events(ts, tool, session_id, event, prompt_kind, text) "
+                "VALUES (?, 'claude', 's1', 'UserPromptSubmit', ?, 'go')",
                 (iso(NOW - timedelta(minutes=minutes)), kind),
             )
         newest_reply = iso(NOW - timedelta(minutes=30))
@@ -1222,6 +1227,38 @@ class LastParentPromptTimesTests(AgentBoardTestCase):
                          {("claude", "s1"): newest_any})
         self.assertEqual(links.last_parent_prompt_at(self.conn, "claude", "s1", any_kind=True),
                          newest_any)
+
+    def test_text_less_prompts_are_skipped(self):
+        # The hook stores a local-only command (/model, /compact, exit) with
+        # NULL text; an empty prompt has ''. Neither is a turn start.
+        rows = [(50, "go", "human"), (40, None, "human"), (30, "", "human")]
+        for minutes, text, kind in rows:
+            self.conn.execute(
+                "INSERT INTO events(ts, tool, session_id, event, text, prompt_kind) "
+                "VALUES (?, 'claude', 's1', 'UserPromptSubmit', ?, ?)",
+                (iso(NOW - timedelta(minutes=minutes)), text, kind),
+            )
+        real = iso(NOW - timedelta(minutes=50))
+        key = ("claude", "s1")
+        self.assertEqual(links.last_parent_prompt_at(self.conn, *key), real)
+        self.assertEqual(links.last_parent_prompt_at(self.conn, *key, any_kind=True), real)
+        self.assertEqual(links.last_parent_prompt_times(self.conn), {key: real})
+        self.assertEqual(links.last_parent_prompt_times(self.conn, any_kind=True), {key: real})
+        self.assertEqual(links.last_parent_prompt_times_any(self.conn), {key: real})
+        self.assertEqual(links.newest_parent_prompts(self.conn)[key][1], real)
+
+    def test_text_less_prompt_after_a_stop_is_not_mid_turn(self):
+        add_session(self.conn)
+        for minutes, event, text in ((60, "UserPromptSubmit", "go"), (40, "Stop", "done"),
+                                     (30, "UserPromptSubmit", None)):
+            self.conn.execute(
+                "INSERT INTO events(ts, tool, session_id, event, text) "
+                "VALUES (?, 'claude', 's1', ?, ?)",
+                (iso(NOW - timedelta(minutes=minutes)), event, text),
+            )
+        is_mid_turn = links.mid_turn_checker(self.conn, "claude", "s1")
+        self.assertTrue(is_mid_turn(iso(NOW - timedelta(minutes=50))))
+        self.assertFalse(is_mid_turn(iso(NOW - timedelta(minutes=20))))
 
     def test_injected_prompt_does_not_release_a_needs_you_note(self):
         from agentboard import cli
@@ -1265,10 +1302,11 @@ class TurnHelperTests(AgentBoardTestCase):
     def _event(self, minutes, event, session_id="s1", tool="claude", agent_id=None,
                extra=None, kind=None):
         self.conn.execute(
-            "INSERT INTO events(ts, tool, session_id, event, agent_id, extra, prompt_kind) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO events(ts, tool, session_id, event, agent_id, extra, prompt_kind, "
+            "text) VALUES (?,?,?,?,?,?,?,?)",
             (iso(NOW - timedelta(minutes=minutes)), tool, session_id, event, agent_id,
-             json.dumps(extra) if extra is not None else None, kind),
+             json.dumps(extra) if extra is not None else None, kind,
+             "go" if event == "UserPromptSubmit" else None),
         )
 
     def test_last_parent_stop_times(self):

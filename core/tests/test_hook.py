@@ -990,6 +990,27 @@ class HookProcessPayloadTests(AgentBoardTestCase):
         self._at("UserPromptSubmit", prompt="one more thing")
         self.assertEqual(status(), "open")
 
+    def test_local_only_command_does_not_reopen_done(self):
+        status = lambda: self.conn.execute(  # noqa: E731
+            "SELECT status FROM triage WHERE session_id='s1'").fetchone()[0]
+        mark_done = lambda: self.conn.execute(  # noqa: E731
+            "INSERT OR REPLACE INTO triage(tool, session_id, status, updated_at) "
+            "VALUES ('claude', 's1', 'done', '2026-01-01T00:00:00.000000Z')")
+        self._at("UserPromptSubmit", prompt="ship it")
+        self._at("Stop", last_assistant_message="shipped")
+        mark_done()
+        for prompt in ("<command-name>/model</command-name><command-args>opus</command-args>",
+                       "<command-name>/compact</command-name>", "exit",
+                       "<command-name>/plan</command-name>"):
+            self._at("UserPromptSubmit", prompt=prompt)
+            self.assertEqual(status(), "done", prompt)
+        for prompt in ("one more thing",
+                       "<command-name>/plan</command-name><command-args>fix it</command-args>"):
+            self._at("Stop", last_assistant_message="again")
+            mark_done()
+            self._at("UserPromptSubmit", prompt=prompt)
+            self.assertEqual(status(), "open", prompt)
+
     def test_injected_prompt_is_still_activity(self):
         self._at("UserPromptSubmit", prompt="go")
         self._at("Stop", last_assistant_message="done")
@@ -2162,6 +2183,39 @@ class HookNotesTests(AgentBoardTestCase):
         self._prompt("<command-name>/model</command-name><command-args></command-args>")
         self.assertEqual([k for k, *_ in self._open()], ["needs_you"])
 
+    def _note_shapes(self):
+        return [(r["kind"], r["text"], r["dismissed_at"] is None)
+                for r in self.conn.execute("SELECT * FROM notes ORDER BY id")]
+
+    def _assert_rebuild_agrees(self):
+        from agentboard import notes
+        live = self._note_shapes()
+        notes.rebuild(self.conn, {}, reset=True)
+        self.assertEqual(self._note_shapes(), live)
+        return live
+
+    def test_local_command_after_a_stop_rebuilds_to_the_same_notes(self):
+        self._prompt("# Autonomous loop tick")
+        self._stop("USER_ACTION: approve the plan")
+        self._prompt("<command-name>/model</command-name><command-args>opus</command-args>")
+        self._stop(self.MILESTONE)
+        # The /model leaves the request open and the loop tick the newest
+        # prompt, so the milestone is still an unattended update.
+        self.assertEqual([(k, o) for k, _, o in self._assert_rebuild_agrees()],
+                         [("needs_you", True), ("update", True)])
+
+    def test_plan_with_args_is_a_prompt_live_and_in_rebuild(self):
+        self._prompt("# Autonomous loop tick")
+        self._stop("USER_ACTION: approve the plan")
+        self._prompt("<command-name>/plan</command-name><command-args>fix it</command-args>")
+        self.assertEqual(self.conn.execute(
+            "SELECT text FROM events ORDER BY id DESC LIMIT 1").fetchone()[0], "/plan fix it")
+        self._stop(self.MILESTONE)
+        # /plan fix it answers the request and makes the turn attended, so
+        # the milestone is not kept.
+        self.assertEqual(self._assert_rebuild_agrees(),
+                         [("needs_you", "USER_ACTION: approve the plan", False)])
+
     def test_prompt_leaves_cli_inbox_and_provider_needs_you_open(self):
         for source in ("cli", "inbox", "provider"):
             self._cli_note("needs_you", f"USER_ACTION: from {source}", source)
@@ -2400,6 +2454,24 @@ class CleanPromptTextTests(AgentBoardTestCase):
             "<command-name>/review-pr-deterministic</command-name>"
         )
         self.assertEqual(hook.clean_prompt_text(text), "/review-pr-deterministic")
+
+    def test_plan_with_args_is_a_prompt(self):
+        text = ("<command-name>/plan</command-name><command-message>plan</command-message>"
+                "<command-args> fix it </command-args>")
+        self.assertEqual(hook.clean_prompt_text(text), "/plan fix it")
+
+    def test_plan_without_args_is_not_a_prompt(self):
+        for text in ("<command-name>/plan</command-name>",
+                     "<command-name>/plan</command-name><command-args>  </command-args>"):
+            self.assertIsNone(hook.clean_prompt_text(text), repr(text))
+
+    def test_none_exactly_for_local_only_prompts(self):
+        for text in ("exit", "/quit", "fix the bug", "<command-name>/compact</command-name>",
+                     "<command-name>/exit</command-name>",
+                     "<command-name>/plan</command-name><command-args>go</command-args>",
+                     "<command-name>/review-pr</command-name><command-args>12</command-args>"):
+            self.assertEqual(hook.clean_prompt_text(text) is None,
+                             hook.is_local_only_prompt(text), repr(text))
 
 
 class IsLocalOnlyPromptTests(AgentBoardTestCase):
