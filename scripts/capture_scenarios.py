@@ -100,6 +100,11 @@ class Board:
             "tmux_session": None,
             "permission_mode": MODES[index % len(MODES)] if session["tool"] == "claude" else None,
             "ended_at": None if state not in ("done", "unconcluded") else self.ts(1 + index * 7),
+            # This Mac's own unless a scenario says otherwise (the sample
+            # has remote rows too).
+            "machine": None,
+            "stale": False,
+            "remote_open": None,
         })
         session.update(overrides)
         # A template of the other tool keeps its model; match the tool.
@@ -226,6 +231,37 @@ def scenarios(sample):
         board.session(4, "running", tool="claude", links=[dict(pr, ref="#233")]),
         no_model(board.session(5, "running", tool="claude", links=[dict(pr, ref="#234")])),
     ]), fixed)
+    # Peer sync: this Mac's rows next to a live Mac mini (one in tmux, one
+    # needing you) and its offline, dimmed rows.
+    mini = {"id": "5f1c2a7e-3b4d-4c8e-9a61-2d7b8e0c4f19", "name": "Mac mini"}
+    studio = {"id": "0c9d8e7f-6a5b-4c3d-9e2f-1a0b9c8d7e6f", "name": "Studio"}
+
+    def remote(session, machine, stale=False, remote_open="tmux"):
+        session.update(key="%s@%s" % (session["key"], machine["id"]), machine=dict(machine),
+                       stale=stale, remote_open=remote_open, resume_command=None,
+                       can_focus=remote_open is not None)
+        return session
+
+    machines = board.snapshot([
+        board.session(0, "needs_you"),
+        remote(board.session(1, "needs_you", tool="claude"), mini, remote_open="screen"),
+        board.session(2, "running"),
+        remote(board.session(3, "running", tool="claude", tmux_session="mini-dev", tmux=True), mini),
+        board.session(4, "review"),
+        remote(board.session(5, "review", alive=False), studio, stale=True, remote_open="resume"),
+        remote(board.session(6, "running"), studio, stale=True),
+    ])
+    machines["machine"] = {"id": "9b3e6f10-7c2a-4d5e-8f91-0a4c3b2d1e6f", "name": "MacBook Pro"}
+    machines["peers"] = [
+        dict(mini, host="mac-mini.local", status="online", last_seen_at=board.ts(0), error=None,
+             session_count=2, allow_open=True),
+        dict(studio, host="studio.local", status="offline", last_seen_at=board.ts(95),
+             error="not reachable (asleep, or on another network)", session_count=2, allow_open=True),
+    ]
+    for session in machines["sessions"]:
+        if session["stale"]:
+            machines["counts"][session["state"]] -= 1
+    add("machines", machines, fixed)
     add("banner", "{ this is not a snapshot", fixed)
     return out
 

@@ -504,9 +504,16 @@ or attach refused with -1743 exits 4 `needs_automation`. A matched client exits 
       "permission_mode": "default|plan|acceptEdits|auto|dontAsk|bypassPermissions|<newer>|null",
       "denials": [{"id": 1, "ts": "ISO", "tool_name": "Bash", "reason": "[Category]",
                    "mcp_server": "string|null", "subagent": false}],
-      "denials_count": 1
+      "denials_count": 1,
+      "machine": {"id": "uuid", "name": "Mini"},
+      "stale": false, "remote_open": "tmux|resume|screen|remote-control|null",
+      "remote_control_url": "https://claude.ai/code/session_...|null"
     }
   ],
+  "machine": {"id": "uuid", "name": "Laptop"},
+  "peers": [{"id": "uuid", "name": "Mini", "host": "mini.local", "status": "online|offline|never|expired|incompatible|error",
+             "last_seen_at": "ISO|null", "error": "string|null", "session_count": 3,
+             "allow_open": true, "clock_skew_secs": 0.4}],
   "usage": [
     {"source": "claude", "label": "Claude", "updated_at": "ISO|null",
      "origin": "~/.claude/rate-limits.json",
@@ -516,7 +523,15 @@ or attach refused with -1743 exits 4 `needs_automation`. A matched client exits 
 }
 ```
 Sorted: state priority (needs_you, interrupted, review, running, unconcluded, snoozed, done),
-then updated_at desc. Default excludes done older than 7 days and non-interactive sessions;
+then updated_at desc, local and remote sessions together.
+(Added with peer sync.) A session from a paired Mac has `key` `"<tool>:<session_id>@<machine_id>"`,
+`machine` set (`null` on this Mac's own sessions), `stale` true once that Mac has sent nothing for
+45 s (its last-known state; stale sessions are left out of `counts`, and `peers[].session_count`
+reports them), `remote_open` saying how a click opens it (null: not allowed), `can_focus` true iff
+`remote_open` is set, and `resume_command` null. Fields the peer's share level withholds are
+null/empty. Top-level `machine` is this Mac's peer identity (null until first paired) and
+`peers` the paired Macs from `config.json` with their connection state. Both come from local
+files (`peers/<id>.json`, written by `peer-sync`); `snapshot` never touches the network. Default excludes done older than 7 days and non-interactive sessions;
 `--all` includes everything. Must run in < 500 ms with a few thousand sessions.
 (Added after the original spec.) `notes` lists a session's open notes, newest `last_ts` first,
 capped at 20 plus any older open `needs_you` notes (never capped out); `notes_count` is the uncapped open count; `counts.notes` sums `notes_count` over

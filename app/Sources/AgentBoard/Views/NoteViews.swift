@@ -38,12 +38,11 @@ enum NoteStyle {
     }
 
     /// The note's full text, rendered as inline markdown like the detail
-    /// view's last assistant message.
-    static func fullText(_ text: String) -> some View {
+    /// view's last assistant message. `remote`: text from another Mac, whose
+    /// non-http(s) links are dropped (`InlineMarkdown`).
+    static func fullText(_ text: String, remote: Bool = false) -> some View {
         Group {
-            if let attributed = try? AttributedString(
-                markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-            ) {
+            if let attributed = InlineMarkdown.attributed(text, remote: remote) {
                 Text(attributed)
             } else {
                 Text(text)
@@ -57,6 +56,33 @@ enum NoteStyle {
     /// so it never reads like a group row's "×N notes".
     static func countLabel(_ note: Note) -> String? {
         note.count > 1 ? "seen \(note.count) times" : nil
+    }
+}
+
+/// Inline markdown for note and assistant text.
+enum InlineMarkdown {
+    /// `text` parsed as inline markdown, nil when it doesn't parse. For text
+    /// from another Mac (`remote`), a link whose scheme is not http or https
+    /// (`file:`, `vnc:`, an app's URL scheme) loses its link attribute and
+    /// stays as plain text, so a click can't hand it to the system's URL
+    /// handler; `links[].url` is limited the same way on receipt.
+    static func attributed(_ text: String, remote: Bool) -> AttributedString? {
+        guard var attributed = try? AttributedString(
+            markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) else { return nil }
+        if remote { attributed = webLinksOnly(attributed) }
+        return attributed
+    }
+
+    static func webLinksOnly(_ value: AttributedString) -> AttributedString {
+        var copy = value
+        let unsafe = value.runs.compactMap { run -> Range<AttributedString.Index>? in
+            guard let url = run.link else { return nil }
+            let scheme = url.scheme?.lowercased()
+            return scheme == "http" || scheme == "https" ? nil : run.range
+        }
+        for range in unsafe { copy[range].link = nil }
+        return copy
     }
 }
 
@@ -185,6 +211,13 @@ struct UpdateRowView: View {
                         .background(row.session.tool == "codex" ? Color.purple.opacity(0.25) : Color.blue.opacity(0.25))
                         .clipShape(Circle())
                         .help(SessionRowView.toolHelp(row.session))
+                    if let machine = row.session.machine {
+                        // The note comes from another Mac: that Mac's chip.
+                        MachineChipView(label: store.snapshot.chipLabel(for: machine), offline: row.session.stale,
+                                        size: fontSize.minorSize + 4)
+                            .help(SessionActionHelp.machineHelp(row.session,
+                                                                lastSeen: store.snapshot.peer(for: row.session)?.lastSeenAt))
+                    }
                     Text(row.headerTitle)
                         .font(fontSize.text.bold())
                         .foregroundStyle(.secondary)
@@ -231,7 +264,7 @@ struct UpdateRowView: View {
                             .foregroundStyle(.secondary)
                     }
                 } else if expanded {
-                    NoteStyle.fullText(row.note.text)
+                    NoteStyle.fullText(row.note.text, remote: row.session.isRemote)
                         .font(fontSize.text)
                 } else {
                     Text(row.note.headline)
@@ -240,15 +273,18 @@ struct UpdateRowView: View {
                 }
             }
             VStack(spacing: 4) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark.circle")
+                // A remote session's updates are dismissed on its own Mac.
+                if !row.session.isRemote {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .help(row.isGroup ? "Dismiss all \(row.total) updates from this session" : "Dismiss")
+                    .accessibilityLabel(row.isGroup ? "Dismiss this session's updates" : "Dismiss update")
+                    // Visible at rest (the chevron under it is too), full on hover.
+                    .opacity(isHovering ? 1 : 0.6)
                 }
-                .help(row.isGroup ? "Dismiss all \(row.total) updates from this session" : "Dismiss")
-                .accessibilityLabel(row.isGroup ? "Dismiss this session's updates" : "Dismiss update")
-                // Visible at rest (the chevron under it is too), full on hover.
-                .opacity(isHovering ? 1 : 0.6)
                 if canExpand {
                     Button {
                         expanded.toggle()
@@ -309,16 +345,18 @@ private struct GroupedNoteLine: View {
             Text(RelativeTime.string(from: note.lastTs))
                 .font(fontSize.minor)
                 .foregroundStyle(.secondary)
-            Button {
-                Task { await store.dismissNote(note, of: session) }
-            } label: {
-                Image(systemName: "xmark")
+            if !session.isRemote {
+                Button {
+                    Task { await store.dismissNote(note, of: session) }
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .font(fontSize.minor)
+                .help("Dismiss this update")
+                .accessibilityLabel("Dismiss update")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .font(fontSize.minor)
-            .help("Dismiss this update")
-            .accessibilityLabel("Dismiss update")
         }
         .padding(.top, 2)
         .contentShape(Rectangle())
@@ -360,7 +398,7 @@ struct SessionNotesSection: View {
                 Text(UpdatesFeed.header(listed: session.notes.count, total: session.notesCount))
                     .font(.headline)
                 Spacer()
-                if session.notes.count > 1 {
+                if session.notes.count > 1, !session.isRemote {
                     Button("Dismiss All") { Task { await store.dismissNotes(for: session) } }
                         .controlSize(.small)
                         .help("Dismiss every open update of this session, including ones not listed")
@@ -372,7 +410,7 @@ struct SessionNotesSection: View {
                     NoteStyle.glyph(note.kind)
                         .padding(.top, 2)
                     VStack(alignment: .leading, spacing: 4) {
-                        NoteStyle.fullText(note.text)
+                        NoteStyle.fullText(note.text, remote: session.isRemote)
                             .font(.callout)
                         HStack(spacing: 6) {
                             Text(RelativeTime.string(from: note.lastTs))
@@ -385,9 +423,11 @@ struct SessionNotesSection: View {
                         .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 8)
-                    Button("Dismiss") { Task { await store.dismissNote(note, of: session) } }
-                        .controlSize(.small)
-                        .help("Dismiss this update; a later repeat starts a new one")
+                    if !session.isRemote {
+                        Button("Dismiss") { Task { await store.dismissNote(note, of: session) } }
+                            .controlSize(.small)
+                            .help("Dismiss this update; a later repeat starts a new one")
+                    }
                 }
                 .padding(8)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))

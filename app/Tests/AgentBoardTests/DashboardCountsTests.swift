@@ -31,7 +31,9 @@ struct DashboardCountsTests {
     @Test func noFiltersEqualTheSnapshotCounts() {
         let counts = badges("")
         #expect(counts.counts == Self.fixture.counts)
-        #expect(counts.total == sessions.count)
+        // A stale remote session is listed but not counted.
+        #expect(counts.total == sessions.filter { !$0.stale }.count)
+        #expect(sessions.contains { $0.stale })
     }
 
     @Test func noFiltersEqualTheSnapshotCountsForSyntheticSnapshots() {
@@ -47,7 +49,7 @@ struct DashboardCountsTests {
         let codex = badges("", tool: "codex")
         let claude = badges("", tool: "claude")
         #expect(codex.total + claude.total == all.total)
-        #expect(codex.total == sessions.filter { $0.tool == "codex" }.count)
+        #expect(codex.total == sessions.filter { $0.tool == "codex" && !$0.stale }.count)
         for state in SessionState.allCases {
             #expect(codex.count(for: state) + claude.count(for: state) == all.count(for: state))
         }
@@ -129,7 +131,8 @@ struct DashboardCountsTests {
     }
 
     @Test func stateQualifier() {
-        #expect(titles("state:review").count == 3)
+        // Three local Review sessions and the stale one from the Mac mini.
+        #expect(titles("state:review").count == 4)
     }
 
     @Test func branchQualifier() {

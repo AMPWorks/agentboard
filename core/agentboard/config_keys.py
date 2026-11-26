@@ -84,6 +84,25 @@ CONFIG_KEYS = (
         "log_level", "debug | info | warn | error", "info",
         "The diagnostic log's level; `AGENTBOARD_LOG_LEVEL` wins over it.",
     ),
+    ConfigKey(
+        "peers", "list of objects", "none",
+        "The user's other Macs this board syncs with, written by Settings → Machines when a "
+        "pairing code is added: `id` is the peer's machine id, `name` its display name, "
+        "`host` and `user` where ssh reaches it, `allow_open` whether it may open sessions "
+        "on this Mac, `public_key` and `host_key` its AgentBoard key and pinned ssh host key, "
+        "`fingerprint` its pairing code's fingerprint when it was added.",
+        fields=("id", "name", "host", "user", "allow_open", "public_key", "host_key", "fingerprint"),
+    ),
+    ConfigKey(
+        "peer_share", "full | titles | state", "full",
+        "How much of this Mac's sessions its peers receive: everything, titles without "
+        "prompt, message, note or cwd text, or state and project name only.",
+    ),
+    ConfigKey(
+        "peer_stale_days", "integer >= 0", "7",
+        "A peer's last-known sessions stay on the board (dimmed) this many days after it "
+        "was last reached.",
+    ),
 )
 
 CONFIG_KEY_NAMES = tuple(entry.key for entry in CONFIG_KEYS)

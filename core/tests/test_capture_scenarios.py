@@ -106,6 +106,16 @@ class CaptureScenariosTest(unittest.TestCase):
         self.assertEqual(sum(1 for s in rows if s.get("model") is None), 2)
         self.assertEqual(sum(1 for s in rows if s.get("model")), 2)
 
+    def test_the_machines_scenario_has_live_and_stale_remote_rows(self):
+        snap = self.fixtures()["machines"]
+        remote = [s for s in snap["sessions"] if s["machine"]]
+        self.assertTrue(any(s["stale"] for s in remote))
+        self.assertTrue(any(not s["stale"] and s["remote_open"] == "tmux" for s in remote))
+        self.assertTrue(all(s["key"].endswith("@" + s["machine"]["id"]) for s in remote))
+        self.assertEqual({p["status"] for p in snap["peers"]}, {"online", "offline"})
+        # Other scenarios are this Mac's own rows only.
+        self.assertTrue(all(s["machine"] is None for s in self.fixtures()["five-sessions"]["sessions"]))
+
     def test_only_filters_by_name(self):
         out = Path(self.tmp.name) / "only"
         self.assertEqual(self.mod.main([str(SAMPLE), str(out), "--only", "^empty$"]), 0)

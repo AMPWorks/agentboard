@@ -22,6 +22,8 @@ enum SessionRowLayout {
     /// mode icon, then the desktop app button, each only when it applies.
     enum Icon: Equatable {
         case tool
+        /// The session runs on another paired Mac (peer sync).
+        case machine
         /// A raw permission mode (`plan`, `acceptEdits`, ...).
         case mode(String)
         case desktop
@@ -38,6 +40,8 @@ enum SessionRowLayout {
 
     /// The repo line's trailing items, leading to trailing.
     enum RepoTag: Hashable {
+        /// The paired Mac a remote session runs on, by name.
+        case machine
         case tmux
         /// A Running row's background tasks, folded from its reason line
         /// (`backgroundTaskCount`).
@@ -154,6 +158,7 @@ enum SessionRowLayout {
     /// (an optional tag after them used to push them left).
     static func repoTags(for session: Session) -> [RepoTag] {
         var tags: [RepoTag] = []
+        if session.isRemote { tags.append(.machine) }
         if session.tmuxTag != nil { tags.append(.tmux) }
         if backgroundTaskCount(session) != nil { tags.append(.background) }
         if SessionModelTag.text(session) != nil { tags.append(.model) }
@@ -163,6 +168,7 @@ enum SessionRowLayout {
 
     static func iconColumn(for session: Session) -> [Icon] {
         var icons: [Icon] = [.tool]
+        if session.isRemote { icons.append(.machine) }
         if let mode = PermissionMode.rowMode(for: session) { icons.append(.mode(mode)) }
         if session.desktop { icons.append(.desktop) }
         return icons

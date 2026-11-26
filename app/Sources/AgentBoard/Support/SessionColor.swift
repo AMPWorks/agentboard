@@ -119,4 +119,44 @@ enum SessionColor {
     /// Plain-text form of the legend for tooltips, which can't render colored views.
     static let legendTooltip = legend.map { "\($0.label) (\($0.colorName))" }.joined(separator: " · ")
         + ". " + menuBarIconCaption + "."
+
+    /// The state marker's shape: a round dot for this Mac's sessions, a
+    /// diamond for a session on another Mac, so the two read apart at a
+    /// glance in the same state color, and the diamond's outline when that
+    /// Mac is offline (its last-known state; outline means "not active"
+    /// elsewhere in the app too).
+    enum MarkerShape: Equatable {
+        case dot
+        case diamond
+        case hollowDiamond
+    }
+
+    static func markerShape(for session: Session) -> MarkerShape {
+        guard session.isRemote else { return .dot }
+        return session.stale ? .hollowDiamond : .diamond
+    }
+
+    /// The marker key, shown while the board has remote sessions (the
+    /// dashboard legend, and the popover marker's tooltip).
+    static let markerKey: [(shape: MarkerShape, label: String)] = [
+        (.dot, "this Mac"), (.diamond, "another Mac"), (.hollowDiamond, "offline (last known state)"),
+    ]
+    static let markerKeyText = "● this Mac, ◆ another Mac, ◇ offline (last known state)"
+
+    /// The marker's tooltip: the row's own fact first, then the color key
+    /// (and the shape key for a remote row).
+    static func markerTooltip(for session: Session) -> String {
+        guard let machine = session.machine else { return legendTooltip }
+        let fact = session.stale
+            ? "On \(machine.name), offline: last known state \(label(for: session))."
+            : "On \(machine.name): \(label(for: session))."
+        return "\(fact) Shape: \(markerKeyText). \(legendTooltip)"
+    }
+
+    /// The marker's spoken label: the state, and the Mac for a remote one.
+    static func markerLabel(for session: Session) -> String {
+        guard let machine = session.machine else { return label(for: session) }
+        if session.stale { return "Last known: \(label(for: session)), on \(machine.name), offline" }
+        return "\(label(for: session)), on \(machine.name)"
+    }
 }

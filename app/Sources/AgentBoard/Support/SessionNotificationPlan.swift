@@ -37,8 +37,9 @@ enum SessionNotificationPlan {
     static func turnRequests(finished: [Session], context: Context) -> [Planned] {
         finished.compactMap { session in
             if context.dashboardIsKey && context.dashboardSelection == session.key { return nil }
-            let title = session.project.isEmpty ? session.displayTitle : session.project
-            let subtitle = session.displayTitle == title ? nil : session.displayTitle
+            let project = session.project.isEmpty ? session.displayTitle : session.project
+            let title = session.machine.map { "\(project) on \($0.name)" } ?? project
+            let subtitle = session.displayTitle == project ? nil : session.displayTitle
             return Planned(
                 identifier: identifier(.turn, key: session.key),
                 title: title,
@@ -53,7 +54,7 @@ enum SessionNotificationPlan {
     static func needsYou(_ session: Session) -> Planned {
         Planned(
             identifier: identifier(.needsYou, key: session.key),
-            title: "AgentBoard: needs you",
+            title: session.machine.map { "AgentBoard: needs you on \($0.name)" } ?? "AgentBoard: needs you",
             subtitle: nil,
             body: session.waitingReason ?? session.displayTitle,
             threadIdentifier: session.key,

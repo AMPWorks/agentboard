@@ -94,26 +94,42 @@ struct AgentBoardCLI: Sendable {
         return try Self.decode(data)
     }
 
-    func mark(tool: String, sessionId: String, action: String, hours: Int? = nil, note: String? = nil) async throws {
+    /// `--machine <id>` for a session of a paired Mac, else nothing.
+    static func machineArguments(_ machine: String?) -> [String] {
+        guard let machine, !machine.isEmpty else { return [] }
+        return ["--machine", machine]
+    }
+
+    static func markArguments(tool: String, sessionId: String, action: String, hours: Int?,
+                              note: String?, machine: String?) -> [String] {
+        var args = ["mark", tool, sessionId, action]
+        if let hours { args += ["--hours", String(hours)] }
+        // A note is never sent to another Mac.
+        if let note, machine == nil { args += ["--note", note] }
+        return args + machineArguments(machine)
+    }
+
+    func mark(tool: String, sessionId: String, action: String, hours: Int? = nil, note: String? = nil,
+              machine: String? = nil) async throws {
         if isFixtureMode {
             log.notice("fixture mode: skipping mark \(tool, privacy: .public):\(sessionId, privacy: .public) -> \(action, privacy: .public)")
             return
         }
         guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
-        var args = ["mark", tool, sessionId, action]
-        if let hours { args += ["--hours", String(hours)] }
-        if let note { args += ["--note", note] }
+        let args = Self.markArguments(tool: tool, sessionId: sessionId, action: action, hours: hours,
+                                      note: note, machine: machine)
         _ = try await runner.run(executable: executablePath, arguments: args)
     }
 
-    func focus(tool: String, sessionId: String) async throws {
+    func focus(tool: String, sessionId: String, machine: String? = nil) async throws {
         if isFixtureMode {
             log.notice("fixture mode: skipping focus \(tool, privacy: .public):\(sessionId, privacy: .public)")
             return
         }
         guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
         do {
-            _ = try await runner.run(executable: executablePath, arguments: ["focus", tool, sessionId])
+            _ = try await runner.run(executable: executablePath,
+                                     arguments: ["focus", tool, sessionId] + Self.machineArguments(machine))
         } catch {
             // The CLI's stderr is already a sentence for the banner; its exit
             // code says which settings pane (if any) fixes it.
@@ -122,7 +138,7 @@ struct AgentBoardCLI: Sendable {
     }
 
     @discardableResult
-    func resume(tool: String, sessionId: String, printOnly: Bool) async throws -> String {
+    func resume(tool: String, sessionId: String, printOnly: Bool, machine: String? = nil) async throws -> String {
         if isFixtureMode {
             log.notice("fixture mode: skipping resume \(tool, privacy: .public):\(sessionId, privacy: .public)")
             return ""
@@ -130,6 +146,7 @@ struct AgentBoardCLI: Sendable {
         guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
         var args = ["resume", tool, sessionId]
         if printOnly { args.append("--print") }
+        args += Self.machineArguments(machine)
         let data = try await runner.run(executable: executablePath, arguments: args)
         return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
@@ -274,6 +291,58 @@ struct AgentBoardCLI: Sendable {
         return try JSONDecoder().decode(AgentBoardPaths.self, from: data)
     }
 
+    // MARK: - Machines (peer sync)
+
+    /// `agentboard peers list --json`: this Mac, its pairing code and each
+    /// paired Mac (Settings → Machines).
+    func peersList() async throws -> PeersInfo {
+        if isFixtureMode { return PeersInfo.fixture }
+        return try JSONDecoder().decode(PeersInfo.self, from: try await runPeers(["list", "--json"]))
+    }
+
+    /// `agentboard peers add --code CODE --dry-run`: checks a pasted code
+    /// and returns what it names, changing nothing.
+    func peersPreview(code: String) async throws -> PeerPreview {
+        if isFixtureMode {
+            return PeerPreview(id: "fixture", name: "Fixture Mac", user: "you", host: "fixture.local",
+                               fingerprint: "0000-0000-0000-0000-0000-0000", own: false, known: false)
+        }
+        return try JSONDecoder().decode(PeerPreview.self,
+                                        from: try await runPeers(["add", "--code", code, "--dry-run"]))
+    }
+
+    func peersAdd(code: String, allowOpen: Bool) async throws {
+        _ = try await runPeers(["add", "--code", code, "--allow-open", allowOpen ? "on" : "off"])
+    }
+
+    func peersRemove(id: String) async throws {
+        _ = try await runPeers(["remove", "--id", id])
+    }
+
+    func peersSet(id: String, host: String? = nil, name: String? = nil, allowOpen: Bool? = nil) async throws {
+        var args = ["set", "--id", id]
+        if let host { args += ["--host", host] }
+        if let name { args += ["--name", name] }
+        if let allowOpen { args += ["--allow-open", allowOpen ? "on" : "off"] }
+        _ = try await runPeers(args)
+    }
+
+    func peersSetSelf(name: String? = nil, share: String? = nil) async throws {
+        var args = ["set-self"]
+        if let name { args += ["--name", name] }
+        if let share { args += ["--share", share] }
+        _ = try await runPeers(args)
+    }
+
+    private func runPeers(_ arguments: [String]) async throws -> Data {
+        if isFixtureMode {
+            log.notice("fixture mode: skipping peers \(arguments.first ?? "", privacy: .public)")
+            return Data("{}".utf8)
+        }
+        guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
+        return try await runner.run(executable: executablePath, arguments: ["peers"] + arguments)
+    }
+
     private static func decode(_ data: Data) throws -> Snapshot {
         let decoder = JSONDecoder()
         return try decoder.decode(Snapshot.self, from: data)
@@ -285,4 +354,161 @@ struct AgentBoardPaths: Decodable, Sendable {
     let home: String
     let db: String
     let core: String
+}
+
+/// A click on a remote session whose Mac is offline.
+struct PeerUnreachable: Error, LocalizedError {
+    var name: String
+    var errorDescription: String? { "\(name) is offline" }
+}
+
+/// Decoded `agentboard peers list --json`.
+struct PeersInfo: Decodable, Sendable, Equatable {
+    var machine: Machine
+    var code: String?
+    var fingerprint: String?
+    var host: String?
+    var user: String?
+    var codeError: String?
+    /// `on`, `off` or `unknown`.
+    var remoteLogin: String
+    var share: String
+    var peers: [Peer]
+
+    enum CodingKeys: String, CodingKey {
+        case machine, code, fingerprint, host, user, share, peers
+        case codeError = "code_error"
+        case remoteLogin = "remote_login"
+    }
+
+    init(machine: Machine, code: String?, fingerprint: String?, host: String?, user: String?,
+         codeError: String?, remoteLogin: String, share: String, peers: [Peer]) {
+        self.machine = machine
+        self.code = code
+        self.fingerprint = fingerprint
+        self.host = host
+        self.user = user
+        self.codeError = codeError
+        self.remoteLogin = remoteLogin
+        self.share = share
+        self.peers = peers
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        machine = try c.decode(Machine.self, forKey: .machine)
+        code = (try? c.decodeIfPresent(String.self, forKey: .code)) ?? nil
+        fingerprint = (try? c.decodeIfPresent(String.self, forKey: .fingerprint)) ?? nil
+        host = (try? c.decodeIfPresent(String.self, forKey: .host)) ?? nil
+        user = (try? c.decodeIfPresent(String.self, forKey: .user)) ?? nil
+        codeError = (try? c.decodeIfPresent(String.self, forKey: .codeError)) ?? nil
+        remoteLogin = ((try? c.decodeIfPresent(String.self, forKey: .remoteLogin)) ?? nil) ?? "unknown"
+        share = ((try? c.decodeIfPresent(String.self, forKey: .share)) ?? nil) ?? "full"
+        peers = (try? c.decodeIfPresent(LenientList<Peer>.self, forKey: .peers))?.items ?? []
+    }
+
+    static let fixture = PeersInfo(
+        machine: Machine(id: "fixture", name: "This Mac"), code: "agentboard-pair:fixture",
+        fingerprint: "0000-0000-0000-0000-0000-0000", host: "this-mac.local", user: "you", codeError: nil,
+        remoteLogin: "on", share: "full", peers: [])
+}
+
+/// Decoded `agentboard peers add --code CODE --dry-run`.
+struct PeerPreview: Decodable, Sendable, Equatable {
+    var id: String
+    var name: String
+    var user: String
+    var host: String
+    var fingerprint: String
+    /// The code is this Mac's own; already paired.
+    var own: Bool
+    var known: Bool
+    /// The code has this Mac's machine id but another Mac's host key: that
+    /// Mac's data folder was copied from this one, so it can't be paired.
+    var copiedIdentity: Bool = false
+    /// Why the code can't be added (own code, copied identity), in plain words.
+    var error: String?
+    /// The paired Mac this code replaces (same id, or the same key under another id).
+    var replaces: Replaced?
+
+    struct Replaced: Decodable, Sendable, Equatable {
+        var id: String
+        var name: String
+        var host: String?
+        var allowOpen: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case id, name, host
+            case allowOpen = "allow_open"
+        }
+
+        init(id: String, name: String, host: String? = nil, allowOpen: Bool = true) {
+            self.id = id
+            self.name = name
+            self.host = host
+            self.allowOpen = allowOpen
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            name = ((try? c.decodeIfPresent(String.self, forKey: .name)) ?? nil) ?? id
+            host = (try? c.decodeIfPresent(String.self, forKey: .host)) ?? nil
+            allowOpen = ((try? c.decodeIfPresent(Bool.self, forKey: .allowOpen)) ?? nil) ?? true
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, user, host, fingerprint, own, known, error, replaces
+        case copiedIdentity = "copied_identity"
+    }
+
+    init(id: String, name: String, user: String, host: String, fingerprint: String,
+         own: Bool, known: Bool, copiedIdentity: Bool = false, error: String? = nil,
+         replaces: Replaced? = nil) {
+        self.id = id
+        self.name = name
+        self.user = user
+        self.host = host
+        self.fingerprint = fingerprint
+        self.own = own
+        self.known = known
+        self.copiedIdentity = copiedIdentity
+        self.error = error
+        self.replaces = replaces
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        user = try c.decode(String.self, forKey: .user)
+        host = try c.decode(String.self, forKey: .host)
+        fingerprint = try c.decode(String.self, forKey: .fingerprint)
+        own = ((try? c.decodeIfPresent(Bool.self, forKey: .own)) ?? nil) ?? false
+        known = ((try? c.decodeIfPresent(Bool.self, forKey: .known)) ?? nil) ?? false
+        copiedIdentity = ((try? c.decodeIfPresent(Bool.self, forKey: .copiedIdentity)) ?? nil) ?? false
+        error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
+        replaces = (try? c.decodeIfPresent(Replaced.self, forKey: .replaces)) ?? nil
+    }
+
+    /// The code can be added (not this Mac's own, not a copied identity).
+    var canAdd: Bool { !own && !copiedIdentity }
+
+    /// The sheet's message for a code that can't be added, else nil.
+    var blockingMessage: String? {
+        if copiedIdentity {
+            return MachinesSettingsMessages.clean(error ?? "This code comes from a Mac whose AgentBoard data folder was copied from this one.")
+        }
+        if own { return "That is this Mac's own code: paste it on the other Mac instead." }
+        return nil
+    }
+
+    /// What the sheet says about the Mac this code replaces, else nil.
+    var replacementNote: String? {
+        guard let replaces else { return known ? "Already paired: adding it again replaces it." : nil }
+        let opening = replaces.allowOpen ? "on" : "off"
+        let who = replaces.id == id ? replaces.name : "\(replaces.name) (paired under another id)"
+        return "Already paired: adding it replaces \(who) and keeps its host. \"Allow opening\" starts at its current setting (\(opening))."
+    }
 }

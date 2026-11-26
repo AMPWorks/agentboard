@@ -11,7 +11,8 @@ import Foundation
 ///   quoted: `branch:"feat x"`). Fields: `repo:`/`project:` (project, cwd),
 ///   `path:` (cwd), `branch:`, `tool:` (tool, entrypoint, `desktop` for a
 ///   Claude desktop app session), `state:` (raw value and display
-///   name), `pr:` (links of kind `pr`), `link:` (any link). Spaces after
+///   name), `pr:` (links of kind `pr`), `link:` (any link), `machine:`
+///   (the paired Mac a remote session runs on). Spaces after
 ///   the colon are ignored: `branch: main` is `branch:main`, and
 ///   `state: "needs you"` is `state:"needs you"`. An unknown field
 ///   (`foo: bar` stays two plain terms) or a known one with nothing after it
@@ -19,7 +20,7 @@ import Foundation
 /// - An empty or whitespace-only query matches everything.
 struct SessionSearch: Sendable, Equatable {
     enum Field: Sendable, Equatable {
-        case repo, path, branch, tool, state, pr, link
+        case repo, path, branch, tool, state, pr, link, machine
 
         init?(qualifier: String) {
             switch qualifier.lowercased() {
@@ -30,6 +31,7 @@ struct SessionSearch: Sendable, Equatable {
             case "state": self = .state
             case "pr": self = .pr
             case "link": self = .link
+            case "machine": self = .machine
             default: return nil
             }
         }
@@ -152,6 +154,7 @@ struct SessionSearch: Sendable, Equatable {
             session.statusText ?? "",
             session.triage.note ?? "",
             session.sessionId,
+            session.machine?.name ?? "",
         ]
         for link in session.links {
             parts.append(link.kind)
@@ -173,6 +176,7 @@ struct SessionSearch: Sendable, Equatable {
         case .branch: return [session.branch ?? ""]
         case .tool: return [session.tool, session.entrypoint ?? "", session.desktop ? "desktop" : ""]
         case .state: return [session.state.rawValue, session.state.displayName]
+        case .machine: return [session.machine?.name ?? ""]
         case .pr:
             return session.links.filter { $0.kind == "pr" }
                 .flatMap { [$0.ref, $0.title ?? "", $0.url ?? ""] }
@@ -283,9 +287,11 @@ struct FilteredCounts: Sendable, Equatable {
     /// sessions were filtered with), so a query that only hits one note's
     /// text counts that note, as the popover's Updates header does.
     init(_ sessions: [Session], query: SessionSearch = SessionSearch("")) {
-        total = sessions.count
+        // A stale remote session (its Mac is offline) is listed but not
+        // counted, as in the snapshot's own counts.
+        total = sessions.filter { !$0.stale }.count
         for session in sessions {
-            counts.increment(session.state)
+            if !session.stale { counts.increment(session.state) }
             if session.state != .needsYou && session.state != .interrupted {
                 needsYouNotes += session.notes.filter { $0.kind == .needsYou && query.matches($0, in: session) }.count
             }

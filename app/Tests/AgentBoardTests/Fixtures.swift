@@ -36,7 +36,8 @@ enum Fixtures {
     /// `usage` is the snapshot's top-level `usage` JSON value, if any
     /// (normally a list of source objects).
     static func snapshot(
-        _ sessions: [[String: Any]], counts: [String: Int]? = nil, usage: Any? = nil
+        _ sessions: [[String: Any]], counts: [String: Int]? = nil, usage: Any? = nil,
+        top: [String: Any] = [:]
     ) -> Snapshot {
         // `Counts` decodes every key, so start from all-zero.
         var all: [String: Int] = [:]
@@ -57,8 +58,37 @@ enum Fixtures {
             "sessions": sessions,
         ]
         if let usage { json["usage"] = usage }
+        json.merge(top) { _, given in given }
         let data = try! JSONSerialization.data(withJSONObject: json)
         return try! JSONDecoder().decode(Snapshot.self, from: data)
+    }
+
+    static let peerID = "11111111-2222-4333-8444-555555555555"
+
+    /// A session of the paired Mac `peerID` ("Mini"), keyed like the CLI's.
+    static func remote(
+        _ id: String, _ state: String, stale: Bool = false, remoteOpen: String? = "tmux",
+        updatedAt: String = "2026-10-15T00:00:00Z", extra: [String: Any] = [:]
+    ) -> [String: Any] {
+        var fields: [String: Any] = [
+            "session_id": id,
+            "machine": ["id": peerID, "name": "Mini"],
+            "stale": stale,
+            "updated_at": updatedAt,
+            "can_focus": remoteOpen != nil,
+        ]
+        if let remoteOpen { fields["remote_open"] = remoteOpen }
+        return session("claude:\(id)@\(peerID)", state, alive: true,
+                       extra: fields.merging(extra) { _, given in given })
+    }
+
+    /// The snapshot's `peers` list with the one paired Mac.
+    static func peers(status: String = "online", lastSeen: String = "2026-10-15T00:00:00Z",
+                      clockSkew: Double? = nil) -> [String: Any] {
+        var peer: [String: Any] = ["id": peerID, "name": "Mini", "host": "mini.local", "status": status,
+                                   "last_seen_at": lastSeen, "session_count": 1, "allow_open": true]
+        if let clockSkew { peer["clock_skew_secs"] = clockSkew }
+        return ["peers": [peer]]
     }
 
     /// One session per (key, state) pair, all alive.

@@ -10,7 +10,7 @@ import Foundation
 enum HelpContent {
     static let topics: [HelpTopic] = [
         gettingStarted, sessionStates, popover, updates, search, dashboard,
-        links, settings, config, cli, diagnostics, privacy,
+        links, settings, machines, config, cli, diagnostics, privacy,
     ]
 
     static func topic(_ id: HelpTopic.ID) -> HelpTopic? {
@@ -112,7 +112,7 @@ enum HelpContent {
             .paragraph("A colored line under the search field (and at the top of the dashboard's session list) appears only when something is wrong. **Snapshot failed** (red) means the `agentboard` CLI or its database could not be read; the board keeps showing the last good snapshot until the next one succeeds. **Waiting on the CLI for N s** means a snapshot has been running for over 30 seconds; **No snapshot yet; the CLI is not answering** means nothing has come back since launch. **<action> failed** reports a click that did not work (mark, focus, dismiss) and goes away after 15 seconds or with its x; a failed focus that a setting fixes adds **Open Automation Settings** or **Open Desktop & Dock Settings**. **Open log** reveals `agentboard.log`, which has the details (**Copy error** copies the message instead while there is no log yet). A snapshot the app cannot decode says so and suggests reinstalling, since the app and the CLI may be different versions. Before the first snapshot arrives the list says **Loading sessions…**, or **No sessions to show until a snapshot succeeds** when it failed, never “No sessions yet” (which, after a good snapshot with no sessions, comes with a hint to start a session). The banner never changes the menu bar icon."),
             .heading("A session row"),
             .bullets([
-                "The **dot** is the state color (hover for the color key), and the round **C** or **X** badge is the tool (Claude Code or Codex). Under the badge, in the same column on every row: the Claude Code **permission mode** icon when the mode is not the default (a clipboard for **plan**: proposes a plan and waits for approval before editing; a pencil for **accept edits**: file edits go through without asking; a wand for **auto mode**: a classifier approves or denies tool calls without asking; a crossed-out hand for **don't ask**: tools that are not allowed are denied instead of asking; a shield with an exclamation mark for **bypass**: nothing asks you; a plain shield for a newer mode), then, for a session started in the **Claude desktop app**, a small desktop-window icon you can click to open that session in the desktop app. The mode icon is as of the session's last hook event (a mode change at an idle prompt shows with its next event) and is hidden once the session has ended or is done; the detail view still lists the mode. Hover an icon for its meaning.",
+                "The **dot** is the state color (hover for the color key); a session on another Mac has a **diamond** in the same color instead of the round dot (an outlined diamond while that Mac is offline), and the round **C** or **X** badge is the tool (Claude Code or Codex). Under the badge, in the same column on every row: the Claude Code **permission mode** icon when the mode is not the default (a clipboard for **plan**: proposes a plan and waits for approval before editing; a pencil for **accept edits**: file edits go through without asking; a wand for **auto mode**: a classifier approves or denies tool calls without asking; a crossed-out hand for **don't ask**: tools that are not allowed are denied instead of asking; a shield with an exclamation mark for **bypass**: nothing asks you; a plain shield for a newer mode), then, for a session started in the **Claude desktop app**, a small desktop-window icon you can click to open that session in the desktop app. The mode icon is as of the session's last hook event (a mode change at an idle prompt shows with its next event) and is hidden once the session has ended or is done; the detail view still lists the mode. Hover an icon for its meaning.",
                 "The **first line** is what the session says it is doing right now (an `agentboard status` text) when it has one, else its title; on a **Needs you** row the title always leads and the status text moves under it, since it was set while the session worked and the reason line says what it needs now. Then small tags: **Interrupted**; a speech bubble with the number of open updates (red when one needs you), which you can click to open the dashboard on that session scrolled to its updates (the needs-you one, else the newest, outlined) without jumping to the terminal; **auto-done** when the session finished on its own; **exited** on a popover Review row whose process has exited (the dashboard leaves it to the dot and the detail pane). The permission mode icon for **bypass** is orange. Hover a tag for its meaning. The time on the right is when it last changed.",
                 "The **second line** is always the **project · branch**, with on its right a **tmux · <name>** tag for a session running inside tmux (just **tmux** while its tmux session's name can't be read), an hourglass **N tasks** tag on a Running row whose last turn left background tasks running (hover for which), a small **model · context** tag such as `Opus 5.5 · 308k` or `gpt-5-codex · 45k` (the model the session last ran, shortened when the id has a known shape, and how many tokens its latest request sent; hover for the full model id and how old the count is), and last, at the row's right edge so they line up from row to row, one button per PR that is not merged or closed (`#N`: green open, gray while its state is unknown, outlined and bold when it awaits your review; merged PRs in purple and closed PRs in red appear only with Settings → General → **Show closed and merged PRs** on). A PR button opens the PR in the browser without touching the terminal; past three shown PRs a **+N** button opens the session in the dashboard.",
                 "Next comes the session's own title when a status text leads the first line (on a Needs you row, the status text under the title).",
@@ -192,7 +192,7 @@ enum HelpContent {
                 "Words are separated by spaces, and a session must match **every** word (`retry codex`).",
                 "Double quotes keep a phrase together: `\"menu bar\"`.",
                 "Matching ignores case and accents and matches anywhere in a field, so `#4` also finds `#42`.",
-                "A plain word searches the title, the first and last prompts, the last assistant message, the project, directory and branch, the tool (plus the entrypoint, and `desktop` for a Claude desktop app session), the state (`needs_you` or `Needs you`), the waiting reason and status text, every link's kind, ref, title and state, the triage note, the session id, and the text of the session's open updates. It does not search link URLs; use `pr:` or `link:` for those.",
+                "A plain word searches the title, the first and last prompts, the last assistant message, the project, directory and branch, the tool (plus the entrypoint, and `desktop` for a Claude desktop app session), the state (`needs_you` or `Needs you`), the waiting reason and status text, every link's kind, ref, title and state, the triage note, the session id, the name of the Mac a remote session runs on, and the text of the session's open updates. It does not search link URLs; use `pr:` or `link:` for those.",
                 "A `field:value` word narrows the match to one place. The value can be quoted (`branch:\"feat x\"`, `state:\"needs you\"`).",
             ]),
             .keyValue([
@@ -203,6 +203,7 @@ enum HelpContent {
                 HelpRow(key: "`state:`", value: "State, raw (`needs_you`) or as shown (`Needs you`)."),
                 HelpRow(key: "`pr:`", value: "Links of kind PR: ref, title and URL."),
                 HelpRow(key: "`link:`", value: "Any link: kind, label, ref, title, URL and state."),
+                HelpRow(key: "`machine:`", value: "The paired Mac a remote session runs on, by name (see Machines)."),
             ]),
             .paragraph("Spaces after the colon are ignored, so `branch: main` is the same as `branch:main`. An unknown qualifier (`foo:bar`) or one with nothing after it is searched as plain text, colon included."),
             .heading("In the popover"),
@@ -308,6 +309,46 @@ enum HelpContent {
             .paragraph("Claude Code names a session once, so a long-lived session keeps its opening summary. `refresh-links` retitles a session once it has `retitle_min_prompts` (default 5) new prompts since its last retitle, or changed branch, by running `retitle_command` (default: the local `claude` CLI with Haiku) on a short summary of its recent prompts and replies; at most `retitle_max_per_run` (default 5) sessions per run, and at most once an hour per session. Done, ended, user-named and week-idle sessions are left alone. Set `\"retitle_command\": null` to turn it off."),
         ])
 
+    // MARK: - Machines (peer sync)
+
+    static let machines = HelpTopic(
+        id: .machines, title: "Machines (peer sync)", symbol: "desktopcomputer",
+        blocks: [
+            .paragraph("AgentBoard can show the sessions of your other Macs next to this Mac's own, marked with the Mac they run on and updated within a couple of seconds. There is no server: each Mac pulls the others' boards over ssh, which macOS ships with as Remote Login. Traffic is encrypted, and both Macs check each other's keys."),
+            .heading("Setting it up"),
+            .bullets([
+                "On each Mac, turn on **Remote Login** (System Settings → General → Sharing). Settings → Machines shows whether it is on and opens that pane for you.",
+                "On one Mac, click **Copy pairing code** in Settings → Machines. On the other, click **Add machine…**, paste it, check that the name and fingerprint match what the first Mac shows, and click **Add**.",
+                "Do the same the other way round. Both Macs then show each other as online.",
+            ]),
+            .paragraph("The pairing code holds only public keys and names. A Mac you reach by another name away from home (a VPN or DNS name) gets that name in its **Host** field."),
+            .heading("What the other Macs see"),
+            .keyValue([
+                HelpRow(key: "Everything", value: "The default: titles, prompts, replies, updates, denials, links, folder and branch."),
+                HelpRow(key: "Titles only", value: "State, times, title, project, branch and links; no prompt, reply, update or folder text."),
+                HelpRow(key: "State only", value: "State, times and the project name."),
+            ]),
+            .paragraph("Each Mac decides for itself under **Share with other machines**. Plan usage is never shared, and a Mac never passes on sessions it received."),
+            .heading("Remote rows"),
+            .bullets([
+                "A remote row's state marker is a **diamond** instead of the round dot (same state color; an **outlined** diamond while that Mac is offline), and the row shows its Mac's name on the repo line and the Mac's **chip** under the tool badge: a rounded square with its initial (two letters, or the initial and a digit, when two Macs share one). The same chip marks that Mac's Updates rows, the detail header and Settings → Machines. The dashboard's color key adds the shape key (this Mac, another Mac, offline) while the board has remote rows. Search finds it by that name, or with `machine:<name>`.",
+                "In the **menu bar** (by default) the icon, its counts and its flash are this Mac's, and a small **diamond** at the icon's top corner shows that a session on another Mac needs you (red) or was interrupted (orange). It pulses a few times when one newly needs you, then holds (under Reduce motion it just appears). Hover the icon for how many are on which Mac. Settings → Machines → **Other Macs in the menu bar icon** can merge them into the icon instead, or leave them out.",
+                "Clicking a live session that runs in tmux opens a new terminal window here, attached to it over ssh. An ended session opens resumed on its Mac. A session served by Claude Code Remote Control (shared at **Everything**) opens its Remote Control link in the browser. Anything else (a plain terminal tab, the desktop app) opens Screen Sharing to that Mac, after asking it to bring the session forward.",
+                "**Mark Done**, **Reopen** and **Snooze** work on remote rows. Dismissing their updates and denials happens on their own Mac.",
+                "**Allow opening sessions on this Mac** under each paired Mac lets that Mac attach to and resume your sessions here: that is shell access as you. Off, it can only read the board and mark sessions.",
+            ]),
+            .heading("When a Mac is asleep or away"),
+            .paragraph("After 45 seconds without news a Mac counts as offline: its rows stay, dimmed, in their last-known state with an outlined diamond and a dashed chip, and the chip's tooltip says since when. They never colour the menu bar icon, flash, notify or play a sound, and clicking one says the Mac is offline. When it comes back the rows go live without a burst of notifications. A Mac not reached for 7 days (`peer_stale_days`) drops off the board."),
+            .heading("If it doesn't connect"),
+            .keyValue([
+                HelpRow(key: "Remote Login is off there", value: "Turn it on on that Mac."),
+                HelpRow(key: "Not authorized there", value: "Add this Mac's pairing code on that Mac."),
+                HelpRow(key: "Not reachable / can't be found", value: "A `.local` name works on the same network only: edit **Host** to a name that reaches it."),
+                HelpRow(key: "Host key does not match", value: "That Mac's ssh host key changed (a reinstall): remove it and pair again."),
+            ]),
+            .paragraph("`agentboard logs --grep peer` shows the sync's own log lines on either Mac. **Remove** deletes the Mac from config.json, its pinned key and its line in `~/.ssh/authorized_keys`, and nothing else."),
+        ])
+
     // MARK: - 8. Settings
 
     static let settings = HelpTopic(
@@ -356,6 +397,17 @@ enum HelpContent {
                 HelpRow(key: "Use the full width to the screen edge", value: "On by default: the popover reaches from the menu bar icon to the right edge of the screen. Dragging the corner grip sideways turns it off and keeps that width; turning it off here keeps the width you last dragged to, or the current width if you never dragged (key `popoverWidth`, in points; 0 until you drag). Key `popoverAutoWidth`."),
                 HelpRow(key: "Reset size", value: "Goes back to the default height and the full width, the same as double-clicking the corner grip. The height you drag to is kept under `popoverHeight` (points of session list, default 388); it is a cap, so a popover with less to show is shorter. A size saved on a larger display is shrunk to fit a smaller one without being forgotten."),
             ]),
+            .heading("Machines"),
+            .paragraph("Syncs this board with your other Macs (see **Machines (peer sync)**). Everything here is stored in config.json and `~/.ssh/authorized_keys`, except the two toggles."),
+            .keyValue([
+                HelpRow(key: "This Mac", value: "Its name on the other boards (editable), **Copy pairing code**, and whether Remote Login is on, with a button to System Settings → General → Sharing."),
+                HelpRow(key: "Add machine…", value: "Paste the other Mac's pairing code, check that the name and the fingerprint (six groups of four characters) match what that Mac shows, then **Add**. Do the same the other way round on the other Mac."),
+                HelpRow(key: "Paired machines", value: "Each Mac's status (online, offline since when, or what went wrong), its host (editable, for a Mac you reach by another name), **Allow opening sessions on this Mac** (on by default: lets that Mac attach to or resume your sessions over ssh, which is shell access as you) and **Remove**."),
+                HelpRow(key: "Share with other machines", value: "**Everything** (default), **Titles only** (no prompts, replies, updates or folders) or **State only** (state and project name). Stored as `peer_share` in config.json."),
+                HelpRow(key: "Show sessions from other machines", value: "On by default. Off hides their rows and stops syncing. Key `showRemoteSessions`."),
+                HelpRow(key: "Notify for sessions on other machines", value: "On by default. Off keeps their rows but never notifies, plays a sound or flashes the icon for them. A Mac that is offline never does either way. Key `notifyRemoteSessions`."),
+                HelpRow(key: "Other Macs in the menu bar icon", value: "**Separate marker** (default): the icon, its counts and its flash are this Mac's, and a diamond at its top corner takes the color of the most urgent session on another Mac that needs you or was interrupted; it pulses a few times when one newly needs you. **Merged with this Mac**: other Macs' sessions color, count and flash the icon like this Mac's. **Not shown**: the icon ignores other Macs (their rows still show). Key `menuBarIconRemote` (`separate`, `merged`, `hidden`)."),
+            ]),
             .heading("CLI & Data"),
             .keyValue([
                 HelpRow(key: "agentboard path override", value: "Empty by default. AgentBoard looks for the `agentboard` CLI in its own app bundle, then on `$PATH`, then here. Key `agentboardPath`."),
@@ -391,6 +443,9 @@ enum HelpContent {
                 HelpRow(key: "`prune_days`", value: "Integer ≥ 0, default `90`. The daily `prune` deletes sessions idle this many days, with their events, links and updates, and dismissed updates older than this. A session with an open needs_you update, a PR awaiting you, an active snooze or a live process is never deleted. `0` never deletes."),
                 HelpRow(key: "`compact_days`", value: "Integer ≥ 0, default `7`. The daily `prune` deletes tool-use and subagent events, and permission denials, older than this many days (prompts, replies and session start and end are kept). `0` never compacts."),
                 HelpRow(key: "`log_level`", value: "`debug`, `info`, `warn` or `error`, default `info`. The diagnostic log's level; the `AGENTBOARD_LOG_LEVEL` environment variable wins over it."),
+                HelpRow(key: "`peers`", value: "Your other Macs, written by Settings → Machines when you add a pairing code: `id`, `name`, `host`, `user`, `allow_open`, `public_key`, `host_key` and `fingerprint` for each."),
+                HelpRow(key: "`peer_share`", value: "`full`, `titles` or `state`, default `full`. How much of this Mac's sessions its peers receive."),
+                HelpRow(key: "`peer_stale_days`", value: "Integer, default 7. A peer's last-known sessions stay on the board, dimmed, this many days after it was last reached."),
             ]),
             .heading("Example"),
             .code(#"""
@@ -427,6 +482,14 @@ enum HelpContent {
                 HelpRow(key: "`agentboard mark <tool> <id> done|open|snooze`", value: "Set your own triage. `--hours N` for how long to snooze; `--note TEXT` to attach a note. `done` and `snooze` also clear the session's needs_you updates."),
                 HelpRow(key: "`agentboard focus <tool> <id>`", value: "Bring the session's terminal tab to the front, switching to its desktop (verified with iTerm2 on one display with the Desktop & Dock setting on; Apple Terminal, a second display and the setting off are expected to work but not verified). For a session running inside tmux: select its tmux window and pane, then focus the iTerm2 or Terminal tab with a client attached to that tmux session, or open a new iTerm window (Terminal when iTerm isn't installed) running `tmux attach-session` to it; the tmux path doesn't check that the window reached the screen. For a Claude desktop app session: open it in the desktop app with its `claude://code/continue` link (the id is looked up in the app's own session list at click time), or just bring the app forward when that fails. Exits 0 when the window is on screen (or that can't be checked), 1 when it failed (tab not found, timeout, no terminal), 4 when AgentBoard may not control the terminal (Automation), 5 when macOS stayed on this desktop."),
                 HelpRow(key: "`agentboard resume <tool> <id>`", value: "Open a new terminal tab that resumes the session. `--print` only prints the command."),
+                HelpRow(key: "`--machine <id>`", value: "On `focus`, `resume` and `mark`: act on a session of another Mac (see Machines). Focus opens a new local terminal window attached over ssh to its tmux session, resumes an ended session on that Mac, or opens Screen Sharing for anything else. Exits 6 when that Mac is offline or not paired."),
+            ]),
+            .heading("Machines (peer sync)"),
+            .keyValue([
+                HelpRow(key: "`agentboard peers`", value: "What Settings → Machines runs. `list --json` (this Mac, its pairing code and Remote Login status, and each paired Mac's status); `add --code CODE` (`--host`, `--name`, `--allow-open on|off`, default on for a new Mac and unchanged for one paired again, `--dry-run` to only check the code and name the Mac it replaces); `remove --id ID` or `--all` (`--dry-run` prints what would go); `set --id ID` with `--host`, `--name` or `--allow-open on|off`; `set-self` with `--name` or `--share full|titles|state`."),
+                HelpRow(key: "`agentboard peer-sync`", value: "The long-running process the app starts while machines are paired: one ssh connection per paired Mac, each update written to the data directory's `peers/` folder. `--once` stops after the first update from each peer."),
+                HelpRow(key: "`agentboard peer-gate`", value: "The forced command another Mac's key runs on this one (in `~/.ssh/authorized_keys`). It accepts only `serve`, `mark`, `attach`, `resume` and `focus`, and checks every argument against this Mac's own database."),
+                HelpRow(key: "`agentboard peer-open`", value: "Runs inside the terminal window that focus `--machine` opens: ssh with a terminal to the other Mac's gate. `--machine ID --verb attach|resume <tool> <id>`."),
             ]),
             .heading("Reporting from inside a session"),
             .keyValue([
@@ -516,7 +579,8 @@ enum HelpContent {
             .paragraph("Once a day the app runs `agentboard prune --auto`. It deletes sessions idle for 90 days (`prune_days`) together with their events, links and updates, but never one that still has an open needs_you update, a PR awaiting you, an active snooze or a live process. Tool-use and subagent events, most of the database, are deleted after 7 days (`compact_days`) from every session, and so are permission denials; prompts, replies and session start and end stay. Dismissed updates go after `prune_days`. When enough space is free the database is vacuumed, at most once a week. Set either value to `0` in config.json to keep everything."),
             .paragraph("Besides its own data directory, AgentBoard reads only Claude Code's and Codex's files under `~/.claude` and `~/.codex` (transcripts and rollouts, the session registry, and Claude Code's plan-usage cache `rate-limits.json`) and each session's git branch."),
             .heading("Network"),
-            .paragraph("Only `agentboard refresh-links` uses the network, and only through tools you set up: the GitHub CLI `gh` (PRs and their reviews), the provider commands in config.json, and the retitle command (by default the local `claude` CLI, which sends a short summary of a session's recent prompts and replies to the model). The snapshot the app polls never touches the network. Set `\"retitle_command\": null` to turn retitling off."),
+            .paragraph("With Machines (peer sync) set up, `agentboard peer-sync` (which the app runs) keeps an ssh connection to each paired Mac, and focusing, resuming or marking a remote session makes one ssh call; it all stays between your own Macs. Their files are `machine.json`, `peer-keys/`, `peers/`, `peers.stamp` and `peer-sync.lock` in the data directory, plus one marked line per paired Mac in `~/.ssh/authorized_keys`."),
+            .paragraph("Otherwise only `agentboard refresh-links` uses the network, and only through tools you set up: the GitHub CLI `gh` (PRs and their reviews), the provider commands in config.json, and the retitle command (by default the local `claude` CLI, which sends a short summary of a session's recent prompts and replies to the model). The snapshot the app polls never touches the network. Set `\"retitle_command\": null` to turn retitling off."),
             .heading("Removing AgentBoard"),
             .paragraph("`scripts/uninstall.sh` removes the app, the installed CLI and only AgentBoard's own hook entries; any other hooks in `~/.claude/settings.json` and `~/.codex/hooks.json` are left as they are. When removing those entries leaves a file exactly as it was before the install, the original bytes are written back from the backup `install-hooks` made, so its formatting returns too; if the install created the file and nothing else is left in it, the file is deleted. A `hooks = true` that `enable-codex-hooks` added to an existing `~/.codex/config.toml` stays (its backup sits beside it); a `config.toml` that `enable-codex-hooks` created and that still holds nothing else is deleted. The data directory is kept unless you pass `--purge-data`. `--dry-run` previews; `--no-hooks` and `--no-app` skip parts. `agentboard prune --days N` deletes old sessions without uninstalling (`--days 0` deletes none)."),
         ])

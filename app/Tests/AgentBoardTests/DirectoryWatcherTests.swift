@@ -92,8 +92,9 @@ struct DirectoryWatcherTests {
         #expect(calls == 1)
     }
 
-    @Test func storeStampsTheDatabaseItsWalAndConfig() {
+    @Test func storeStampsTheDatabaseItsWalConfigAndPeersStamp() {
         #expect(SnapshotStore.stampedFiles(home: "/data", db: "/data/agentboard.db")
-                == ["/data/agentboard.db", "/data/agentboard.db-wal", "/data/config.json"])
+                == ["/data/agentboard.db", "/data/agentboard.db-wal", "/data/config.json",
+                    "/data/peers.stamp"])
     }
 }

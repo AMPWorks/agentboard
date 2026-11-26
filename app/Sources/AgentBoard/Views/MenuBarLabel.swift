@@ -16,49 +16,52 @@ struct MenuBarLabel: View {
     @AppStorage(MenuBarIconSettings.coloredKey) private var colored: Bool = true
     @AppStorage(MenuBarIconSettings.flashKey) private var flash: Bool = true
     @AppStorage(MenuBarIconSettings.flashStopKey) private var flashStop: String = FlashStopPolicy.onOpen.rawValue
+    @AppStorage(SettingsKeys.notifyRemoteSessions) private var notifyRemote: Bool = true
+    @AppStorage(MenuBarIconSettings.remoteModeKey) private var remoteMode: String = RemoteIconMode.separate.rawValue
 
-    private var urgentCount: Int { store.snapshot.counts.needsYou + store.snapshot.counts.interrupted }
-    private var reviewCount: Int { store.snapshot.counts.review }
-
-    /// "AgentBoard: 2 need you, 1 to review", or "AgentBoard: nothing needs you".
-    private var tooltip: String {
-        var parts: [String] = []
-        if urgentCount > 0 { parts.append("\(urgentCount) need\(urgentCount == 1 ? "s" : "") you") }
-        if reviewCount > 0 { parts.append("\(reviewCount) to review") }
-        let summary = parts.isEmpty ? "nothing needs you" : parts.joined(separator: ", ")
-        return "AgentBoard: \(summary). Click to show sessions; ⌃⌥⌘A opens the dashboard."
+    /// Glyph, counts and badge for the current snapshot and Settings →
+    /// Machines → Other Macs in the menu bar icon.
+    private var summary: MenuBarIconState.Summary {
+        MenuBarIconState.summary(store.snapshot, mode: RemoteIconMode.from(remoteMode))
     }
 
-    private var tier: MenuBarIconState.Tier {
-        MenuBarIconState.tier(for: store.snapshot.counts, sessions: store.snapshot.sessions)
+    /// "AgentBoard: 2 need you (1 on mini), 1 to review", or "AgentBoard: nothing needs you".
+    private func tooltip(_ summary: MenuBarIconState.Summary) -> String {
+        "\(summary.accessibilityDescription). Click to show sessions; ⌃⌥⌘A opens the dashboard."
     }
 
     /// Flashing (or, under Reduce motion, the alert badge) only applies to
     /// the needs_you tier; otherwise the glyph is a solid color.
-    private var style: MenuBarIconStyle {
-        let tier = self.tier
+    private func style(_ summary: MenuBarIconState.Summary) -> MenuBarIconStyle {
+        let tier = summary.tier
         let attending = tier == .needsYou && attention.isFlashing
         return MenuBarIconStyle(
             tier: tier,
-            dimmed: attending && !attention.reduceMotion && !attention.flashPhase,
-            alert: attending && attention.reduceMotion,
-            darkMenuBar: systemAppearance.isDark
+            dimmed: colored && attending && !attention.reduceMotion && !attention.flashPhase,
+            alert: colored && attending && attention.reduceMotion,
+            darkMenuBar: systemAppearance.isDark,
+            remoteTier: summary.remoteTier,
+            remoteDimmed: !attention.remotePulsePhase,
+            monochrome: !colored
         )
     }
 
     var body: some View {
+        let summary = self.summary
         HStack(spacing: 3) {
-            icon
-            if urgentCount > 0 {
-                Text("\(urgentCount)")
+            icon(summary)
+            if summary.urgentCount > 0 {
+                Text("\(summary.urgentCount)")
             }
-            if reviewCount > 0 {
-                Text("\(reviewCount)")
+            if summary.reviewCount > 0 {
+                Text("\(summary.reviewCount)")
                     .foregroundStyle(.secondary)
                     .font(.caption2)
             }
         }
-        .help(tooltip)
+        .help(tooltip(summary))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(summary.accessibilityDescription)
         .onAppear {
             WindowOpener.shared.open = { openWindow(id: DashboardWindowController.windowID) }
             WindowOpener.shared.dismiss = { dismissWindow(id: DashboardWindowController.windowID) }
@@ -82,7 +85,8 @@ struct MenuBarLabel: View {
             // Both diffs are stateful (a second call returns nothing), so
             // each runs once and feeds the notifications and the sounds.
             let entered = attention.note(snapshot: newValue)
-            let turnChanges = turns.note(newValue)
+            var turnChanges = turns.note(newValue)
+            if !notifyRemote { turnChanges.finished.removeAll(where: \.isRemote) }
             let context = SessionNotificationPlan.Context(
                 dashboardIsKey: attention.dashboardIsKey,
                 dashboardSelection: store.dashboardSelection
@@ -93,7 +97,7 @@ struct MenuBarLabel: View {
             let player = SoundPlayer.shared
             let events = sounds.note(
                 newValue, needsYouEntered: entered, turns: turnChanges, context: context,
-                sounds: player.sounds
+                remoteAlerts: notifyRemote, sounds: player.sounds
             )
             if !events.isEmpty { player.play(events) }
             if let key = notifications.takePendingOpenKey() {
@@ -103,17 +107,20 @@ struct MenuBarLabel: View {
         .onChange(of: colored) { applySettings() }
         .onChange(of: flash) { applySettings() }
         .onChange(of: flashStop) { applySettings() }
+        .onChange(of: notifyRemote) { applySettings() }
+        .onChange(of: remoteMode) { applySettings() }
     }
 
-    /// The colored, non-template glyph, or today's template glyph when
-    /// coloring is off or nothing is worth coloring (idle tier).
+    /// The rendered glyph (colored, or a template image carrying the remote
+    /// badge when coloring is off), or today's template glyph when there is
+    /// nothing to render.
     @ViewBuilder
-    private var icon: some View {
-        if colored, let image = MenuBarIconRenderer.image(for: style) {
+    private func icon(_ summary: MenuBarIconState.Summary) -> some View {
+        if let image = MenuBarIconRenderer.image(for: style(summary), description: summary.accessibilityDescription) {
             Image(nsImage: image)
         } else {
             Image(systemName: MenuBarIconRenderer.symbolName)
-                .symbolVariant(urgentCount > 0 ? .fill : .none)
+                .symbolVariant(summary.urgentCount > 0 ? .fill : .none)
         }
     }
 
@@ -136,5 +143,7 @@ struct MenuBarLabel: View {
         // Without color there is nothing to flash.
         attention.flashEnabled = colored && flash
         attention.policy = FlashStopPolicy(rawValue: flashStop) ?? .onOpen
+        attention.remoteAlerts = notifyRemote
+        attention.remoteMode = RemoteIconMode.from(remoteMode)
     }
 }

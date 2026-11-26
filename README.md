@@ -221,6 +221,15 @@ desktop app shows a small desktop-window icon, and clicking it (or the row) open
 the desktop app.
 [More](docs/REFERENCE.md#links--integrations)
 
+**Your other Macs.** Pair two or more Macs in Settings → Machines (copy a pairing code on one,
+paste it on the other, both ways) and each board shows the other Macs' sessions next to its own,
+marked with the Mac they run on and updated within a couple of seconds. There is no server: each
+Mac pulls the others over ssh (macOS's Remote Login), encrypted and with both Macs' keys pinned.
+Clicking a remote session attaches a local terminal to it over ssh when it runs in tmux, resumes
+it there when it has ended, or opens Screen Sharing; a Mac that is asleep shows its last-known
+rows dimmed, without alerting. Each Mac chooses how much it shares.
+[More](docs/REFERENCE.md#machines-peer-sync)
+
 ## Hooking in your own tools
 
 AgentBoard knows no ticket system, team or host; everything specific comes in through generic
@@ -246,7 +255,9 @@ touches the network. Only `agentboard refresh-links` does, through tools you set
 and their reviews, your provider commands, and the retitle command, which by default runs your
 local `claude` CLI to send a short summary of a session's recent prompts and replies to the
 model. Set `"retitle_command": null` in
-`config.json` to turn retitling off. Details: [Diagnostics](docs/REFERENCE.md#diagnostics) and
+`config.json` to turn retitling off. With [Machines](docs/REFERENCE.md#machines-peer-sync) set up,
+`agentboard peer-sync` also keeps an ssh connection to each of your paired Macs, and only to
+them. Details: [Diagnostics](docs/REFERENCE.md#diagnostics) and
 [Data](docs/REFERENCE.md#data).
 
 ## Troubleshooting

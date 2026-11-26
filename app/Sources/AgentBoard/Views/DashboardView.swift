@@ -220,7 +220,7 @@ struct DashboardView: View {
                 .padding(8)
             }
             Divider()
-            SessionColorLegendView()
+            SessionColorLegendView(showsRemote: store.snapshot.sessions.contains(where: \.isRemote))
                 .padding(8)
             // Plan usage under the color key (nothing when no source has numbers).
             UsageLineView(usage: store.snapshot.usage, lineLimit: 3,

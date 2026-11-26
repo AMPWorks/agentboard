@@ -22,6 +22,7 @@ from . import diag
 from . import hook as hook_mod
 from . import links
 from . import notes as notes_mod
+from . import peers as peers_mod
 from . import reconcile
 from . import titles
 from . import usage as usage_mod
@@ -354,6 +355,25 @@ def _registry_entry_for(session, claude_registry):
     return entry
 
 
+# Claude Code Remote Control: a session it serves names its bridge session
+# in its ~/.claude/sessions/<pid>.json registry entry (`bridgeSessionId`),
+# and its transcript records the same session's web URL
+# (https://claude.ai/code/<bridge id>, a `remote_session_change` attachment).
+_BRIDGE_SESSION_RE = re.compile(r"\Asession_[A-Za-z0-9]{10,64}\Z")
+REMOTE_CONTROL_URL_PREFIX = "https://claude.ai/code/"
+
+
+def _remote_control_url(registry_entry, alive):
+    """The Remote Control URL of a live session it serves, else None. Read
+    from the local registry only; never touches the network."""
+    if not alive or not isinstance(registry_entry, dict):
+        return None
+    bridge = registry_entry.get("bridgeSessionId")
+    if isinstance(bridge, str) and _BRIDGE_SESSION_RE.match(bridge):
+        return REMOTE_CONTROL_URL_PREFIX + bridge
+    return None
+
+
 def _cron_prompts(session):
     try:
         value = json.loads(session.get("cron_prompts") or "[]")
@@ -515,6 +535,7 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
         "context_tokens": session.get("context_tokens"),
         "context_at": session.get("context_at"),
         "permission_mode": session.get("permission_mode"),
+        "remote_control_url": _remote_control_url(registry_entry, alive),
         "links": [
             {
                 "kind": link["kind"],
@@ -556,7 +577,10 @@ def _build_session_entry(conn, session, triage_by_key, claude_registry, config, 
     }
 
 
-def build_snapshot(conn, include_all=False, now=None, run_tmux=None):
+def build_snapshot(conn, include_all=False, now=None, run_tmux=None, include_peers=True):
+    """The board. `include_peers` merges the sessions cached from paired
+    Macs (peers.remote_entries; local files only); the peer export turns it
+    off so a Mac only ever sends its own sessions."""
     now = now or datetime.now(timezone.utc)
     home = db.home_dir()
     now_iso = _now_iso(now)
@@ -611,6 +635,15 @@ def build_snapshot(conn, include_all=False, now=None, run_tmux=None):
     if tmux_rows:
         _resolve_tmux_sessions(entries, tmux_rows, run_tmux or subprocess.run)
 
+    for entry in entries:
+        entry["machine"] = None
+        entry["stale"] = False
+        entry["remote_open"] = None
+    peer_list = []
+    if include_peers:
+        remote, peer_list = peers_mod.remote_entries(config, now, home)
+        entries.extend(remote)
+
     state_rank = {name: i for i, name in enumerate(STATES)}
 
     def sort_key(entry):
@@ -622,14 +655,17 @@ def build_snapshot(conn, include_all=False, now=None, run_tmux=None):
 
     entries.sort(key=sort_key)
 
+    # A stale remote session (its Mac is offline) is shown but not counted;
+    # peers[].session_count reports it instead.
+    counted = [entry for entry in entries if not entry["stale"]]
     counts = {name: 0 for name in STATES}
-    for entry in entries:
+    for entry in counted:
         if entry["state"] in counts:
             counts[entry["state"]] += 1
     # Only the notes of sessions this snapshot emits, so the total matches
     # what the app can show.
-    counts["notes"] = sum(entry["notes_count"] for entry in entries)
-    counts["denials"] = sum(entry["denials_count"] for entry in entries)
+    counts["notes"] = sum(entry["notes_count"] for entry in counted)
+    counts["denials"] = sum(entry["denials_count"] for entry in counted)
 
     return {
         "generated_at": _now_iso(now),
@@ -637,6 +673,10 @@ def build_snapshot(conn, include_all=False, now=None, run_tmux=None):
         "sessions": entries,
         # Plan usage sources (local files only); empty when there is none.
         "usage": _usage_sources(home, now),
+        # This Mac's peer identity (null until it is first paired) and the
+        # paired Macs' connection state, from local files only.
+        "machine": peers_mod.read_machine(home),
+        "peers": peer_list,
     }
 
 
@@ -728,7 +768,13 @@ def _clear_needs_you_on_mark(conn, tool, session_id, now):
         return 0
 
 
-def cmd_mark(args):
+def cmd_mark(args, run=subprocess.run):
+    if getattr(args, "machine", None):
+        if args.note is not None:
+            _report("error", "mark", "error: --note is not sent to other machines")
+            return 2
+        from . import peer_cli
+        return peer_cli.remote_mark(args, run=run)
     conn = db.connect()
     try:
         now = _now_iso()
@@ -2965,6 +3011,21 @@ def _focus_matched(trace, reply, pre_probe, probe, run_defaults, sleep, clock, t
     )
 
 
+# What focus and the peer gate ask tmux about a pane before selecting it.
+TMUX_DISPLAY_FORMAT = "#{session_id}\t#{session_name}\t#{window_id}"
+
+
+def _parse_tmux_display(result):
+    """(session_id, session_name, window_id) from a TMUX_DISPLAY_FORMAT
+    display-message result, or None when the pane is gone."""
+    if _returncode(result) != 0:
+        return None
+    parts = _stdout_text(result).split("\t")
+    if len(parts) < 3 or not parts[0].startswith("$"):
+        return None
+    return parts[0], "\t".join(parts[1:-1]), parts[-1]
+
+
 def _focus_tmux(row, key, trace, run_osascript, run_tmux):
     """Focus a session that runs inside tmux. The inherited iTerm/Terminal
     ids are the tmux server's, not this pane's, so they are never used:
@@ -2986,17 +3047,15 @@ def _focus_tmux(row, key, trace, run_osascript, run_tmux):
     # Looked up at click time: the session may have been renamed or the
     # pane moved to another window since the hook recorded it.
     result = _run_tmux(run_tmux, binary, socket_path, [
-        "display-message", "-p", "-t", pane,
-        "#{session_id}\t#{session_name}\t#{window_id}",
+        "display-message", "-p", "-t", pane, TMUX_DISPLAY_FORMAT,
     ])
-    rc, out = trace.tried("tmux_display", result, pane=pane)
+    trace.tried("tmux_display", result, pane=pane)
     if isinstance(result, _TimedOut):
         return _focus_timed_out(trace, key)
-    parts = out.split("\t")
-    if rc != 0 or len(parts) < 3 or not parts[0].startswith("$"):
+    target = _parse_tmux_display(result)
+    if target is None:
         return trace.failed("tmux_pane_gone", 1, f"tmux pane {pane} for {key} is gone")
-    session_id, window_id = parts[0], parts[-1]
-    session_name = "\t".join(parts[1:-1])
+    session_id, session_name, window_id = target
     trace.fields.update(tmux_session_id=session_id, tmux_session=session_name)
 
     for tmux_args in (["select-window", "-t", window_id], ["select-pane", "-t", pane]):
@@ -3119,6 +3178,9 @@ def cmd_focus(args, run_osascript=subprocess.run, window_probe=None, run_default
     runner (default: `run_osascript`) in tests."""
     from . import spaces
 
+    if getattr(args, "machine", None):
+        from . import peer_cli
+        return peer_cli.remote_focus(args, run=run_osascript)
     key = f"{args.tool}:{args.session_id}"
     trace = _FocusTrace(key)
     conn = db.connect()
@@ -3222,6 +3284,9 @@ def cmd_focus(args, run_osascript=subprocess.run, window_probe=None, run_default
 
 
 def cmd_resume(args, run_osascript=subprocess.run):
+    if getattr(args, "machine", None):
+        from . import peer_cli
+        return peer_cli.remote_focus(args, run=run_osascript)
     key = f"{args.tool}:{args.session_id}"
     started = time.monotonic()
     conn = db.connect()
@@ -3511,6 +3576,28 @@ def cmd_paths(args):
     return 0
 
 
+# -- peers ------------------------------------------------------------------------
+
+def cmd_peers(args):
+    from . import peer_cli
+    return peer_cli.cmd_peers(args)
+
+
+def cmd_peer_open(args):
+    from . import peer_cli
+    return peer_cli.cmd_peer_open(args)
+
+
+def cmd_peer_sync(args):
+    from . import peer_sync
+    return peer_sync.run(once=args.once)
+
+
+def cmd_peer_gate(args):
+    from . import peer_gate
+    return peer_gate.run(args.peer_id)
+
+
 # -- logs -------------------------------------------------------------------------
 #
 # Reads agentboard.log back (the rotated .1 first, so a --since window right
@@ -3707,6 +3794,7 @@ def build_parser():
     p.add_argument("action", choices=["done", "open", "snooze"])
     p.add_argument("--hours", type=float, default=None)
     p.add_argument("--note", default=None)
+    p.add_argument("--machine", default=None, help="the paired Mac the session runs on")
     p.set_defaults(func=cmd_mark)
 
     p = sub.add_parser("backfill")
@@ -3804,13 +3892,22 @@ def build_parser():
     p = sub.add_parser("focus")
     p.add_argument("tool", choices=["claude", "codex"])
     p.add_argument("session_id")
+    p.add_argument("--machine", default=None, help="the paired Mac the session runs on")
     p.set_defaults(func=cmd_focus)
 
     p = sub.add_parser("resume")
     p.add_argument("tool", choices=["claude", "codex"])
     p.add_argument("session_id")
     p.add_argument("--print", action="store_true")
+    p.add_argument("--machine", default=None, help="the paired Mac the session runs on")
     p.set_defaults(func=cmd_resume)
+
+    p = sub.add_parser("peer-open", help="ssh to a paired Mac's session (runs in a terminal window)")
+    p.add_argument("--machine", required=True)
+    p.add_argument("--verb", choices=["attach", "resume"], required=True)
+    p.add_argument("tool", choices=["claude", "codex"])
+    p.add_argument("session_id")
+    p.set_defaults(func=cmd_peer_open)
 
     p = sub.add_parser("map-codex")
     p.add_argument("--session", required=True)
@@ -3834,6 +3931,43 @@ def build_parser():
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_paths)
 
+    p = sub.add_parser("peers", help="pair, list and configure the other Macs this board syncs with")
+    peers_sub = p.add_subparsers(
+        dest="peers_command", required=True,
+        parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False),
+    )
+    q = peers_sub.add_parser("list")
+    q.add_argument("--json", action="store_true")
+    q = peers_sub.add_parser("add")
+    q.add_argument("--code", required=True, help="the other Mac's pairing code")
+    q.add_argument("--host", default=None, help="reach the peer by this name instead")
+    q.add_argument("--name", default=None, help="show the peer under this name")
+    q.add_argument("--allow-open", dest="allow_open", choices=["on", "off"], default=None,
+                   help="whether the peer may open sessions on this Mac (default: on for a "
+                        "new Mac, unchanged when pairing again)")
+    q.add_argument("--dry-run", action="store_true", help="only parse the code and print it")
+    q = peers_sub.add_parser("remove")
+    q.add_argument("--id", default=None)
+    q.add_argument("--all", action="store_true")
+    q.add_argument("--dry-run", action="store_true")
+    q = peers_sub.add_parser("set")
+    q.add_argument("--id", required=True)
+    q.add_argument("--host", default=None)
+    q.add_argument("--name", default=None)
+    q.add_argument("--allow-open", dest="allow_open", choices=["on", "off"], default=None)
+    q = peers_sub.add_parser("set-self")
+    q.add_argument("--name", default=None, help="this Mac's name on other boards")
+    q.add_argument("--share", choices=["full", "titles", "state"], default=None)
+    p.set_defaults(func=cmd_peers)
+
+    p = sub.add_parser("peer-sync", help="keep pulling every paired Mac's sessions over ssh")
+    p.add_argument("--once", action="store_true", help="stop after the first update from each peer")
+    p.set_defaults(func=cmd_peer_sync)
+
+    p = sub.add_parser("peer-gate", help="the forced command a paired Mac's key runs (reads SSH_ORIGINAL_COMMAND)")
+    p.add_argument("peer_id")
+    p.set_defaults(func=cmd_peer_gate)
+
     p = sub.add_parser("logs", help="print the diagnostic log (agentboard.log.1 + agentboard.log)")
     p.add_argument("--since", default=None, help="<n>s|m|h|d, or an ISO-8601 time")
     p.add_argument("--grep", default=None, help="plain substring filter")
@@ -3849,7 +3983,9 @@ def build_parser():
 # Subcommands the app calls every few seconds (or that only read state):
 # their start/end lines are debug, so a quiet `info` log isn't one line per
 # poll. A failure or a slow run (SLOW_QUIET_MS) is still logged at info.
-QUIET_COMMANDS = {"snapshot", "paths", "hook", "logs"}
+# peer-gate and peer-sync are long-running or once per ssh connection and
+# log their own lines.
+QUIET_COMMANDS = {"snapshot", "paths", "hook", "logs", "peer-gate", "peer-sync"}
 SLOW_QUIET_MS = 1000
 # The polled subset: a slow run of one of these is worth an info line.
 SLOW_WATCHED_COMMANDS = {"snapshot", "paths", "hook"}

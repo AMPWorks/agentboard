@@ -34,8 +34,9 @@ AGENTBOARD_BUNDLE_ID="io.github.agentboard"
 # see safe_purge_data_home()'s comment for why this list exists.
 AGENTBOARD_DATA_FILES=(agentboard.db agentboard.db-wal agentboard.db-shm
   hook-errors.log install-manifest.json config.json
-  agentboard.log agentboard.log.1)
-AGENTBOARD_DATA_DIRS=(inbox reparse-locks usage)
+  agentboard.log agentboard.log.1
+  machine.json peers.stamp peer-sync.lock)
+AGENTBOARD_DATA_DIRS=(inbox reparse-locks usage peers peer-keys)
 
 NO_HOOKS=0
 NO_APP=0
@@ -288,13 +289,16 @@ _purge_target_is_safe() {
 # reads/writes usage/<source>.json plan-usage files. Anything else in $1 (a user's
 # own file, say) is left alone, with a warning, and so is $1 itself.
 _purge_known_glob() {
-  local dir="$1" pattern="$2" entry
+  local dir="$1" pattern entry
+  shift
 
   [[ -d "$dir" && ! -L "$dir" ]] || return 0
 
   shopt -s nullglob
-  for entry in "$dir"/$pattern; do
-    rm -f "$entry"
+  for pattern in "$@"; do
+    for entry in "$dir"/$pattern; do
+      rm -f "$entry"
+    done
   done
   shopt -u nullglob
 
@@ -327,6 +331,10 @@ safe_purge_data_home() {
   _purge_known_glob "$dir/inbox" "*.json"
   _purge_known_glob "$dir/reparse-locks" "*.marker"
   _purge_known_glob "$dir/usage" "*.json"
+  # peer_sync.py's peers/<machine_id>.json caches; peers.py's own ssh key
+  # pair and generated known_hosts.
+  _purge_known_glob "$dir/peers" "*.json"
+  _purge_known_glob "$dir/peer-keys" "id_ed25519" "id_ed25519.pub" "known_hosts"
 
   if rmdir "$dir" 2>/dev/null; then
     return 0
@@ -410,6 +418,26 @@ elif [[ "${#AGENTBOARD_CMD[@]}" -gt 0 ]]; then
   "${AGENTBOARD_CMD[@]}" uninstall-hooks "${HOOK_ARGS[@]+"${HOOK_ARGS[@]}"}" || UNINSTALL_HOOKS_RC=$?
 else
   echo "==> skipping hook removal ($AGENTBOARD_BIN not found, or no python3 >= 3.11 to run it with)" >&2
+fi
+
+# -- 1b. Remove paired machines' keys -----------------------------------------
+#
+# Peer sync (Settings -> Machines) adds one marked line per paired Mac to
+# ~/.ssh/authorized_keys; `peers remove --all` deletes only those lines,
+# never another key. Not gated behind --no-hooks: it is access to this Mac.
+
+PEERS_RC=0
+if [[ "${#AGENTBOARD_CMD[@]}" -gt 0 ]]; then
+  PEER_ARGS=(--all)
+  [[ "$DRY_RUN" -eq 1 ]] && PEER_ARGS+=(--dry-run)
+  echo "==> removing paired machines' keys from ~/.ssh/authorized_keys"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    "${AGENTBOARD_CMD[@]}" peers remove "${PEER_ARGS[@]}" || PEERS_RC=$?
+  else
+    "${AGENTBOARD_CMD[@]}" peers remove "${PEER_ARGS[@]}" >/dev/null || PEERS_RC=$?
+  fi
+else
+  echo "==> skipping paired-machine key removal ($AGENTBOARD_BIN not found, or no python3 >= 3.11 to run it with)" >&2
 fi
 
 # -- 2. Remove the app ---------------------------------------------------------
@@ -511,6 +539,12 @@ if [[ "$APP_REMOVAL_RC" -ne 0 ]]; then
   echo "    note: app removal was refused above; see the warning for why" >&2
   if [[ "$FINAL_RC" -eq 0 ]]; then
     FINAL_RC="$APP_REMOVAL_RC"
+  fi
+fi
+if [[ "$PEERS_RC" -ne 0 ]]; then
+  echo "    note: removing paired machines' keys failed above; check ~/.ssh/authorized_keys for lines ending in agentboard-peer:<id>" >&2
+  if [[ "$FINAL_RC" -eq 0 ]]; then
+    FINAL_RC="$PEERS_RC"
   fi
 fi
 if [[ "$DATA_PURGE_RC" -ne 0 ]]; then

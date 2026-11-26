@@ -66,7 +66,9 @@ that exact definition shape (`name() {` on its own line, closing `}` in column 0
 appends to `events` and upserts `sessions`. `reconcile.compute_state` turns a session row plus its
 triage and links into exactly one of `done`, `snoozed`, `needs_you`, `interrupted`, `review`,
 `running`, `unconcluded` (checked in that priority order). `cli.build_snapshot` emits the JSON that
-`app/.../Models/Snapshot.swift` decodes. `backfill.py` fills the same tables from transcripts on
+`app/.../Models/Snapshot.swift` decodes, merging in other Macs' sessions from the
+`peers/<id>.json` caches that `peer-sync` writes (`peers.py`; peer sync ships each origin's
+derived snapshot entries, not event rows, since state depends on that Mac's pids and registry). `backfill.py` fills the same tables from transcripts on
 disk and never overwrites hook-written fields, except `todos_open` and known-bad legacy values.
 
 **The hook contract** (`hook.py`, `core/bin/agentboard`): print nothing to stdout, always exit 0,
@@ -91,7 +93,10 @@ otherwise), a directory watcher on the dir reported by `agentboard paths --json`
 
 **Integrations are generic only** (`links.py`): `agentboard link`/`status`, the `inbox/` drop
 directory, provider commands from `config.json`, and `gh pr list`. Nothing team- or host-specific
-may be hard-coded. `snapshot` must never touch the network; only `refresh-links` may.
+may be hard-coded. `snapshot` must never touch the network; only `refresh-links`, `peer-sync`
+and the `--machine` branch of `focus`/`resume`/`mark` (one bounded ssh call each) may.
+`peer-gate` is the forced command a paired Mac's key runs: keep its verb list fixed and never
+pass text it receives to a shell.
 
 ## Conventions
 

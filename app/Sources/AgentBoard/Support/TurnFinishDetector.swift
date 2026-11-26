@@ -47,8 +47,10 @@ struct TurnFinishDetector {
             if !seen.contains(key) {
                 seen.insert(key)
                 // A session first seen after launch (a backfill, Show hidden)
-                // notifies only for a turn that finished since launch.
-                guard let date = session.turnFinishedDate, date >= startedAt else {
+                // notifies only for a turn that finished since launch. A
+                // remote one first seen (a newly paired Mac's first export)
+                // only seeds the baseline.
+                guard !session.isRemote, let date = session.turnFinishedDate, date >= startedAt else {
                     if let current { notifiedAt[key] = current }
                     continue
                 }
@@ -61,7 +63,9 @@ struct TurnFinishDetector {
                 // finished ts is a registry flap (or a loop idle, whose
                 // prompt kind keeps it silent anyway): wait for it to settle.
                 notifiedAt[key] = current
-                if Self.reportable(session) {
+                // A stale remote session is bookkept but never reported, so
+                // going live again with the same turn reports nothing.
+                if Self.reportable(session) && !session.stale {
                     changes.finished.append(session)
                     continue
                 }

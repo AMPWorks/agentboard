@@ -58,7 +58,8 @@ struct TmuxSessionTests {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Fixtures/snapshot.json")
         let snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: url))
-        let tmux = snapshot.sessions.filter(\.tmux)
+        // This Mac's own; the Mac mini's remote row runs in tmux there.
+        let tmux = snapshot.sessions.filter { $0.tmux && !$0.isRemote }
         #expect(tmux.map(\.key) == ["claude:sess-running-1"])
         #expect(tmux.first?.tmuxSession == "agentboard-dev")
         // Every other row lacks the fields and decodes as not in tmux.

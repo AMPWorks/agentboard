@@ -14,6 +14,7 @@ struct HelpTopic: Identifiable, Sendable, Equatable {
         case dashboard
         case links
         case settings
+        case machines
         case config
         case cli
         case diagnostics

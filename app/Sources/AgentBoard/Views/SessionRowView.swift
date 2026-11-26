@@ -9,7 +9,9 @@ struct SessionRowView: View {
     @State private var isHovering = false
 
     var body: some View {
+        // A remote session whose Mac is offline: its last-known state, dimmed.
         let decorated = rowContent
+            .opacity(session.stale ? 0.55 : 1)
             .padding(.vertical, 4)
             .padding(.horizontal, 6)
             .contentShape(Rectangle())
@@ -33,12 +35,10 @@ struct SessionRowView: View {
 
     private var rowContent: some View {
         HStack(alignment: .top, spacing: 8) {
-            Circle()
-                .fill(SessionColor.color(for: session))
-                .frame(width: 7, height: 7)
+            StateMarker(shape: SessionColor.markerShape(for: session), color: SessionColor.color(for: session))
                 .padding(.top, 5)
-                .help(SessionColor.legendTooltip)
-                .accessibilityLabel(SessionColor.label(for: session))
+                .help(SessionColor.markerTooltip(for: session))
+                .accessibilityLabel(SessionColor.markerLabel(for: session))
             // The fixed icon column (SessionRowLayout.iconColumn): the tool
             // badge, the permission mode icon under it, then the desktop app
             // button, so they line up from row to row and never shift text.
@@ -46,6 +46,7 @@ struct SessionRowView: View {
                 ForEach(SessionRowLayout.iconColumn(for: session), id: \.columnID) { icon in
                     switch icon {
                     case .tool: toolBadge
+                    case .machine: machineIcon
                     case .mode(let mode): modeIcon(mode)
                     case .desktop: desktopButton
                     }
@@ -113,12 +114,44 @@ struct SessionRowView: View {
             // never move with the optional tags.
             ForEach(SessionRowLayout.repoTags(for: session), id: \.self) { tag in
                 switch tag {
+                case .machine: machineTag
                 case .tmux: tmuxTag
                 case .background: backgroundTag
                 case .model: modelTag
                 case .prs: PRLinkButtons(session: session, onOverflow: showDetail)
                 }
             }
+        }
+    }
+
+    private var machineHelp: String {
+        SessionActionHelp.machineHelp(session, lastSeen: store.snapshot.peer(for: session)?.lastSeenAt)
+    }
+
+    /// A remote session's Mac as its chip, in the fixed icon column.
+    @ViewBuilder
+    private var machineIcon: some View {
+        if let machine = session.machine {
+            MachineChipView(label: store.snapshot.chipLabel(for: machine), offline: session.stale)
+                .frame(width: 18, height: 14)
+                .help(machineHelp)
+                .accessibilityLabel(machineHelp)
+        }
+    }
+
+    /// A remote session's Mac by name, first on the repo line.
+    @ViewBuilder
+    private var machineTag: some View {
+        if let machine = session.machine {
+            Text(machine.name)
+                .font(.caption2)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(.secondary.opacity(0.15), in: Capsule())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize()
+                .help(machineHelp)
         }
     }
 
@@ -380,9 +413,9 @@ struct SessionRowView: View {
     private func hoverButton(_ button: SessionRowLayout.HoverButton) -> some View {
         switch button {
         case .resume:
-            iconButton(button.systemImage, help: SessionActionHelp.resume) { Task { await store.resume(session) } }
+            iconButton(button.systemImage, help: SessionActionHelp.resumeHelp(session)) { Task { await store.resume(session) } }
         case .copy:
-            iconButton(button.systemImage, help: SessionActionHelp.copyResume) {
+            iconButton(button.systemImage, help: SessionActionHelp.copyResumeHelp(session)) {
                 Task {
                     let command = await store.resumeCommand(for: session)
                     ClipboardHelper.copy(command)
@@ -422,6 +455,7 @@ private extension SessionRowLayout.Icon {
     var columnID: String {
         switch self {
         case .tool: return "tool"
+        case .machine: return "machine"
         case .mode: return "mode"
         case .desktop: return "desktop"
         }
