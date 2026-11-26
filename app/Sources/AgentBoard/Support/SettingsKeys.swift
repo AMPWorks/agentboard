@@ -31,6 +31,7 @@ enum SettingsKeys {
         MenuBarIconSettings.coloredKey,
         MenuBarIconSettings.flashKey,
         MenuBarIconSettings.flashStopKey,
+        MenuBarIconSettings.remoteModeKey,
         AgentBoardCLI.pathDefaultsKey,
         AgentBoardCLI.useFixtureDefaultsKey,
         AgentBoardCLI.fixturePathDefaultsKey,
@@ -44,7 +45,16 @@ enum SettingsKeys {
         PopoverSizing.autoExpandKey,
         PopoverSizing.widthKey,
         PopoverSizing.autoWidthKey,
+        SettingsKeys.showRemoteSessions,
+        SettingsKeys.notifyRemoteSessions,
     ]
+
+    /// Show the sessions of paired Macs (Settings → Machines; default on).
+    /// Off also stops `peer-sync`.
+    static let showRemoteSessions = "showRemoteSessions"
+    /// Let sessions on paired Macs notify, play sounds and flash the menu
+    /// bar icon (default on). Their rows still show either way.
+    static let notifyRemoteSessions = "notifyRemoteSessions"
 
     /// Show the plan-usage lines (one per usage source) in the popover
     /// footer and the dashboard sidebar (default on).

@@ -80,10 +80,28 @@ struct SessionDetailView: View {
                     .font(.headline)
                     .foregroundStyle(.secondary)
             }
-            Text(session.state.displayName)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .help("The session's state; see AgentBoard Help → Session states")
+            HStack(spacing: 6) {
+                StateMarker(shape: SessionColor.markerShape(for: session), color: SessionColor.color(for: session))
+                    .help(SessionColor.markerTooltip(for: session))
+                    .accessibilityLabel(SessionColor.markerLabel(for: session))
+                Text(session.state.displayName)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .help("The session's state; see AgentBoard Help → Session states")
+                if let machine = session.machine {
+                    // Which Mac, beside the state it qualifies.
+                    let help = SessionActionHelp.machineHelp(session, lastSeen: store.snapshot.peer(for: session)?.lastSeenAt)
+                    HStack(spacing: 4) {
+                        MachineChipView(label: store.snapshot.chipLabel(for: machine), offline: session.stale, size: 16)
+                        Text(session.stale ? "on \(machine.name), offline" : "on \(machine.name)")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .help(help)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(help)
+                }
+            }
             if let reason = session.waitingReason, !reason.isEmpty {
                 Text(reason)
                     .font(.callout)
@@ -105,8 +123,8 @@ struct SessionDetailView: View {
                     .help(SessionActionHelp.focusHelp(session))
             }
             if session.resumeAvailable {
-                Button("Resume") { Task { await store.resume(session) } }
-                    .help(SessionActionHelp.resume)
+                Button(SessionActionHelp.resumeTitle(session)) { Task { await store.resume(session) } }
+                    .help(SessionActionHelp.resumeHelp(session))
             }
             Button("Copy Resume Command") {
                 Task {
@@ -114,7 +132,7 @@ struct SessionDetailView: View {
                     ClipboardHelper.copy(command)
                 }
             }
-            .help(SessionActionHelp.copyResume)
+            .help(SessionActionHelp.copyResumeHelp(session))
             if session.state == .done {
                 Button("Reopen") { Task { await store.markOpen(session) } }
                     .help(SessionActionHelp.reopen)
@@ -130,6 +148,10 @@ struct SessionDetailView: View {
 
     private var metadata: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let machine = session.machine {
+                metadataRow(label: "Machine", value: session.stale ? "\(machine.name) (offline)" : machine.name)
+                    .help(SessionActionHelp.machineHelp(session, lastSeen: store.snapshot.peer(for: session)?.lastSeenAt))
+            }
             metadataRow(label: "Project", value: session.project)
             metadataRow(label: "Directory", value: session.cwd)
             metadataRow(label: "Branch", value: session.branch ?? "—")
@@ -220,7 +242,7 @@ struct SessionDetailView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.headline)
                 Group {
-                    if markdown, let attributed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+                    if markdown, let attributed = InlineMarkdown.attributed(text, remote: session.isRemote) {
                         Text(attributed)
                     } else {
                         Text(text)

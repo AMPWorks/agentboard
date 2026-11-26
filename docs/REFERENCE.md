@@ -513,7 +513,7 @@ file counts as missing): every `snapshot` run creates and deletes the WAL-mode d
 Mark a session's own triage state directly:
 
 ```
-agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
+agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT] [--machine ID]
 ```
 
 `done` and `snooze` also dismiss the session's open `needs_you` updates (see
@@ -1034,6 +1034,24 @@ is waiting on you without opening the popover. One color for the whole board, fi
 These are the same colors as the row dots and the dashboard legend. The counts next to the icon
 are unchanged: needs_you + interrupted, then a dimmer review count.
 
+**Other Macs** (peer sync). Settings → Machines → **Other Macs in the menu bar icon** picks how
+sessions on paired Macs reach the icon:
+
+| Setting | Glyph, counts and flash | Corner badge |
+|---|---|---|
+| *Separate marker* (default) | this Mac only | a small diamond at the top-trailing corner, in the color of the most urgent live session on another Mac that needs you (red) or was interrupted (orange); none otherwise |
+| *Merged with this Mac* | every Mac, as if the remote sessions were local | none |
+| *Not shown* | this Mac only | none |
+
+The diamond is the same shape as a remote row's state marker. With coloring off it is drawn in
+the menu bar's own color, so it still says "something on another Mac". A gap is cut into the
+glyph around it, so it reads on the translucent menu bar. When a remote session newly needs you
+the badge pulses for three cycles at the flash's 1 Hz and then holds; the glyph does not flash
+for it. Under Reduce motion the badge just appears. It needs **Flash when a session needs you**
+and **Notify for sessions on other machines** to pulse, and an offline Mac's sessions never show
+it. The tooltip and the icon's spoken description name the other Macs' share, for example
+"AgentBoard: 3 need you (1 on mini), 1 to review".
+
 Flashing: when a session *enters* `needs_you` the glyph alternates at 1 Hz between solid red and
 a dimmed red outline. It stops when you open the popover, when the dashboard window becomes key,
 or when the session leaves `needs_you`; the icon then stays solid red while anything still needs
@@ -1199,7 +1217,8 @@ way:
   project, working directory and branch, the tool (plus the entrypoint, and `desktop` for a Claude
   desktop app session), the state (`needs_you` or `Needs you`), the
   waiting reason and status text, every link's kind, ref, title and state, the triage note, and
-  the session id, and the text of the session's open updates (notes). It does not search link
+  the session id, the name of the Mac a remote session runs on, and the text of the session's open
+  updates (notes). It does not search link
   URLs; use `pr:` or `link:` for those.
 - A `field:value` word narrows the match to one place. The value can be quoted
   (`branch:"feat x"`, `state:"needs you"`).
@@ -1213,6 +1232,7 @@ way:
 | `state:`             | state, raw (`needs_you`) or as shown (`Needs you`)   |
 | `pr:`                | links of kind `pr`: ref, title and URL               |
 | `link:`              | any link: kind, label, ref, title, URL and state     |
+| `machine:`           | the paired Mac a remote session runs on, by name     |
 
 Spaces after the colon are ignored, so `branch: main` is the same as `branch:main` and
 `state: "needs you"` the same as `state:"needs you"`. An unknown qualifier (`foo:bar`, or
@@ -1262,6 +1282,188 @@ tooltip saying what it does.
 The guide mirrors this reference (`app/Sources/AgentBoard/Help/HelpContent.swift`); tests check that
 every `config.json` key, Settings key and CLI subcommand and option appears in it.
 
+## Machines (peer sync)
+
+Each Mac that runs AgentBoard can show the sessions of your other Macs next to its own, marked
+with the Mac they run on, updated within a couple of seconds. There is no server: each Mac pulls
+the others' boards over ssh, which macOS ships with (Remote Login). Everything is set up in
+**Settings → Machines**.
+
+### Setup
+
+1. On each Mac, turn on **Remote Login** (System Settings → General → Sharing). Settings →
+   Machines shows whether it is on and has a button that opens that pane. Who may log in can stay
+   "Only these users" with just you.
+2. On Mac A, click **Copy pairing code**. On Mac B, click **Add machine…**, paste the code, check
+   that the name and the fingerprint (six groups of four characters) match what Mac A shows,
+   and click **Add**.
+3. Do the same the other way round (copy B's code, add it on A). Each direction is its own pull,
+   so both Macs need Remote Login and both codes.
+
+A pairing code holds only public data: the Mac's AgentBoard id and name, your login name, a
+suggested host (`<LocalHostName>.local`, which resolves on the same network), AgentBoard's own
+public key, and the Mac's ssh host key. It is not secret, but it must arrive unaltered (a swapped
+code would let someone else's key in), which is why both sides show the fingerprint: 96 bits of
+a SHA-256 over every field of the code, so no part of it (host and login name included) can
+change unnoticed. A Mac you
+reach by another name away from home (a VPN, a static DNS name) gets that name in its **Host**
+field. The field takes a name or address that resolves on its own (DNS, mDNS, `/etc/hosts`
+or a VPN's resolver): AgentBoard runs ssh with `-F none`, so a `Host` alias from
+`~/.ssh/config` is not used. Pasting a code whose key is already paired under another id (the
+same Mac after its AgentBoard id was lost) replaces that entry, so one key never carries two
+entries with different switches.
+
+Three or more Macs pair two at a time. Each Mac sends only its own sessions, never ones it
+received, so nothing is relayed through a middle Mac.
+
+### What is shared
+
+The sending Mac decides (**Share with other machines**, `peer_share` in config.json):
+
+| Level | What the other Macs receive |
+|-------|-----------------------------|
+| **Everything** (`full`, default) | everything the board shows for a session: title, project, folder, branch, first and last prompt, last reply, updates, denials, links, model, context |
+| **Titles only** (`titles`) | state, times, tool, title (the project when the title is just the first prompt), project, branch, links, update and denial counts; no prompt, reply, update or denial text, no folder |
+| **State only** (`state`) | state, times, tool, and the project name as the title |
+
+Plan usage is never shared. Each Mac's own config, database and notes stay on it.
+
+### How sessions are identified
+
+Each install has a random machine id (`machine.json`) and a name (the computer name, editable
+under **This Mac**). The host name is never the identity, since it changes with the network. A
+remote session keeps its `tool` and `session_id` and gets the key
+`<tool>:<session_id>@<machine_id>`, so the same session id on two Macs is two rows.
+On the board a remote row's state marker is a diamond instead of the round dot, in the same
+state color (an outlined diamond while that Mac is offline: its last-known state), with its Mac's
+name on the repo line and the Mac's chip under the tool badge. The chip is a rounded square with
+the Mac's initial; two Macs that share an initial get two letters (`Mi`, `Mo`), or the initial
+and a digit in id order (`M1`, `M2`) when those collide too. The chip is dashed while the Mac is
+offline, and the same chip marks that Mac's Updates rows, the detail header (beside the state)
+and its entry in Settings → Machines. The dashboard's color key adds the shape key
+(● this Mac, ◆ another Mac, ◇ offline) while the board has remote rows.
+
+### When a Mac is offline or asleep
+
+Its last-known sessions stay on the board, dimmed, with "offline; as of …" in the machine
+tooltip. After 45 seconds without an update (each Mac sends one at least every 15 seconds) a Mac
+counts as offline. Offline sessions never colour the menu bar icon, flash, notify or play a
+sound, and are left out of the counts. When the Mac comes back its rows go live again without a
+burst of notifications: only a real change after that (a session that newly needs you) alerts.
+A Mac not reached for `peer_stale_days` (default 7) drops off the board. Clicking an offline row
+says "<Mac> is offline" in the banner; marking it done fails the same way, and nothing is
+queued.
+
+### Opening a remote session
+
+A click on a remote row (or **Attach on …** / **Resume on …** / **Screen Share to …** in the
+detail view and the context menu) depends on the session:
+
+- **Live, inside tmux**: a new local iTerm window (Terminal without iTerm) runs
+  `agentboard peer-open`, which opens ssh to the other Mac; its gate selects the session's tmux
+  window and pane and attaches to it (a shared attach: whoever is attached there stays).
+- **Ended**: the same, resuming the session on the other Mac (`claude --resume` / `codex
+  resume` in its folder). A live session is never resumed, since that would fork it.
+- **Live, served by Claude Code Remote Control** (and shared at **Everything**): the session's
+  Remote Control link (`https://claude.ai/code/session_…`, read from the other Mac's
+  `~/.claude/sessions` registry, `bridgeSessionId`) opens in the browser here. That goes through
+  claude.ai with your account, like Remote Control itself; nothing of AgentBoard's does.
+- **Live, anywhere else** (a plain terminal tab, the Claude desktop app): AgentBoard asks the
+  other Mac to bring the session's tab forward (best effort; macOS may refuse AppleScript from
+  an ssh login) and opens Screen Sharing (`vnc://`) to it. Screen Sharing must be on there.
+
+Each click on a tmux row opens another window. **Mark Done**, **Reopen** and **Snooze** work on
+remote rows; dismissing a remote session's updates or denials happens on its own Mac.
+
+Opening is a per-Mac switch on the serving side: **Allow opening sessions on this Mac** (on by
+default for a new Mac) under each paired Mac. Adding a code for a Mac that is already paired
+(the same id, or the same key under another id) replaces that entry: the Add sheet names the Mac
+it replaces, and the new entry keeps its host and its switch (the sheet's toggle starts at the
+current value; `peers add` keeps it unless `--allow-open` is given). Being attached to a tmux session is shell access as you, the same
+as any ssh key you authorize; off, that Mac can only read the board and mark sessions.
+
+### Security model
+
+- Transport: ssh to macOS's own sshd. Traffic is encrypted, and both ends are authenticated:
+  the client pins the peer's host key (`peer-keys/known_hosts`, under the alias
+  `agentboard-<machine_id>`, `StrictHostKeyChecking=yes`), and the server accepts only the
+  dedicated ed25519 key AgentBoard generated for this purpose (`peer-keys/id_ed25519`, used for
+  nothing else, never your own keys or agent). ssh runs with `-F none`, so nothing from
+  `~/.ssh/config` (an `IdentityFile`, `ProxyCommand`, `KnownHostsCommand`) applies, and agent
+  and X11 forwarding are off.
+- Each paired Mac's key is one line in `~/.ssh/authorized_keys`, marked
+  `agentboard-peer:<machine_id>` at its end:
+  `restrict[,pty],command="<agentboard> peer-gate <id>" ssh-ed25519 …`. `restrict` turns off
+  port, agent and X11 forwarding; `pty` is there only while opening is allowed. The forced
+  command means that key can run nothing but the gate.
+- The gate (`agentboard peer-gate`) accepts only `serve`, `mark`, `attach`, `resume` and
+  `focus`, checks every argument against a strict pattern and against this Mac's database,
+  and never hands text from the other Mac to a shell. Every refusal is logged
+  (`agentboard logs --grep gate_refused`).
+- Everything received is validated before it is cached: a size cap per update (8 MB), at most
+  500 sessions, and a whitelist of fields with type and length checks. The sending Mac keeps
+  within both caps (live and needs-you sessions first, then the newest); an update that is
+  still refused leaves that Mac's sessions to go stale and Settings shows why.
+- `snapshot` never touches the network: it reads the cached files only. The network is used by
+  `refresh-links`, `peer-sync` (the app runs it while a Mac is paired), and the remote branch of
+  `focus`, `resume` and `mark`.
+- **Remove** (or `uninstall.sh`) deletes the peer from config.json, its pinned host key, its
+  cache, and its `authorized_keys` line, and nothing else in that file (a symlinked
+  `authorized_keys` is written through, the link kept; edits hold a lock on `~/.ssh`). A
+  stream that is already open ends at the gate's next check (it rereads config.json on every
+  change), and turning "allow opening" off reaches the other Mac with the next update. An open
+  `attach` or `resume` runs as the gate's child, not in its place: the gate checks config.json
+  every second, and once before starting, and ends it once the Mac is removed, opening is off,
+  or the Mac is paired again with new keys (a rotated key ends what the old one opened). The
+  child leads a session of its own on a pty of its own, which the gate relays to the ssh
+  terminal, so whatever process groups the interactive shell's job control gives the commands
+  it runs, they stay findable. Ending sends SIGHUP, then SIGTERM, then SIGKILL to every process
+  of that session and every descendant (one that called `setsid` while its parent lived
+  included), until none is left, so a process that ignores SIGHUP (`nohup`) or sits in its own
+  process group goes too. The same happens to what is left when the window closes. A resumed
+  session suspended with Ctrl+Z (no job-control shell above it) is continued at once instead of
+  freezing the window.
+- A stated limit: the gate's check runs in the gate process itself, under the same login as the
+  session it supervises. A paired Mac that stops the gate from inside its own open session
+  (`kill -STOP` on the gate, as the same user) is never rechecked, so turning "allow opening"
+  off or removing that Mac then leaves that one session usable until it is closed. This needs
+  a Mac that already has a shell here and prepares for it; the design accepts it, since
+  "allow opening" means shell access as you (see above).
+- ssh never falls back to your own keys: the receiving side refuses to start ssh when
+  AgentBoard's key or pinned `known_hosts` is missing (the status says to pair again), and the
+  paths are passed quoted, so the data directory's space ("Application Support") is fine.
+- Text from another Mac is shown with its links kept only when they are http(s); a received
+  string with a broken surrogate is repaired before it is cached.
+
+### Files
+
+In the data directory: `machine.json` (this Mac's id and name), `peer-keys/` (AgentBoard's key
+pair and the generated `known_hosts`, all 0600), `peers/<machine_id>.json` (each peer's last
+update and connection state), `peers.stamp` (rewritten after each update so the app refreshes)
+and `peer-sync.lock`. Outside it: the marked lines in `~/.ssh/authorized_keys`, and the `peers`,
+`peer_share` and `peer_stale_days` keys in config.json.
+
+### Troubleshooting
+
+The status under each paired Mac says what went wrong:
+
+| Status | Fix |
+|--------|-----|
+| "Remote Login is off there" | Turn on Remote Login on that Mac. |
+| "this Mac is not authorized there" | Add this Mac's pairing code on that Mac. |
+| "its host name can't be found" / "not reachable" | The `.local` name only works on the same network: edit the host to a name that reaches it (a VPN or DNS name). |
+| "its ssh host key does not match the pinned one" | The other Mac's ssh host key changed (a reinstall): remove it and pair again. |
+| "incompatible AgentBoard version" | Update AgentBoard on both Macs. |
+| Add machine says the code "comes from another Mac that has this Mac's AgentBoard identity" | That Mac's AgentBoard data folder was copied from this one (Migration Assistant, a restored backup), so both have the same machine id and key. On that Mac, quit AgentBoard, move `machine.json` and the `peer-keys` folder from `~/Library/Application Support/AgentBoard` to the Trash, open AgentBoard again and copy its new pairing code. |
+| offline | It is asleep, off, or out of reach; its rows come back on their own. |
+| "not reachable" on the same network, other apps reach it | On macOS 15 or later the first sync to a Mac on the LAN asks for Local Network access for AgentBoard; a denied prompt looks like this. Allow AgentBoard in System Settings → Privacy & Security → Local Network. |
+
+`agentboard logs --grep peer` shows the sync's own lines on both sides. A peer's clock running
+more than a minute off shows in its status. Remote Login's "Allow full disk access for remote
+users" is not expected to be needed, since the gate reads only AgentBoard's data directory,
+`~/.claude`, `~/.codex` and the tmux socket (not yet verified on every macOS version): if a Mac
+shows online but its sessions never appear, or a click can't attach, turn that option on there.
+
 ## Configuration (config.json)
 
 Everything the CLI can be told lives in one optional JSON object, `config.json` in the data
@@ -1287,6 +1489,9 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
 | `prune_days` | integer >= 0 | `90` | `prune` deletes sessions idle this many days (never one with an open `needs_you` note, a PR awaiting you, an active snooze or a live process) and dismissed notes older than this; `0` never deletes. |
 | `compact_days` | integer >= 0 | `7` | `prune` deletes tool-use and subagent events, and permission denials, older than this many days; `0` never compacts. |
 | `log_level` | `debug`/`info`/`warn`/`error` | `info` | The diagnostic log's level; `AGENTBOARD_LOG_LEVEL` wins over it. |
+| `peers` | list of objects | none | Your other Macs this board syncs with, written by Settings → Machines when you add a pairing code: `id` (the peer's machine id), `name`, `host` and `user` (where ssh reaches it), `allow_open` (whether it may open sessions on this Mac), `public_key` and `host_key` (its AgentBoard key and pinned ssh host key), `fingerprint` (its pairing code's fingerprint when it was added, shown in Settings). config.json edits hold a lock on the data directory, so two changes at once both land. See [Machines (peer sync)](#machines-peer-sync). |
+| `peer_share` | `full`/`titles`/`state` | `full` | How much of this Mac's sessions its peers receive: everything, titles without prompt, message, note or cwd text, or state and project name only. |
+| `peer_stale_days` | integer >= 0 | `7` | A peer's last-known sessions stay on the board, dimmed, this many days after it was last reached. |
 
 ```json
 {
@@ -1310,7 +1515,7 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
 agentboard hook --tool claude|codex
 agentboard snapshot [--json] [--all]
 agentboard paths [--json]
-agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT]
+agentboard mark <tool> <session_id> done|open|snooze [--hours N] [--note TEXT] [--machine ID]
 agentboard link --kind pr|ticket|url --ref REF [--url URL] [--state ...] [--title T] [--branch B] [--session TOOL:ID]
 agentboard status [--text TEXT] [--ttl MIN] [--model ID] [--context-tokens N] [--session TOOL:ID]
 agentboard title --text TEXT [--session TOOL:ID]
@@ -1325,12 +1530,27 @@ agentboard refresh-links
 agentboard install-hooks [--claude] [--codex] [--dry-run]
 agentboard uninstall-hooks [--claude] [--codex] [--dry-run]
 agentboard enable-codex-hooks [--dry-run]
-agentboard focus <tool> <session_id>
-agentboard resume <tool> <session_id> [--print]
+agentboard focus <tool> <session_id> [--machine ID]
+agentboard resume <tool> <session_id> [--print] [--machine ID]
 agentboard map-codex --session ID --cwd DIR [--at TIME]
 agentboard prune [--days N] [--compact-days N] [--dry-run] [--auto] [--vacuum]
 agentboard logs [--since 1h|ISO-8601] [--grep TEXT] [--lines N] [--app]
+agentboard peers list [--json]
+agentboard peers add --code CODE [--host H] [--name N] [--allow-open on|off] [--dry-run]
+agentboard peers remove --id ID | --all [--dry-run]
+agentboard peers set --id ID [--host H] [--name N] [--allow-open on|off]
+agentboard peers set-self [--name N] [--share full|titles|state]
+agentboard peer-sync [--once]
+agentboard peer-gate <peer_id>          (forced command; reads SSH_ORIGINAL_COMMAND)
+agentboard peer-open --machine ID --verb attach|resume <tool> <session_id>
 ```
+
+`peers`, `peer-sync`, `peer-gate` and `peer-open` are the [Machines (peer sync)](#machines-peer-sync)
+commands; Settings → Machines runs `peers` for you. `--machine ID` on `focus`, `resume` and `mark`
+acts on a session of a paired Mac: `focus` opens a new local terminal window running `peer-open`
+(attached to the session's tmux pane on that Mac, or resuming an ended session there), or opens
+Screen Sharing (`vnc://`) for a live session outside tmux; `mark` is one ssh call. All three exit
+6 when the peer is offline or not paired.
 
 `hook`, `map-codex` and `backfill --session` are what the hooks run; you never need to call them
 yourself. `prune` is the retention sweep described under [Data](#data): `--days` and `--compact-days`

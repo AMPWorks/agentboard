@@ -2317,6 +2317,15 @@ class PurgeDataSafetyTests(unittest.TestCase):
         (data_home / "reparse-locks" / "claude-s1.marker").write_text("")
         (data_home / "usage").mkdir()
         (data_home / "usage" / "codex.json").write_text("{}")
+        # Peer sync's files (peers.py, peer_sync.py).
+        (data_home / "machine.json").write_text("{}")
+        (data_home / "peers.stamp").write_text("x")
+        (data_home / "peer-sync.lock").write_text("")
+        (data_home / "peers").mkdir()
+        (data_home / "peers" / "11111111-2222-4333-8444-555555555555.json").write_text("{}")
+        (data_home / "peer-keys").mkdir()
+        for name in ("id_ed25519", "id_ed25519.pub", "known_hosts"):
+            (data_home / "peer-keys" / name).write_text("k")
 
         env = self._env(tmp, data_home)
         result = subprocess.run(
@@ -2325,6 +2334,30 @@ class PurgeDataSafetyTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(data_home.exists(), "the now-empty data dir must be removed too")
+
+    def test_uninstall_removes_only_the_marked_authorized_keys_lines(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentboard-uninstall-peers-test-")).resolve()
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(tmp)]))
+        data_home = tmp / "data"
+        data_home.mkdir()
+        env = self._env(tmp, data_home)
+        ssh = Path(env["HOME"]) / ".ssh"
+        ssh.mkdir(mode=0o700)
+        other = b"ssh-ed25519 AAAAmine me@laptop\n"
+        marked = (b'restrict,command="/x/agentboard peer-gate 11111111-2222-4333-8444-555555555555" '
+                  b"ssh-ed25519 AAAAx agentboard-peer:11111111-2222-4333-8444-555555555555\n")
+        (ssh / "authorized_keys").write_bytes(other + marked + b"# trailing comment\n")
+
+        dry = subprocess.run([str(UNINSTALL_SH), "--no-app", "--no-hooks", "--dry-run"],
+                             capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        self.assertIn("would remove 1 AgentBoard line(s)", dry.stdout)
+        self.assertIn(marked, (ssh / "authorized_keys").read_bytes())
+
+        result = subprocess.run([str(UNINSTALL_SH), "--no-app", "--no-hooks"],
+                                capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((ssh / "authorized_keys").read_bytes(), other + b"# trailing comment\n")
 
     def test_purge_data_files_list_names_the_diag_log_and_its_rotation(self):
         # diag.py owns these names; uninstall.sh must list both or

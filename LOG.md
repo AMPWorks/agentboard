@@ -894,3 +894,118 @@ real domain. `swift-test.sh` lists the matching `~/Library/Preferences` names be
 the run and fails a run that added one, naming the files on one line (a failing run names them
 too, so leaks show up while iterating on red tests); it only reads the directory. Removing the plists earlier runs left is a one-off command in docs/DEVELOPMENT.md
 rather than a feature, since it touches the user's preferences directory.
+
+## 2026-11-26 06:05:25 UTC — Peer sync: other Macs' sessions on the board, over ssh
+
+A board can now show the sessions of the user's other Macs. The transport is ssh to macOS's own
+sshd (Remote Login): it ships with the OS, encrypts, authenticates both ends (a pinned host key
+under `HostKeyAlias=agentboard-<machine_id>` and a dedicated ed25519 key), needs no daemon of
+ours on the serving side, and the same channel carries click-to-open. An own TLS listener, a
+Network.framework peer in the app, file sync and a mesh product were weighed and left out: more
+code on a trust boundary, a server that only runs while the app does, data leaving the user's
+machines, or a product the user must install. Each Mac pulls; there is no central server.
+
+What travels is each origin's derived snapshot entries, not its event rows: state depends on
+things only the origin has (pids, the `~/.claude/sessions` registry, transcript mtimes), so
+replayed events would make every remote session look dead. A paired Mac's key sits in
+`authorized_keys` behind `restrict[,pty],command="<shim> peer-gate <id>"`; the gate accepts a
+fixed verb list (`serve`, `mark`, `attach`, `resume`, `focus`) and checks every argument against
+its own database. `serve` streams one JSON line per change (checked each second) plus a
+heartbeat every 15 s; `peer-sync`, which the app supervises, validates each line at the trust
+boundary (size and count caps, a field whitelist with type checks) and writes
+`peers/<machine_id>.json` plus `peers.stamp` for the app's non-recursive watcher. `snapshot`
+merges those files and still never touches the network.
+
+Remote keys are `<tool>:<session_id>@<machine_id>`, and update rows now carry the session key
+because note ids are per database. A Mac silent for 45 s is offline: its rows stay, dimmed, out of
+the counts, and never alert; stale to live is not an entry, and a newly paired Mac's first
+export only seeds the alert baselines. The sender filters what leaves it (`peer_share`: full,
+titles, state). A click attaches a local terminal over ssh to the session's tmux pane, resumes an
+ended session on its Mac (never a live one, which would fork it), opens its Claude Code Remote
+Control link when the registry names one (`bridgeSessionId`), or falls back to Screen Sharing.
+Pairing is two pasted codes holding only public data, both sides showing a fingerprint; core
+became config.json's first writer, refusing a malformed file rather than overwriting it.
+
+Review follow-ups: `serve` rereads the peer on every rebuild, because sshd keeps an open
+connection after its `authorized_keys` line is removed, so Remove ends the stream and the
+allow-open switch reaches the next line. The sender keeps within the receiver's caps (urgent
+sessions, then the newest) instead of letting one oversized board stop every update, and a
+refused update is reported in Settings while the cached rows go stale. Remote alert timing takes
+the peer's measured clock skew off `updated_at`, since `last_seen_at` is on this Mac's clock.
+A remote row's state marker is a diamond instead of the round dot, in the same state color, so
+whose session it is reads from the marker itself and not only from the machine icon beside it;
+the state color still means exactly one thing, and the shape carries the origin.
+
+Security review: ssh runs with `-F none`, because `IdentitiesOnly` still tries an `IdentityFile`
+from `~/.ssh/config`, and a personal key would log in past the forced command whenever the other
+Mac does not accept AgentBoard's own. Every pattern is anchored with `\A`/`\Z`: `$` also matches
+before a trailing newline, which let a crafted code split its `authorized_keys` line and leave an
+unmarked key behind after Remove. An open `attach` or `resume` now runs as the gate's child in its
+own process group, and the gate ends it when the Mac is removed or opening is turned off (sshd
+never ends a live session when its key line goes). The fingerprint is 96 bits over every field of
+the code; `authorized_keys` is written through a symlink under a lock; received strings lose lone
+surrogates (one would make the whole snapshot undecodable for the app) and session ids must start
+alphanumeric; remote note and assistant text keeps only http(s) links.
+
+Second security pass: the pinned `known_hosts` path went to ssh unquoted, and ssh splits an
+option value at whitespace, so on a default install (the data directory is under "Application
+Support") every call failed host-key verification, and the relative half of the split path
+could be planted. Paths now go as `Name="path"` with `%` doubled, a test home with a space runs
+every peer test, and a test checks the effective options with `ssh -G` and logs in through a
+throwaway loopback sshd. ssh also skips a missing `IdentityFile` and falls back to the user's
+default keys, so the receiving side now refuses to start ssh without AgentBoard's key and pinned
+hosts. The receiver keeps only the newest waiting line (each is a whole export) and paces
+rejections too, and a reaped connection's handler stops writing, so a backlog never shows old
+states as live. Ending an open session escalates to SIGTERM and SIGKILL until the process group
+is empty, a re-pair with new keys ends what the old key opened, and config.json edits take a
+lock. A peer that stops its own gate (SIGSTOP, same user) is not rechecked; that limit is
+documented rather than closed, since such a peer already has a shell.
+
+Third pass: sshd uses the first `authorized_keys` line that matches a key, so two paired ids
+sharing one key (a Mac that lost its AgentBoard id and was paired again) left the older line's
+switches in force; adding a code whose key is already paired now replaces that entry and drops
+every other marked line with the key. A failed add takes its line back out (or restores the
+previous one on a re-pair). `-F none` also stopped `SendEnv LANG LC_*`, so the remote attach runs
+`tmux -u`, and remote resume runs an interactive login shell so a PATH set in `~/.zshrc` finds
+`claude`. Removing every peer no longer creates `~/.ssh`, a never-reached Mac reads "Not
+connected yet", and a data path with a backslash or `${` is refused before ssh rewrites it.
+
+Fourth pass: the interactive shell's job control puts a command it does not exec in a process
+group of its own, outside the one the gate ended, so a resumed process could outlive "allow
+opening" off. The gate now runs attach and resume as the leader of a session of its own on a
+pty of its own, relayed to the ssh terminal, and ends every process of that session and every
+descendant (tracked across the HUP, TERM, KILL steps, so one whose parent went first is not
+lost), also when the window closes. A child stopped with Ctrl+Z is continued instead of
+freezing the window. A code with this Mac's id but another Mac's host key is named as a copied
+data folder (Migration Assistant, a restored backup), with the manual fix; resetting the
+identity from Settings is a follow-up. A re-pair keeps the replaced entry's host and "allow
+opening" switch, and the Add sheet names the Mac it replaces. The running sync no longer writes
+the cache of a Mac removed just before its reload, and the sshd test gives the session the temp
+home so the developer's startup files never run.
+
+## 2026-11-26 16:27:19 UTC — Local and remote state apart in the menu bar icon and on rows
+
+Review asked for the menu bar icon to say whether a state comes from this Mac or another one.
+A split glyph (upper-left this Mac, lower-right the others) was considered and left out: the
+stack glyph's lower layers are about two pixels tall, the cue is colour-in-position only, and it
+disappears when colouring is off. Instead the glyph, its counts and its flash describe this Mac
+only, and a small diamond, the same shape as a remote row's marker, sits at the glyph's
+top-trailing corner in the colour of the most urgent live remote session that needs you or was
+interrupted. A gap is cut around it with a destination-out blend, so it reads on the
+translucent menu bar without a fixed outline colour, and with colouring off the glyph and badge
+render as one template image. The bottom-trailing corner stays with the Reduce motion alert
+badge, so both can show.
+
+A remote entry no longer flashes the glyph by default: the badge pulses three cycles at the
+flash's 1 Hz and then holds (under Reduce motion it just appears), and notifications and sounds
+are unchanged. A new Machines setting, "Other Macs in the menu bar icon", keeps the previous
+behaviour as *Merged with this Mac* and offers *Not shown*; *Separate marker* is the default.
+The tooltip and the image's spoken description now name the other Macs' share ("3 need you (1
+on mini)").
+
+On rows, an offline Mac's sessions get the diamond's outline (outline already means "not
+active" in the app), and the spoken label and tooltip say "last known ... offline". The generic
+computer icon under the tool badge became a chip with the Mac's initial, two letters or the
+initial and a digit on a collision, derived in machine-id order so a Mac keeps its label; the
+same chip marks the Updates rows, the detail header and Settings → Machines, so two remote Macs
+read apart without the name capsule. The dashboard legend shows the shape key side by side.

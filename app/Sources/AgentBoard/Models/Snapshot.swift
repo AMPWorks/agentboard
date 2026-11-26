@@ -388,6 +388,15 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     /// older CLIs (not a desktop session).
     var entrypoint: String?
     var desktop: Bool = false
+    /// The paired Mac the session runs on (peer sync); nil for this Mac's
+    /// own sessions and from older CLIs.
+    var machine: Machine?
+    /// A remote session whose Mac has sent nothing for a while: its
+    /// last-known state, dimmed, and never alerting.
+    var stale: Bool = false
+    /// How a click opens a remote session (`tmux`, `resume`, `screen`,
+    /// `remote-control`); nil when its Mac doesn't allow it.
+    var remoteOpen: String?
 
     var id: String { key }
 
@@ -425,6 +434,8 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         case tmux
         case tmuxSession = "tmux_session"
         case entrypoint, desktop
+        case machine, stale
+        case remoteOpen = "remote_open"
     }
 
     /// The CLI emits `null` for cwd/project/resume_command when a session's
@@ -482,6 +493,9 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
         entrypoint = (try? c.decodeIfPresent(String.self, forKey: .entrypoint)) ?? nil
         desktop = ((try? c.decodeIfPresent(Bool.self, forKey: .desktop)) ?? nil)
             ?? (entrypoint == Session.desktopEntrypoint)
+        machine = (try? c.decodeIfPresent(Machine.self, forKey: .machine)) ?? nil
+        stale = ((try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? nil) ?? false
+        remoteOpen = (try? c.decodeIfPresent(String.self, forKey: .remoteOpen)) ?? nil
     }
 
     /// The entrypoint the Claude desktop app runs Claude Code with.
@@ -501,6 +515,8 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
             // A tmux rename shows up on the next poll, with nothing else changed.
             && lhs.tmux == rhs.tmux && lhs.tmuxSession == rhs.tmuxSession
             && lhs.desktop == rhs.desktop && lhs.canFocus == rhs.canFocus
+            && lhs.machine == rhs.machine && lhs.stale == rhs.stale
+            && lhs.remoteOpen == rhs.remoteOpen
     }
     func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
@@ -514,13 +530,30 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
 
     /// There's a live, focusable terminal to bring to the front, or a Claude
     /// desktop app session to open there (alive or not: the app owns it).
-    var isFocusable: Bool { canFocus && (alive || desktop) }
+    var isFocusable: Bool {
+        if isRemote { return remoteOpen != nil && remoteOpen != "resume" }
+        return canFocus && (alive || desktop)
+    }
+
+    /// The session runs on another paired Mac.
+    var isRemote: Bool { machine != nil }
+
+    /// A remote session on a Mac that is online, so it may sound and notify.
+    var isLiveRemote: Bool { isRemote && !stale }
+
+    /// The session takes part in alerts (menu bar colour, flash,
+    /// notifications, sounds): every local session, and a remote one only
+    /// while its Mac is online.
+    var alertsEligible: Bool { !stale }
 
     /// Resume only makes sense once the session's own process is gone;
     /// hidden while it's still active (alive, or actively running/needing input).
     /// Never offered for a desktop app session: a terminal resume would fork
     /// the conversation away from the app (Copy Resume Command stays).
-    var resumeAvailable: Bool { !desktop && !(alive || state == .running || state == .needsYou) }
+    var resumeAvailable: Bool {
+        if isRemote { return remoteOpen == "resume" }
+        return !desktop && !(alive || state == .running || state == .needsYou)
+    }
 
     var isAutoDone: Bool { autoDone == true }
 
@@ -535,6 +568,84 @@ struct Session: Codable, Sendable, Identifiable, Equatable, Hashable {
     var displayTitle: String { SessionDisplay.primaryTitle(self) }
 }
 
+/// A Mac in peer sync: this one (`Snapshot.machine`) or the one a remote
+/// session runs on (`Session.machine`).
+struct Machine: Codable, Sendable, Equatable, Hashable {
+    var id: String
+    var name: String
+
+    init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        let name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? nil
+        self.name = (name?.isEmpty == false ? name : nil) ?? "Other Mac"
+    }
+}
+
+/// A paired Mac and its connection state (snapshot `peers`).
+struct Peer: Codable, Sendable, Equatable, Identifiable {
+    var id: String
+    var name: String
+    var host: String
+    /// `online`, `offline`, `never`, `expired`, `incompatible`, `error`.
+    var status: String
+    var lastSeenAt: String?
+    var error: String?
+    var sessionCount: Int
+    var allowOpen: Bool
+    var clockSkewSecs: Double?
+    /// From `peers list` only: this Mac's authorized_keys holds the
+    /// peer's key, and the fingerprint of its pairing code (six groups of four).
+    var authorized: Bool?
+    var fingerprint: String?
+    var user: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, host, status, error, user, authorized, fingerprint
+        case lastSeenAt = "last_seen_at"
+        case sessionCount = "session_count"
+        case allowOpen = "allow_open"
+        case clockSkewSecs = "clock_skew_secs"
+    }
+
+    init(id: String, name: String, host: String = "", status: String = "online",
+         lastSeenAt: String? = nil, error: String? = nil, sessionCount: Int = 0,
+         allowOpen: Bool = true) {
+        self.id = id
+        self.name = name
+        self.host = host
+        self.status = status
+        self.lastSeenAt = lastSeenAt
+        self.error = error
+        self.sessionCount = sessionCount
+        self.allowOpen = allowOpen
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = ((try? c.decodeIfPresent(String.self, forKey: .name)) ?? nil) ?? "Other Mac"
+        host = ((try? c.decodeIfPresent(String.self, forKey: .host)) ?? nil) ?? ""
+        status = ((try? c.decodeIfPresent(String.self, forKey: .status)) ?? nil) ?? "offline"
+        lastSeenAt = (try? c.decodeIfPresent(String.self, forKey: .lastSeenAt)) ?? nil
+        error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
+        sessionCount = ((try? c.decodeIfPresent(Int.self, forKey: .sessionCount)) ?? nil) ?? 0
+        allowOpen = ((try? c.decodeIfPresent(Bool.self, forKey: .allowOpen)) ?? nil) ?? true
+        clockSkewSecs = (try? c.decodeIfPresent(Double.self, forKey: .clockSkewSecs)) ?? nil
+        authorized = (try? c.decodeIfPresent(Bool.self, forKey: .authorized)) ?? nil
+        fingerprint = (try? c.decodeIfPresent(String.self, forKey: .fingerprint)) ?? nil
+        user = (try? c.decodeIfPresent(String.self, forKey: .user)) ?? nil
+    }
+
+    var isOnline: Bool { status == "online" }
+    var lastSeenDate: Date? { lastSeenAt.flatMap(ISO8601DateParsing.date(from:)) }
+}
+
 struct Snapshot: Codable, Sendable, Equatable {
     var generatedAt: String
     var counts: Counts
@@ -542,10 +653,14 @@ struct Snapshot: Codable, Sendable, Equatable {
     /// Plan-usage sources (Claude's local cache, `usage/*.json` drop files,
     /// Codex rollouts); empty when there is none or the CLI is older.
     var usage: [UsageSource] = []
+    /// This Mac's peer identity (nil until first paired, or an older CLI)
+    /// and the paired Macs (empty when none, or an older CLI).
+    var machine: Machine?
+    var peers: [Peer] = []
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
-        case counts, sessions, usage
+        case counts, sessions, usage, machine, peers
     }
 
     static let empty = Snapshot(generatedAt: "", counts: Counts(), sessions: [])
@@ -562,6 +677,40 @@ extension Snapshot {
         counts = try c.decode(Counts.self, forKey: .counts)
         sessions = try c.decode([Session].self, forKey: .sessions)
         usage = (try? c.decodeIfPresent(LenientList<UsageSource>.self, forKey: .usage))?.items ?? []
+        machine = (try? c.decodeIfPresent(Machine.self, forKey: .machine)) ?? nil
+        peers = (try? c.decodeIfPresent(LenientList<Peer>.self, forKey: .peers))?.items ?? []
+    }
+
+    /// This snapshot with every remote session left out and the counts
+    /// recomputed (Settings → Machines → Show sessions from other machines
+    /// off). `peers` stays, so Settings still shows their status.
+    func withoutRemote() -> Snapshot {
+        guard sessions.contains(where: \.isRemote) else { return self }
+        var copy = self
+        copy.sessions = sessions.filter { !$0.isRemote }
+        var counts = Counts()
+        for session in copy.sessions {
+            switch session.state {
+            case .needsYou: counts.needsYou += 1
+            case .interrupted: counts.interrupted += 1
+            case .running: counts.running += 1
+            case .review: counts.review += 1
+            case .unconcluded: counts.unconcluded += 1
+            case .snoozed: counts.snoozed += 1
+            case .done: counts.done += 1
+            case .unknown: break
+            }
+            counts.notes += session.notesCount
+            counts.denials += session.denialsCount
+        }
+        copy.counts = counts
+        return copy
+    }
+
+    /// The peer a remote session belongs to.
+    func peer(for session: Session) -> Peer? {
+        guard let id = session.machine?.id else { return nil }
+        return peers.first { $0.id == id }
     }
 }
 

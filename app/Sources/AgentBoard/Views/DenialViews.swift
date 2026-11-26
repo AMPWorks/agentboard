@@ -129,16 +129,19 @@ struct DenialRowView: View {
                     .lineLimit(2)
                     .help(denial.reason.isEmpty ? "No reason recorded" : denial.reason)
             }
-            Button {
-                Task { await store.dismissDenial(denial, of: session) }
-            } label: {
-                Image(systemName: "xmark.circle")
+            // A remote session's denials are dismissed on its own Mac.
+            if !session.isRemote {
+                Button {
+                    Task { await store.dismissDenial(denial, of: session) }
+                } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Dismiss this denial")
+                .accessibilityLabel("Dismiss denial")
+                .opacity(isHovering ? 1 : 0.35)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Dismiss this denial")
-            .accessibilityLabel("Dismiss denial")
-            .opacity(isHovering ? 1 : 0.35)
         }
         .padding(.vertical, 3)
         .contentShape(Rectangle())
@@ -170,7 +173,7 @@ struct SessionDenialsSection: View {
                 Text(DenialFeed.header(listed: session.denials.count, total: session.denialsCount))
                     .font(.headline)
                 Spacer()
-                if max(session.denials.count, session.denialsCount) > 1 {
+                if max(session.denials.count, session.denialsCount) > 1, !session.isRemote {
                     Button("Dismiss All") { Task { await store.dismissDenials(for: session) } }
                         .controlSize(.small)
                         .help("Dismiss every open denial of this session, including ones not listed")

@@ -15,12 +15,20 @@ from agentboard import spaces  # noqa: E402
 
 
 class AgentBoardTestCase(unittest.TestCase):
+    # True: both homes have a space in their path, as the default data
+    # directory (~/Library/Application Support/AgentBoard) does.
+    home_with_space = False
+
     def setUp(self):
         self._tmp = tempfile.mkdtemp(prefix="agentboard-test-")
         self.tmp_path = Path(self._tmp)
-        self.agentboard_home = self.tmp_path / "agentboard-home"
-        self.fake_home = self.tmp_path / "fake-home"
-        self.agentboard_home.mkdir()
+        if self.home_with_space:
+            self.agentboard_home = self.tmp_path / "Application Support" / "AgentBoard"
+            self.fake_home = self.tmp_path / "fake home"
+        else:
+            self.agentboard_home = self.tmp_path / "agentboard-home"
+            self.fake_home = self.tmp_path / "fake-home"
+        self.agentboard_home.mkdir(parents=True)
         self.fake_home.mkdir()
         (self.fake_home / ".claude").mkdir()
         (self.fake_home / ".codex").mkdir()

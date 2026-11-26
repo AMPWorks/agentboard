@@ -49,6 +49,7 @@ struct SoundEventDetector {
         needsYouEntered: Set<String>,
         turns: TurnFinishDetector.Changes,
         context: SessionNotificationPlan.Context,
+        remoteAlerts: Bool = true,
         sounds: (AttentionEvent) -> Bool = { _ in true }
     ) -> Set<AttentionEvent> {
         let firing = primed
@@ -70,15 +71,22 @@ struct SoundEventDetector {
         for session in snapshot.sessions {
             let key = session.key
             let firstSeen = seen.insert(key).inserted
-            // A session first seen after launch counts only what happened since.
-            let fresh = !firstSeen || (session.updatedDate.map { $0 >= startedAt } ?? false)
-            let canPlay = firing && watched(key)
+            // A session first seen after launch counts only what happened
+            // since; a remote one first seen (a newly paired Mac's first
+            // export) only seeds the baseline.
+            let fresh = !firstSeen
+                || (!session.isRemote && (session.updatedDate.map { $0 >= startedAt } ?? false))
+            // A stale remote session never plays; remote ones only with the
+            // Machines toggle on.
+            let canPlay = firing && watched(key) && session.alertsEligible
+                && (remoteAlerts || !session.isRemote)
 
             if let newest = session.denials.map(\.id).max() {
                 let previous = maxDenialID[key]
                 let rose: Bool
                 if firstSeen {
-                    rose = session.denials.contains { ($0.date ?? .distantPast) >= startedAt }
+                    rose = !session.isRemote
+                        && session.denials.contains { ($0.date ?? .distantPast) >= startedAt }
                 } else {
                     rose = previous.map { newest > $0 } ?? true
                 }

@@ -114,7 +114,8 @@ enum DenialFeed {
         }
         var dismissals: [DenialDismissal] = []
         var ids: [Int] = []
-        for session in pickerFiltered(sessions, tool: tool, project: project) {
+        // A remote session's denials live in its own Mac's database.
+        for session in pickerFiltered(sessions, tool: tool, project: project) where !session.isRemote {
             if query.matches(session) {
                 if session.denialsCount > 0 || !session.denials.isEmpty {
                     dismissals.append(.session(tool: session.tool, sessionId: session.sessionId))

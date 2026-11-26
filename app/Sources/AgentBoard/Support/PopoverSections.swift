@@ -172,7 +172,9 @@ enum UpdatesFeed {
         let note: Note
         let session: Session
 
-        var id: Int { note.id }
+        /// Note ids are per database, so two Macs can both have note 7:
+        /// the session key keeps the id unique.
+        var id: String { "\(session.key)#\(note.id)" }
         var sessionKey: String { session.key }
         var project: String { session.project }
         var toolBadge: String { session.toolBadge }
@@ -280,7 +282,12 @@ extension UpdatesFeed {
 
         /// The newest note: its text and time lead the row.
         var note: Note { notes[0] }
-        var id: String { isGroup ? "group:\(session.key)" : "note:\(note.id)" }
+        /// Unique across Macs: note ids are per database, so a remote
+        /// session's note carries its session key too.
+        var id: String {
+            if isGroup { return "group:\(session.key)" }
+            return session.isRemote ? "note:\(note.id)@\(session.key)" : "note:\(note.id)"
+        }
         var sessionKey: String { session.key }
         var project: String { session.project }
         var toolBadge: String { session.toolBadge }
@@ -373,7 +380,9 @@ extension UpdatesFeed {
                 continue
             }
             guard emitted.insert(item.sessionKey).inserted else { continue }
-            let dismissal: NoteDismissal = whole
+            // A remote session's notes live in its own Mac's database: its
+            // ids mean nothing here, so its row dismisses nothing.
+            let dismissal: NoteDismissal = session.isRemote ? .ids([]) : whole
                 ? .session(tool: session.tool, sessionId: session.sessionId, kinds: groupedKinds)
                 : .ids(members.map(\.id))
             rows.append(Row(session: session, notes: members, total: total, isGroup: true,
@@ -384,7 +393,7 @@ extension UpdatesFeed {
 
     static func single(_ item: Item) -> Row {
         Row(session: item.session, notes: [item.note], total: 1, isGroup: false,
-            dismissal: .ids([item.note.id]))
+            dismissal: .ids(item.session.isRemote ? [] : [item.note.id]))
     }
 
     /// The popover's compact view of `rows`: every `needs_you` row, and the
@@ -439,7 +448,7 @@ extension UpdatesFeed {
         }
         var dismissals: [NoteDismissal] = []
         var ids: [Int] = []
-        for session in sessions {
+        for session in sessions where !session.isRemote {
             if query.matchesIgnoringNotes(session) {
                 if session.notesCount > 0 || !session.notes.isEmpty {
                     dismissals.append(.session(tool: session.tool, sessionId: session.sessionId, kinds: nil))

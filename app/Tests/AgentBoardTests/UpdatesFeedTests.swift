@@ -27,7 +27,7 @@ struct UpdatesFeedTests {
             session("c", notes: []),
         ]).sessions
         let feed = UpdatesFeed.make(from: sessions, query: SessionSearch(""))
-        #expect(feed.map(\.id) == [4, 2, 1])
+        #expect(feed.map(\.note.id) == [4, 2, 1])
         #expect(feed.map(\.sessionKey) == ["a", "b", "a"])
         #expect(feed[1].project == "other")
         #expect(feed[1].toolBadge == "X")
@@ -41,7 +41,7 @@ struct UpdatesFeedTests {
             session("a", notes: [note(3, lastTs: "2026-10-15T10:00:00Z")]),
             session("b", notes: [note(8, lastTs: "2026-10-15T10:00:00Z")]),
         ]).sessions
-        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("")).map(\.id) == [8, 3])
+        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("")).map(\.note.id) == [8, 3])
     }
 
     @Test func queryFiltersBySessionAndByNoteText() {
@@ -49,8 +49,8 @@ struct UpdatesFeedTests {
             session("alpha", notes: [note(1, "update", "Deployed the cache fix", lastTs: "2026-10-15T10:00:00Z")]),
             session("beta", notes: [note(2, "update", "PR #77 opened", lastTs: "2026-10-15T11:00:00Z")]),
         ]).sessions
-        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("#77")).map(\.id) == [2])
-        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("alpha")).map(\.id) == [1])
+        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("#77")).map(\.note.id) == [2])
+        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("alpha")).map(\.note.id) == [1])
         #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("zzzz")).isEmpty)
     }
 
@@ -62,12 +62,12 @@ struct UpdatesFeedTests {
             ]),
         ]).sessions
         // A term that hits one note's text lists that note, not its sibling.
-        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("#77")).map(\.id) == [1])
-        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("approve")).map(\.id) == [2])
+        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("#77")).map(\.note.id) == [1])
+        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("approve")).map(\.note.id) == [2])
         // A term that hits the session's own fields lists all of its notes.
-        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("repo:alpha")).map(\.id) == [2, 1])
+        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("repo:alpha")).map(\.note.id) == [2, 1])
         // Terms are ANDed over the session's fields plus this one note.
-        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("alpha #77")).map(\.id) == [1])
+        #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("alpha #77")).map(\.note.id) == [1])
         #expect(UpdatesFeed.make(from: sessions, query: SessionSearch("#77 approve")).isEmpty)
         // The sibling's needs_you note is hidden from the feed, and counted.
         #expect(UpdatesFeed.hiddenNeedsYouNotes(from: sessions, query: SessionSearch("#77")) == 1)
@@ -81,7 +81,7 @@ struct UpdatesFeedTests {
         body["headline"] = "USER_ACTION: approve the plan"
         let sessions = Fixtures.snapshot([session("a", "needs_you", notes: [body])]).sessions
         let feed = UpdatesFeed.make(from: sessions, query: SessionSearch("flamingo"))
-        #expect(feed.map(\.id) == [1])
+        #expect(feed.map(\.note.id) == [1])
         #expect(feed.first?.note.headline == "USER_ACTION: approve the plan")
     }
 
@@ -115,7 +115,7 @@ struct UpdatesFeedTests {
         #expect(FilteredCounts(byRepo.filter(sessions), query: byRepo).counts.notes == 25)
         // ...while one that only hits a note's text counts the notes it lists.
         let byNote = SessionSearch("\"PR #7 merged\"")
-        #expect(UpdatesFeed.make(from: sessions, query: byNote).map(\.id) == [7])
+        #expect(UpdatesFeed.make(from: sessions, query: byNote).map(\.note.id) == [7])
         #expect(UpdatesFeed.total(from: sessions, query: byNote) == 1)
         #expect(UpdatesFeed.header(for: UpdatesFeed.make(from: sessions, query: byNote),
                                    total: UpdatesFeed.total(from: sessions, query: byNote)) == "Updates (1)")
@@ -147,7 +147,7 @@ struct UpdatesFeedTests {
         // A request under a summary: the row leads with the core's marker
         // line, not the summary (the older-CLI fallback is covered by
         // headlineFallsBackToTheFirstLineWhenAbsentEmptyOrNotAString).
-        let byId = Dictionary(uniqueKeysWithValues: feed.map { ($0.id, $0.note) })
+        let byId = Dictionary(uniqueKeysWithValues: feed.map { ($0.note.id, $0.note) })
         #expect(byId[12]?.headline.hasPrefix("USER_ACTION: [widget-service] approve running") == true)
         #expect(byId[12]?.firstLine.hasPrefix("Tick summary.") == true)
         #expect(byId[13]?.headline == "USER_ACTION: confirm the destructive migration before it alters schema_version")
@@ -315,14 +315,14 @@ struct UpdatesFeedSortTests {
         let sessions = Self.manyNotes()
         for query in [SessionSearch(""), SessionSearch("p3"), SessionSearch("note")] {
             let feed = UpdatesFeed.make(from: sessions, query: query)
-            #expect(feed.map(\.id) == Self.reference(sessions, query))
+            #expect(feed.map(\.note.id) == Self.reference(sessions, query))
         }
         // Equal times: the higher id first; unparseable times sort last.
         let feed = UpdatesFeed.make(from: sessions, query: SessionSearch(""))
         for (a, b) in zip(feed, feed.dropFirst()) {
             let da = a.note.lastDate ?? .distantPast
             let db = b.note.lastDate ?? .distantPast
-            #expect(da > db || (da == db && a.id > b.id))
+            #expect(da > db || (da == db && a.note.id > b.note.id))
         }
         #expect(feed.last?.note.lastDate == nil)
     }

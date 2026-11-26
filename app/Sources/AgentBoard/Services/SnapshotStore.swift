@@ -93,6 +93,14 @@ final class SnapshotStore: ObservableObject {
 
     private let cli: AgentBoardCLI
     private let watcher = DirectoryWatcher()
+    private lazy var peerSync = PeerSyncSupervisor(cli: cli)
+    /// The latest snapshot as the CLI sent it, before Settings → Machines'
+    /// "Show sessions from other machines" filter.
+    private var rawSnapshot: Snapshot = .empty
+    /// Paired Macs, this Mac's pairing code and Remote Login status, for
+    /// Settings → Machines (`refreshPeers`).
+    @Published private(set) var peersInfo: PeersInfo?
+    @Published private(set) var peersError: String?
     private var pollTask: Task<Void, Never>?
     private var linksTask: Task<Void, Never>?
     private var pathsTask: Task<Void, Never>?
@@ -148,8 +156,12 @@ final class SnapshotStore: ObservableObject {
     /// database, its WAL and config.json. The watcher ignores directory
     /// events that leave all three untouched, such as the `-wal`/`-shm`
     /// files each `snapshot` run creates and deletes (`DirectoryWatcher`).
+    /// `peers.stamp` is rewritten by `peer-sync` after each update from a
+    /// paired Mac (its caches live in `peers/`, which the non-recursive
+    /// watcher doesn't see).
     static func stampedFiles(home: String, db: String) -> [String] {
-        [db, db + "-wal", (home as NSString).appendingPathComponent("config.json")]
+        [db, db + "-wal", (home as NSString).appendingPathComponent("config.json"),
+         (home as NSString).appendingPathComponent("peers.stamp")]
     }
 
     func start() {
@@ -200,6 +212,7 @@ final class SnapshotStore: ObservableObject {
     }
 
     func stop() {
+        peerSync.stop()
         pollTask?.cancel(); pollTask = nil
         linksTask?.cancel(); linksTask = nil
         pathsTask?.cancel(); pathsTask = nil
@@ -220,7 +233,8 @@ final class SnapshotStore: ObservableObject {
         }
         do {
             let snapshot = try await cli.snapshot(all: showAll)
-            self.snapshot = snapshot
+            rawSnapshot = snapshot
+            applyRemoteFilter()
             self.lastUpdated = Date()
             self.lastError = nil
             // The CLI just answered; a refresh still running started before
@@ -230,6 +244,19 @@ final class SnapshotStore: ObservableObject {
             self.lastError = StoreStatus.snapshotErrorMessage(error)
             log.error("snapshot refresh failed: \(String(describing: error), privacy: .public)")
         }
+    }
+
+    static var showRemote: Bool {
+        UserDefaults.standard.object(forKey: SettingsKeys.showRemoteSessions) as? Bool ?? true
+    }
+
+    /// Publishes `rawSnapshot`, without remote sessions when they are
+    /// hidden, and starts or stops `peer-sync` to match.
+    func applyRemoteFilter() {
+        let show = Self.showRemote
+        let shown = show ? rawSnapshot : rawSnapshot.withoutRemote()
+        if shown != snapshot { snapshot = shown }
+        peerSync.update(peerCount: rawSnapshot.peers.count, showRemote: show)
     }
 
     /// Shows a failed action in the banner; it clears itself after
@@ -287,22 +314,25 @@ final class SnapshotStore: ObservableObject {
     // MARK: - Actions
 
     func markDone(_ session: Session) async {
-        await perform("mark done", session) { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "done") }
+        await perform("mark done", session) { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "done", machine: session.machine?.id) }
     }
 
     func markOpen(_ session: Session) async {
-        await perform("mark open", session) { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "open") }
+        await perform("mark open", session) { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "open", machine: session.machine?.id) }
     }
 
     func snooze(_ session: Session, hours: Int) async {
-        await perform("snooze \(hours)h", session) { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "snooze", hours: hours) }
+        await perform("snooze \(hours)h", session) { try await cli.mark(tool: session.tool, sessionId: session.sessionId, action: "snooze", hours: hours, machine: session.machine?.id) }
     }
 
     /// Returns false when `agentboard focus` failed (the tab was closed,
     /// the terminal quit), so a notification click can open the dashboard.
     @discardableResult
     func focus(_ session: Session) async -> Bool {
-        await perform("focus", session) { try await cli.focus(tool: session.tool, sessionId: session.sessionId) }
+        await perform("focus", session) {
+            try Self.checkReachable(session)
+            try await cli.focus(tool: session.tool, sessionId: session.sessionId, machine: session.machine?.id)
+        }
     }
 
     /// Focus from a click (popover row, dashboard double-click/Return, the
@@ -324,21 +354,91 @@ final class SnapshotStore: ObservableObject {
 
     /// Actually resumes the session (opens a new terminal tab running the resume command).
     func resume(_ session: Session) async {
-        await perform("resume", session) { try await cli.resume(tool: session.tool, sessionId: session.sessionId, printOnly: false) }
+        await perform("resume", session) {
+            try Self.checkReachable(session)
+            try await cli.resume(tool: session.tool, sessionId: session.sessionId, printOnly: false,
+                                 machine: session.machine?.id)
+        }
     }
 
-    /// Fetches the resume command text for copying, without launching anything.
+    /// Fetches the resume command text for copying, without launching
+    /// anything. For a remote session it is the local `peer-open` command.
     func resumeCommand(for session: Session) async -> String {
-        (try? await cli.resume(tool: session.tool, sessionId: session.sessionId, printOnly: true)) ?? session.resumeCommand
+        (try? await cli.resume(tool: session.tool, sessionId: session.sessionId, printOnly: true,
+                               machine: session.machine?.id)) ?? session.resumeCommand
+    }
+
+    /// A stale remote session's Mac is offline: say so instead of opening a
+    /// terminal whose ssh would only hang.
+    static func checkReachable(_ session: Session) throws {
+        guard session.isRemote, session.stale else { return }
+        throw PeerUnreachable(name: session.machine?.name ?? "The other Mac")
+    }
+
+    // MARK: - Machines (Settings → Machines)
+
+    /// Reloads `peersInfo` (`agentboard peers list --json`).
+    func refreshPeers() async {
+        do {
+            peersInfo = try await cli.peersList()
+            peersError = nil
+        } catch {
+            peersError = error.localizedDescription
+            log.error("peers list failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Checks a pasted pairing code without changing anything.
+    func previewPeer(code: String) async -> Result<PeerPreview, Error> {
+        do { return .success(try await cli.peersPreview(code: code)) } catch { return .failure(error) }
+    }
+
+    /// Runs one `peers` change, then reloads the list and the board.
+    /// Returns the error message on failure.
+    @discardableResult
+    func changePeers(_ name: String, _ change: () async throws -> Void) async -> String? {
+        log.notice("action \(name, privacy: .public)")
+        do {
+            try await change()
+            peersError = nil
+            await refreshPeers()
+            await refresh()
+            return nil
+        } catch {
+            let message = error.localizedDescription
+            peersError = message
+            log.error("action \(name, privacy: .public) failed: \(message, privacy: .public)")
+            await refreshPeers()
+            return message
+        }
+    }
+
+    func addPeer(code: String, allowOpen: Bool) async -> String? {
+        await changePeers("add machine") { try await cli.peersAdd(code: code, allowOpen: allowOpen) }
+    }
+
+    func removePeer(_ id: String) async -> String? {
+        await changePeers("remove machine") { try await cli.peersRemove(id: id) }
+    }
+
+    func setPeer(_ id: String, host: String? = nil, name: String? = nil, allowOpen: Bool? = nil) async -> String? {
+        await changePeers("set machine") { try await cli.peersSet(id: id, host: host, name: name, allowOpen: allowOpen) }
+    }
+
+    func setThisMac(name: String? = nil, share: String? = nil) async -> String? {
+        await changePeers("set this mac") { try await cli.peersSetSelf(name: name, share: share) }
     }
 
     /// Dismisses one note (the popover's and the detail view's per-note x).
     func dismissNote(_ note: Note, of session: Session) async {
+        // Note ids are per database: never send a remote one to this Mac's CLI.
+        guard !session.isRemote else { return }
         await perform("dismiss note \(note.id)", session) { try await cli.dismissNotes(ids: [note.id]) }
     }
 
     /// Dismisses every open note of one session.
     func dismissNotes(for session: Session) async {
+        guard !session.isRemote else { return }
         await perform("dismiss notes", session) { try await cli.dismissNotes(tool: session.tool, sessionId: session.sessionId) }
     }
 
@@ -351,11 +451,13 @@ final class SnapshotStore: ObservableObject {
 
     /// Clears one permission denial (a Denials row's or the detail's x).
     func dismissDenial(_ denial: Denial, of session: Session) async {
+        guard !session.isRemote else { return }
         await perform("dismiss denial \(denial.id)", session) { try await cli.dismissDenials(ids: [denial.id]) }
     }
 
     /// Clears every open denial of one session.
     func dismissDenials(for session: Session) async {
+        guard !session.isRemote else { return }
         await perform("dismiss denials", session) {
             try await cli.dismissDenials(tool: session.tool, sessionId: session.sessionId)
         }

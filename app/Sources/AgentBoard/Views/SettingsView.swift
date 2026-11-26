@@ -164,6 +164,8 @@ struct SettingsView: View {
                 header("General", topic: .settings)
             }
 
+            MachinesSettingsSection(store: store)
+
             Section {
                 TextField("agentboard path override (optional)", text: $cliPath)
                     .help("Full path to the agentboard CLI, used only when it is not in the app bundle or on $PATH")
