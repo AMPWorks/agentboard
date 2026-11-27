@@ -14,7 +14,7 @@ struct GearMenu: View {
     var body: some View {
         Menu {
             Button("Settings…") { showSettings() }
-                .help("Open AgentBoard's settings: appearance, the menu bar icon, notifications and diagnostics")
+                .help("Open AgentBoard's settings, on the tab you last used: General, Menu bar, Notifications, Machines and Advanced, with a search field")
             Button("AgentBoard Help") { showHelp() }
                 .help("Open the guide to sessions, states, updates, search, settings and the CLI")
             Button("Open Log") { store.revealLog() }

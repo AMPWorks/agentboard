@@ -1,6 +1,6 @@
 import Foundation
 
-/// An event that can play a sound (Settings → Sounds). Detected by
+/// An event that can play a sound (Settings → Notifications → Sounds). Detected by
 /// `SoundEventDetector`, played by `SoundPlayer`.
 enum AttentionEvent: String, CaseIterable, Identifiable, Hashable, Sendable {
     /// A session newly needs you (the same diff that flashes the icon).

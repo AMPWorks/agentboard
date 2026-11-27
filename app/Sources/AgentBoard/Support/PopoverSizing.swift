@@ -1,6 +1,6 @@
 import Foundation
 
-/// The popover's size (Settings → Popover and the corner grip): the pure
+/// The popover's size (Settings → Menu bar → Popover size and the corner grip): the pure
 /// arithmetic, testable without a window. Heights are the session list's
 /// height (the scroll area between the search bar and the footer); widths
 /// are the whole popover's. All values are points.
@@ -41,7 +41,7 @@ enum PopoverSizing {
         }
     }
 
-    /// Settings → Reset size and a double-click on the grip: the default
+    /// Settings → Menu bar → Popover size → Reset size and a double-click on the grip: the default
     /// height and auto width. Auto-expand is a mode, not a size, so it stays.
     static func resetSize(in defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: PopoverSizing.heightKey)

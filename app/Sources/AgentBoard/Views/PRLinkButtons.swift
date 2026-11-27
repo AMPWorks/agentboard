@@ -29,7 +29,7 @@ enum PRStyle {
 /// One compact button per PR link (glyph + `#N`, tinted by state) that opens
 /// the PR in the browser. A separate hit target from the row: clicking one
 /// never focuses the session's terminal. Merged and closed PRs get no button
-/// unless Settings → Show closed and merged PRs is on. More than
+/// unless Settings → General → Show closed and merged PRs is on. More than
 /// `PRButtons.defaultCap` shown PRs add a "+N" that opens the detail view.
 struct PRLinkButtons: View {
     let session: Session

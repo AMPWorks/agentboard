@@ -91,7 +91,7 @@ enum InlineMarkdown {
 /// list out of view: every needs_you row, and at most `compactLimit`
 /// others until "Show all N" expands it. With `onHide` (the panel was
 /// opened from the Updates button) it sits on a tinted card with a Hide
-/// button; without it (Settings → Popover → Always shown) it is a plain
+/// button; without it (Settings → Menu bar → Popover → Always shown) it is a plain
 /// section with a fixed-size header like the session sections', and the
 /// popover splits it in two (`UpdatesFeed.partitionForAlwaysShown`), each
 /// part its own `UpdatesSectionView` with its own `title`.

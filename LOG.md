@@ -1092,3 +1092,49 @@ directions, would go with ssh connection reuse: peer-sync already keeps one ssh 
 which could be the multiplexing master that click-time calls join. That reverses the deliberate
 `ControlMaster=no`/`ControlPath=none` hardening and adds a control socket under the data
 directory (path length limit, uninstall cleanup), so it is left for a separate change.
+
+## 2026-11-27 03:41:43 UTC — Settings in five tabs, with a search that jumps to the control
+
+The Settings window had grown into one grouped form of ten sections, taller than most screens
+once a few Macs were paired. It is now five tabs (General, Menu bar, Notifications, Machines,
+Advanced) with the section names unchanged, so each ? button and help heading keeps its name.
+There is no Integrations tab: integrations live in config.json, not in the app. Settings reopens
+on the tab that was open last (a new Settings key, `settingsLastTab`); no new "open Settings at X"
+entry point was added, but `SettingsWindowController.show(using:tab:item:)` can open one.
+
+Search shows a results list instead of filtering the live controls in place. The controls sit in
+different tabs and several rows are dynamic (per-peer rows, the conditional fixture path, the
+hook-errors.log row), so hiding non-matching rows would leave half-empty sections and need every
+row wrapped. A list grouped by tab, each row with its `Tab → Section` path and tooltip, that
+switches tabs, scrolls to the row and highlights it briefly, answers "where is that setting" with
+one pure, testable matcher (the Help window's: every word must match, ignoring case and accents).
+
+One catalog, `SettingsCatalog`, is the single source of each control's label and tooltip, so the
+search text and what the window shows cannot drift; a text lint checks that every Settings control
+reads its text from the catalog (or says why not) and that every catalog item is on screen. Each
+pane's form reports its full height so the window fits the selected tab, and an outer scroll view
+takes over near the screen's height, which only the Machines tab with several Macs reaches.
+
+## 2026-11-27 05:08:50 UTC — Settings search moves into the top bar, as a popup like System Settings
+
+After trying the tabbed window, the owner asked for the search to work like System Settings: a
+search field with a magnifying glass beside the tabs, a popup list of matches, and a pick that
+opens the right tab with the setting selected. On macOS 27 the Settings scene draws a TabView's
+tabs in the window toolbar, where a view in the window's content cannot sit beside them, so the
+TabView gave way to a top bar the window draws itself: toolbar-style tab buttons (symbol over
+title, the selected one tinted) on the left and the search field on the right, above the selected
+pane. The window is wider (580 pt) so both fit.
+
+The matches are a popup over the selected pane, hanging from the field, not a list that replaces
+the tabs: the pane stays in view, and the popup is drawn inside the window (an overlay, not a
+popover window) so the text field keeps keyboard focus while the arrow keys move the selection.
+A click outside the popup clears the query; the popup is no taller than the pane under it and
+scrolls past that. The selection lives in `SettingsNavigator` (first match on each new query,
+arrows stop at the ends, Return reveals it), so it is unit-tested without a window. The revealed
+row now stays highlighted for about 3 s, long enough to read as selected.
+
+Hover and the arrow keys share one selection, and a keyboard move scrolls the popup, so a long
+list could feed itself: a scroll slides a new row under a resting pointer, which would select it.
+The navigator therefore ignores hover until the pointer has moved since the last keyboard change
+(an arrow key or a new query), and a selection the pointer made does not scroll. A click on the
+top bar's empty part, and Tab out of the field, close the popup too.

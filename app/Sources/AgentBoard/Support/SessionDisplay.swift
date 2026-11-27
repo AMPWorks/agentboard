@@ -205,7 +205,7 @@ extension SessionDisplay {
 /// The PR buttons on a session row: one per PR link that has a URL, the
 /// ones that need the user first, capped with a "+N" for the rest. Merged
 /// and closed PRs are left off unless `showFinished` is set (Settings →
-/// Show closed and merged PRs). The filter runs before the cap, so "+N"
+/// General → Show closed and merged PRs). The filter runs before the cap, so "+N"
 /// counts only PRs the row would show.
 enum PRButtons {
     static let defaultCap = 3
@@ -229,7 +229,7 @@ enum PRButtons {
     }
 
     /// A merged or closed PR: left off the row buttons unless Settings →
-    /// Show closed and merged PRs is on. Display only; the CLI's state rules
+    /// General → Show closed and merged PRs is on. Display only; the CLI's state rules
     /// read the same links unchanged. A nil, `DONE` or nonstandard state
     /// stays visible, and so does a PR that awaits the user.
     static func isFinished(_ link: Link) -> Bool {

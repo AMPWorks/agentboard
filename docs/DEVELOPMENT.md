@@ -169,12 +169,14 @@ shown); the manual steps below cover the other windows.
    `AGENTBOARD_HOME=$(mktemp -d) AGENTBOARD_FIXTURE_PATH="$TMPDIR/snapshot-now.json" app/.build/release/AgentBoard`.
    It has no bundle id, so its settings go to a defaults domain of its own, and fixture mode posts
    no notifications and runs no actions.
-4. In its Settings leave Appearance on **System**, turn on General → **Show closed and merged
-   PRs** (so a row shows colored PR buttons), and check that the CLI & Data fields are empty.
-5. Take two passes, one with System Settings → Appearance on **Light** and one on **Dark**. In
-   each, capture the popover, the Settings window and the dashboard (⌃⌥⌘A, with the "Fix missing
-   counter switch case" row selected) with ⌘⇧4, then Space, then a click on the window, plus a
-   generous ⌘⇧4 rectangle around the menu bar icon.
+4. In its Settings leave General → Appearance on **System**, turn on General → **Show closed and
+   merged PRs** (so a row shows colored PR buttons), check that the Advanced → CLI & Data fields
+   are empty, and go back to the General tab.
+5. Take two passes, one with the Mac set to the **Light** appearance (System Settings, Appearance)
+   and one set to **Dark**. In each, capture the popover, the Settings window (on its General tab,
+   search field empty) and the dashboard (⌃⌥⌘A, with the "Fix missing counter switch case" row
+   selected) with ⌘⇧4, then Space, then a click on the window, plus a generous ⌘⇧4 rectangle
+   around the menu bar icon.
 6. Crop the menu bar icon to the status item alone and the session row out of the dashboard
    capture (`sips --cropOffset`), downscale with `sips -Z 1600` or less, and name the files
    `<name>-light.png` / `<name>-dark.png`.

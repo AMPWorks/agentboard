@@ -129,7 +129,8 @@ pass text it receives to a shell.
   "Configuration (config.json)" table and `app/Sources/AgentBoard/Help/HelpContent.swift`; a new
   CLI subcommand or option goes in HelpContent's CLI reference and docs/REFERENCE.md; a new
   Settings key goes in `SettingsKeys.all` and the Settings help topic.
-  `core/tests/test_help_coverage.py` enforces all three.
+  `core/tests/test_help_coverage.py` enforces all three. A new Settings control takes its label and
+  tooltip from a `SettingsCatalog` item (`core/tests/test_settings_catalog.py`).
 - Every new control (`Button`, `Toggle`, `Picker`, `Menu`, `TextField`, `SecureField`, `SwiftUI.Link`)
   gets a `.help("what it does")` tooltip, or `// no-tooltip: <reason>` on its line;
   `core/tests/test_app_tooltips.py` enforces it.

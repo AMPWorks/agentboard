@@ -842,7 +842,7 @@ In the popover, updates sit behind the **Updates** button next to the search fie
 popover opens on the sessions. The button shows whenever any note is open, with the count the
 current query keeps (uncapped, `UpdatesFeed.total`, in a neutral color: a request that needs you
 already turns its session red and flashes the icon); one click shows the Updates panel above Needs
-you, and the button or the panel's **Hide** closes it. Settings → Popover → **Updates panel**
+you, and the button or the panel's **Hide** closes it. Settings → Menu bar → Popover → **Updates panel**
 picks when it shows: **Hidden until clicked** (default; `updatesPanelMode` `hiddenUntilClicked`)
 closes it again every time the popover opens, **Remember last state** (`rememberLast`) keeps it
 open or closed across opens and restarts (stored under `updatesPanelLastShown`), and **Always
@@ -954,7 +954,7 @@ came from and how old they are; once they are over an hour old the line says so
 (use on another app or machine is missing until then). A window whose reset time has passed is
 left out until newer numbers arrive; a spend window with dollars shows as `spend limit $314 of
 $500`. Nothing about a plan, a billing model or a window name is built in: windows are labelled
-from the data. **Settings → Show plan usage** (on by default) hides the lines.
+from the data. **Settings → General → Show plan usage** (on by default) hides the lines.
 
 Sources, all local files that every `snapshot` reads again (it never touches the network):
 
@@ -1060,7 +1060,7 @@ later) flashes again. Sessions already waiting when AgentBoard launches flash on
 System Settings → Accessibility → Display → Reduce motion on, the icon does not flash; it shows
 a static red glyph with an exclamation badge until you have seen it.
 
-Settings → Menu bar icon:
+Settings → Menu bar → Menu bar icon:
 
 - **Color the menu bar icon by session state** (default on). Off restores the monochrome icon.
 - **Flash when a session needs you** (default on).
@@ -1074,9 +1074,9 @@ nothing is open (usually sooner, via the data directory watcher).
 
 ## Notifications
 
-Settings → Notifications has two toggles, both off by default. macOS asks for permission the
+Settings → Notifications → Notifications has two toggles, both off by default. macOS asks for permission the
 first time you turn one on. The banners are silent: the sound for each event comes from
-Settings → Sounds (see [Sounds](#sounds)), which plays whether or not notifications are on, so one
+Settings → Notifications → Sounds (see [Sounds](#sounds)), which plays whether or not notifications are on, so one
 event never sounds twice.
 
 - **Notify when a session needs you** (`notifyOnNeedsYou`): one notification when a session
@@ -1109,7 +1109,7 @@ launches it and does the same once the first snapshot loads.
 
 ## Sounds
 
-Settings → Sounds gives four events a sound each. AgentBoard plays it itself, so it plays with the
+Settings → Notifications → Sounds gives four events a sound each. AgentBoard plays it itself, so it plays with the
 notification toggles off and without notification permission; the notification banners are
 silent. Each row has a picker (for needs you and turn finished, **Follow notification toggle**
 first; then **None**, **System default**, every sound in
@@ -1163,7 +1163,7 @@ corner to change both: the list stays between 240 pt and the room below the menu
 visible height less the search bar, footer and an 8 pt margin), and the width between 320 pt and
 the room to the right edge. The left edge stays at the icon; when the icon is too close to the right
 edge for 320 pt, the popover moves left just enough to stay on screen. Double-click the grip, or
-Settings → Popover size → **Reset size**, for the default height and the full width. Session rows wrap
+Settings → Menu bar → Popover size → **Reset size**, for the default height and the full width. Session rows wrap
 a long title, status, branch or waiting reason onto more lines instead of truncating it.
 
 The stored height is a cap, not a floor: with **Fit height to active sessions** off the list is
@@ -1274,13 +1274,40 @@ The app has a built-in guide: open the gear menu (at the right of the popover fo
 dashboard toolbar) and choose **AgentBoard Help**. It covers sessions and their states, the
 popover, Updates, search, the dashboard, PR links and integrations, every Settings control, every
 `config.json` key, the CLI, troubleshooting, and data and privacy, with a search field that finds
-topics by their contents. The ? buttons next to each Settings section header and next to the
+topics by their contents. The ? buttons next to each Settings section header (see [Settings window](#settings-window)) and next to the
 popover's Updates header and search field open the matching topic. The same gear menu opens
 **Settings…** and **Open Log** and holds **Quit AgentBoard**, and every control in the app has a
 tooltip saying what it does.
 
 The guide mirrors this reference (`app/Sources/AgentBoard/Help/HelpContent.swift`); tests check that
 every `config.json` key, Settings key and CLI subcommand and option appears in it.
+
+### Settings window
+
+Settings has five tabs: **General** (Appearance; Launch at login, Show plan usage, Show closed and
+merged PRs), **Menu bar** (Menu bar icon, Popover, Popover size), **Notifications** (the two
+notification toggles and Sounds), **Machines** and **Advanced** (CLI & Data, Diagnostics). It
+reopens on the tab that was open last (Settings key `settingsLastTab`, a tab's raw value: `general`,
+`menuBar`, `notifications`, `machines` or `advanced`; missing or unknown means General), and opens
+with nothing focused. The search field finds a setting by its label, its tooltip, its section or tab
+name, or its defaults key, with the Help window's matching (every whitespace-separated word must
+appear, ignoring case and accents). The tabs and the search field (with its magnifying glass) share
+the top bar, as in System Settings. While the field has a query, a popup list hangs under it over
+the selected tab: one row per matching setting in tab order, each with its `Tab → Section` path
+(its tooltip is the row's tooltip), or "No settings match". The first row is selected; the arrow
+keys and the pointer move the selection (the pointer only once it moves, so a row scrolled under a
+resting pointer does not take it; only a keyboard move scrolls the list), and Return or a click
+goes to it: the query clears, the setting's tab opens, its row scrolls into view and stays
+highlighted for about 3 s (without the fade under Reduce motion). Escape, Tab out of the field, a
+click outside the popup (the pane or the top bar's empty part) or a click on a tab clears the
+query and closes the popup. ⌘F focuses the field.
+
+Every searchable control is an item in `SettingsCatalog`
+(`app/Sources/AgentBoard/Support/SettingsCatalog.swift`), the single source of its label and
+tooltip; `SettingsNavigator` holds the tab, the query and the highlighted row, and `SettingsWindowController.show(using:tab:item:)` can
+open Settings on a tab or a setting. `core/tests/test_settings_catalog.py` checks that every
+Settings control takes its text from the catalog (or is marked `// not-searchable: <reason>`) and
+that every catalog item is on screen.
 
 ## Machines (peer sync)
 
@@ -1679,7 +1706,7 @@ the database is unreadable; the last good snapshot stays on screen), **Waiting o
 dismiss or prune that did not work; it clears after 15 seconds or with its x; a prune that fails
 at launch, usually because `install.sh`'s own backfill still holds the database, is only logged
 and retried once a minute later, and the banner shows only if the retry fails too). Its **Open log**
-button reveals `agentboard.log`. It never changes the menu bar icon. Settings → Diagnostics adds a
+button reveals `agentboard.log`. It never changes the menu bar icon. Settings → Advanced → Diagnostics adds a
 `hook-errors.log` row (size, last write, **Reveal**) when that file is not empty.
 
 **Levels.** `debug`, `info` (the default), `warn`, `error`. Set the level with the
@@ -1711,7 +1738,7 @@ AppleScript result.
 redacted arguments, exit code, duration and the tail of stderr. Actions log at `notice`, failures
 at `error`, and the background `snapshot`/`paths` polling at `debug`. macOS only keeps `debug`
 lines while something is streaming them (`log stream --level debug --predicate 'subsystem ==
-"io.github.agentboard"'`), so Settings → Diagnostics → **Verbose logging** promotes the polling
+"io.github.agentboard"'`), so Settings → Advanced → Diagnostics → **Verbose logging** promotes the polling
 to `notice` and passes `AGENTBOARD_LOG_LEVEL=debug` to every CLI call: one switch turns on both
 sides. **Open log** in the same section reveals `agentboard.log` in Finder.
 

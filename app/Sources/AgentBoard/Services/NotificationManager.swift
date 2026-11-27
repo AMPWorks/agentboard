@@ -9,7 +9,7 @@ import OSLog
 /// post or remove is decided by `SessionNotificationPlan`; this class only
 /// turns that into `UNNotificationRequest`s. Clicking either kind focuses
 /// the session's terminal, or opens the dashboard with it selected.
-/// Notifications are silent; Settings → Sounds plays the sound.
+/// Notifications are silent; Settings → Notifications → Sounds plays the sound.
 ///
 /// `UNUserNotificationCenter.current()` raises in a process without a
 /// bundle (the bare `.build/release/AgentBoard` used in fixture mode), so
@@ -93,7 +93,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     nonisolated static let presentationOptions: UNNotificationPresentationOptions = [.banner]
 
     /// The request content for one planned notification. Silent: the
-    /// event's sound comes from Settings → Sounds (`SoundPlayer`), which
+    /// event's sound comes from Settings → Notifications → Sounds (`SoundPlayer`), which
     /// plays with notifications off too, so one event never sounds twice.
     static func content(for planned: SessionNotificationPlan.Planned) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()

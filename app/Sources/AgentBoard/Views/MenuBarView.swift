@@ -25,7 +25,7 @@ struct MenuBarView: View {
     /// survives closing the popover, so `onAppear` resets it on every open.
     @State private var updatesOpenThisVisit = false
 
-    // Size (Settings → Popover size and the corner grip; see PopoverSizing).
+    // Size (Settings → Menu bar → Popover size and the corner grip; see PopoverSizing).
     @AppStorage(PopoverSizing.heightKey) private var storedHeight: Double = Double(PopoverSizing.defaultHeight)
     @AppStorage(PopoverSizing.autoExpandKey) private var autoExpand: Bool = false
     @AppStorage(PopoverSizing.widthKey) private var storedWidth: Double = 0
@@ -97,7 +97,7 @@ struct MenuBarView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         // Above Needs you: what sessions said that is worth
                         // keeping, behind the Updates button unless Settings →
-                        // Popover says otherwise. Compact (UpdatesSectionView),
+                        // Menu bar → Popover says otherwise. Compact (UpdatesSectionView),
                         // so it never pushes the sessions out of view. Always
                         // shown, only needs_you and error rows sit up here;
                         // the rest follow the last section (`belowUpdates`).
@@ -323,7 +323,7 @@ struct MenuBarView: View {
 
     private var gripHelp: String {
         autoExpand
-            ? "Drag to change the popover's width; its height fits the active sessions (Settings → Popover size). Double-click to reset"
+            ? "Drag to change the popover's width; its height fits the active sessions (Settings → Menu bar → Popover size). Double-click to reset"
             : "Drag to resize the popover; double-click to reset"
     }
 

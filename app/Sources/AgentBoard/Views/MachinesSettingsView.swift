@@ -130,6 +130,7 @@ struct MachinesSettingsSection: View {
                 ForEach(info.peers) { peer in
                     PeerRow(peer: peer, chip: chips[peer.id] ?? MachineChip.initial(peer.name),
                             store: store, remove: { removing = peer })
+                        .settingsAnchor(SettingsCatalog.pairedMachines, scrolls: false)
                 }
             } else if let error = store.peersError {
                 Text(error).font(.caption).foregroundStyle(.red)
@@ -137,21 +138,25 @@ struct MachinesSettingsSection: View {
                 Text("Loading…").font(.caption).foregroundStyle(.secondary)
             }
             HStack {
-                Button("Add machine…") { showingAdd = true }
-                    .help("Pair another of your Macs by pasting its pairing code")
+                Button(SettingsCatalog.addMachine.label) { showingAdd = true }
+                    .help(SettingsCatalog.addMachine.help)
+                    .settingsAnchor(SettingsCatalog.addMachine, standingIn: store.peersInfo?.peers.isEmpty ?? true)
                 Spacer()
             }
-            Toggle("Show sessions from other machines", isOn: $showRemote)
+            Toggle(SettingsCatalog.showRemoteSessions.label, isOn: $showRemote)
                 .onChange(of: showRemote) { _, _ in store.applyRemoteFilter() }
-                .help("Show the sessions of your paired Macs on this board; off hides them and stops syncing")
-            Toggle("Notify for sessions on other machines", isOn: $notifyRemote)
-                .help("Let sessions on your paired Macs notify, play sounds and flash the menu bar icon; their rows show either way")
-            Picker("Other Macs in the menu bar icon", selection: $remoteIconMode) {
+                .help(SettingsCatalog.showRemoteSessions.help)
+                .settingsAnchor(SettingsCatalog.showRemoteSessions)
+            Toggle(SettingsCatalog.notifyRemoteSessions.label, isOn: $notifyRemote)
+                .help(SettingsCatalog.notifyRemoteSessions.help)
+                .settingsAnchor(SettingsCatalog.notifyRemoteSessions)
+            Picker(SettingsCatalog.remoteIconMode.label, selection: $remoteIconMode) {
                 ForEach(RemoteIconMode.allCases) { mode in
                     Text(mode.label).tag(mode.rawValue)
                 }
             }
-            .help("Separate marker: the icon and its count are this Mac's, and a diamond at its corner shows another Mac's session needs you. Merged: other Macs' sessions color, count and flash the icon like this Mac's. Not shown: the icon ignores other Macs")
+            .help(SettingsCatalog.remoteIconMode.help)
+            .settingsAnchor(SettingsCatalog.remoteIconMode)
             Text("Each Mac pulls the others' boards over ssh (Remote Login): pair in both directions. Being allowed to open sessions on a Mac is shell access as you there.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -181,11 +186,11 @@ struct MachinesSettingsSection: View {
             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
             presenting: removing
         ) { peer in
-            Button("Remove", role: .destructive) {
+            Button("Remove", role: .destructive) { // not-searchable: confirms a per-peer Remove
                 Task { _ = await store.removePeer(peer.id) }
             }
             .help("Stop syncing with this Mac and remove its key from this Mac's authorized_keys")
-            Button("Cancel", role: .cancel) { removing = nil }
+            Button("Cancel", role: .cancel) { removing = nil } // not-searchable: dismisses the confirmation
                 .help("Keep this machine")
         } message: { peer in
             Text("Its sessions leave this board, and \(peer.name) can no longer reach this Mac. Remove this Mac on \(peer.name) too.")
@@ -195,26 +200,28 @@ struct MachinesSettingsSection: View {
     @ViewBuilder
     private func thisMac(_ info: PeersInfo) -> some View {
         HStack {
-            TextField("This Mac's name", text: $name)
+            TextField(SettingsCatalog.thisMacName.label, text: $name)
                 .onSubmit { Task { _ = await store.setThisMac(name: name) } }
-                .help("How this Mac is named on your other Macs' boards; press Return to save")
+                .help(SettingsCatalog.thisMacName.help)
+                .settingsAnchor(SettingsCatalog.thisMacName)
         }
         let savedAddress = info.address?.address ?? info.host ?? ""
         HStack {
-            TextField("Address others use to reach this Mac", text: Binding(
+            TextField(SettingsCatalog.thisMacAddress.label, text: Binding(
                 get: { addressDraft ?? savedAddress },
                 set: { addressDraft = $0 }
             ))
             .onSubmit { saveAddress(savedAddress) }
-            .help("The address your other Macs connect to, put in this Mac's pairing code: a VPN or DNS name or an IP address works from anywhere, a .local name only on the same network. Press Return to save")
-            Menu("Choose…") {
-                Button(MachinesDisplay.automaticTitle(info.addressAutomatic)) {
+            .help(SettingsCatalog.thisMacAddress.help)
+            .settingsAnchor(SettingsCatalog.thisMacAddress)
+            Menu("Choose…") { // not-searchable: part of the address row, catalogued as thisMacAddress
+                Button(MachinesDisplay.automaticTitle(info.addressAutomatic)) { // not-searchable: an address menu entry
                     addressDraft = nil
                     Task { _ = await store.setThisMac(autoAddress: true) }
                 }
                 .help("Let AgentBoard pick the address: a detected VPN name or address, else the .local name")
                 ForEach(info.addressCandidates) { candidate in
-                    Button(MachinesDisplay.candidateTitle(candidate)) {
+                    Button(MachinesDisplay.candidateTitle(candidate)) { // not-searchable: an address menu entry
                         addressDraft = nil
                         Task { _ = await store.setThisMac(address: candidate.address) }
                     }
@@ -228,7 +235,7 @@ struct MachinesSettingsSection: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
-        Picker("Share with other machines", selection: Binding(
+        Picker(SettingsCatalog.shareLevel.label, selection: Binding(
             get: { info.share },
             set: { level in Task { _ = await store.setThisMac(share: level) } }
         )) {
@@ -236,14 +243,16 @@ struct MachinesSettingsSection: View {
                 Text(level.label).tag(level.value)
             }
         }
-        .help("How much of this Mac's sessions your other Macs receive: everything, titles without prompt, reply, update or folder text, or state and project name only")
+        .help(SettingsCatalog.shareLevel.help)
+        .settingsAnchor(SettingsCatalog.shareLevel)
         HStack {
             Text(MachinesDisplay.remoteLoginText(info.remoteLogin))
                 .font(.caption)
                 .foregroundStyle(info.remoteLogin == "off" ? .red : .secondary)
             Spacer()
-            Button("Open Sharing Settings") { NSWorkspace.shared.open(MachinesDisplay.sharingSettingsURL) }
-                .help("Open System Settings → General → Sharing, where Remote Login is turned on")
+            Button(SettingsCatalog.sharingSettings.label) { NSWorkspace.shared.open(MachinesDisplay.sharingSettingsURL) }
+                .help(SettingsCatalog.sharingSettings.help)
+                .settingsAnchor(SettingsCatalog.sharingSettings)
         }
         HStack {
             if let fingerprint = info.fingerprint {
@@ -255,7 +264,7 @@ struct MachinesSettingsSection: View {
                 Text(error).font(.caption).foregroundStyle(.red)
             }
             Spacer()
-            Button(copied ? "Copied" : "Copy pairing code") {
+            Button(copied ? "Copied" : SettingsCatalog.copyPairingCode.label) {
                 if let code = info.code {
                     ClipboardHelper.copy(code)
                     copied = true
@@ -266,7 +275,8 @@ struct MachinesSettingsSection: View {
                 }
             }
             .disabled(info.code == nil || hasUnsavedAddress(info))
-            .help("Copy this Mac's pairing code to paste into Add machine… on your other Mac; it holds only public keys, names and this Mac's address. Press Return in the address field first to save an edit")
+            .help(SettingsCatalog.copyPairingCode.help)
+            .settingsAnchor(SettingsCatalog.copyPairingCode)
         }
     }
 

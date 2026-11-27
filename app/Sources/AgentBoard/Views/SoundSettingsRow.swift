@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// One Settings → Sounds row: the event's sound picker and a preview
+/// One Settings → Notifications → Sounds row: the event's sound picker and a preview
 /// button. `stored` is the event's `SoundChoice` string in UserDefaults
 /// (empty until the user picks one); `notifyOn` is the event's
 /// notification toggle, which sets the default while it is empty.
@@ -37,6 +37,11 @@ struct SoundSettingsRow: View {
     static func followToggleLabel(event: AttentionEvent, notifyOn: Bool) -> String? {
         guard event.hasNotificationToggle else { return nil }
         return "Follow notification toggle (\(event.defaultChoice(notifyOn: notifyOn).label))"
+    }
+
+    /// The picker's tooltip, also the event's Settings search text.
+    nonisolated static func pickerHelp(event: AttentionEvent) -> String {
+        "The sound for \"\(event.label)\": none, the macOS alert sound, a system sound, or an audio file you choose. Plays even with notifications off\(event.hasNotificationToggle ? ". Follow notification toggle plays the alert sound only while that notification is on" : "")"
     }
 
     /// Whether the chosen file is gone or unreadable. Checked when the row
@@ -79,8 +84,8 @@ struct SoundSettingsRow: View {
                 Divider()
                 Text("Choose file…").tag(Self.chooseFileTag)
             }
-            .help("The sound for \"\(event.label)\": none, the macOS alert sound, a system sound, or an audio file you choose. Plays even with notifications off\(event.hasNotificationToggle ? ". Follow notification toggle plays the alert sound only while that notification is on" : "")")
-            Button {
+            .help(Self.pickerHelp(event: event))
+            Button { // not-searchable: previews the row's own choice
                 SoundPlayer.shared.play(choice, for: nil)
             } label: {
                 Image(systemName: "play.circle")

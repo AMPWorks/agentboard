@@ -75,7 +75,14 @@ enum HelpWindowController {
 /// turn (the same activate-then-front order as `DashboardWindowController`).
 @MainActor
 enum SettingsWindowController {
-    static func show(using openSettings: OpenSettingsAction) {
+    /// `item` opens on its tab with its row highlighted; else `tab`, else
+    /// the tab that was open last.
+    static func show(using openSettings: OpenSettingsAction, tab: SettingsTab? = nil, item: SettingsItem? = nil) {
+        if let item {
+            SettingsNavigator.shared.reveal(item)
+        } else if let tab {
+            SettingsNavigator.shared.select(tab)
+        }
         NSApp.activate(ignoringOtherApps: true)
         openSettings()
         DispatchQueue.main.async {

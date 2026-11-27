@@ -139,25 +139,31 @@ toolbar) → **Settings…**.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-dark.png">
-  <img src="docs/images/settings-light.png" width="564" alt="The AgentBoard Settings window">
+  <img src="docs/images/settings-light.png" width="580" alt="The AgentBoard Settings window">
 </picture>
 
-- **Appearance**: System, Dark or Light for AgentBoard's windows.
-- **Menu bar icon**: color the icon by session state, flash when a session needs you, and when
-  the flash stops.
+It has five tabs, and opens on the one you used last:
+
+- **General**: Appearance (System, Dark or Light for AgentBoard's windows), launch at login, show
+  plan usage, and show closed and merged PRs on rows.
+- **Menu bar**: the menu bar icon (color it by session state, flash when a session needs you, and
+  when the flash stops); the popover (when the Updates panel shows, its text size and how many
+  rows it lists); and the popover size (fit the height to the active sessions, use the full width
+  to the screen edge, on by default, and **Reset size**). Drag the grip in the popover's
+  bottom-right corner to resize it by hand.
 - **Notifications**: notify when a session needs you, and when a session finishes a turn (both
-  off by default).
-- **Sounds**: a sound for a session needing you, finishing a turn, a new permission denial, and
-  a session interrupted or awaiting review; plays even with notifications off. Until you pick
-  one (shown as **Follow notification toggle**), needs you and turn finished play the alert
-  sound only while their notification toggle is on; the other two are silent.
-- **Popover**: when the Updates panel shows, its text size and how many rows it lists.
-- **Popover size**: fit the height to the active sessions, use the full width to the screen edge
-  (on by default), and **Reset size**. Drag the grip in the popover's bottom-right corner to resize
-  it by hand.
-- **General**: launch at login, show plan usage, and show closed and merged PRs on rows.
-- **CLI & Data**: a path to the `agentboard` CLI, if the app cannot find it.
-- **Diagnostics**: verbose logging and **Open log**.
+  off by default); and Sounds: a sound for a session needing you, finishing a turn, a new
+  permission denial, and a session interrupted or awaiting review, which plays even with
+  notifications off. Until you pick one (shown as **Follow notification toggle**), needs you and
+  turn finished play the alert sound only while their notification toggle is on; the other two
+  are silent.
+- **Machines**: pair your other Macs and choose what they share and show (see below).
+- **Advanced**: a path to the `agentboard` CLI, if the app cannot find it; verbose logging and
+  **Open log**.
+
+The search field beside the tabs (top right, as in System Settings) finds a setting by its name,
+its tooltip or its defaults key and lists the matches in a popup under it; pick one to go to its
+tab with the setting highlighted.
 
 The CLI reads an optional `config.json` in the data directory (`agentboard paths` prints where).
 It does not exist until you create it, every key is optional, and each command reads it fresh.
@@ -199,7 +205,7 @@ renames a long-running session. [More](docs/REFERENCE.md#links--integrations)
 **Updates.** Sessions that run unattended say a lot, and little of it needs you. AgentBoard keeps
 the few messages worth reading (a request marked `USER_ACTION:`, a PR opened or merged, CI going
 red) as updates until you dismiss them, one click away behind the **Updates** button next to the
-popover's search field (Settings → Popover can keep the panel open instead). An open request turns
+popover's search field (Settings → Menu bar → Popover can keep the panel open instead). An open request turns
 its session and the Updates button red, and clears by itself once you reply in that session or mark
 it done or snoozed.
 [More](docs/REFERENCE.md#updates-retained-notes)
