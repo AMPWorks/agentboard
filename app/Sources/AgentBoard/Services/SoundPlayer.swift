@@ -17,7 +17,7 @@ protocol SoundBackend: AnyObject {
 }
 
 /// Plays the sound configured for an `AttentionEvent` (Settings →
-/// Sounds), or a chosen sound as a Settings preview. Independent of the
+/// Notifications → Sounds), or a chosen sound as a Settings preview. Independent of the
 /// notification toggles and of notification permission.
 ///
 /// Keeps each playing sound until it finishes (an `NSSound` nobody holds

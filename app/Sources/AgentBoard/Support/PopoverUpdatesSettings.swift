@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// When the popover's Updates panel shows (Settings → Popover).
+/// When the popover's Updates panel shows (Settings → Menu bar → Popover).
 enum UpdatesPanelMode: String, CaseIterable, Identifiable, Sendable {
     /// Closed every time the popover opens; the Updates button opens it.
     case hiddenUntilClicked
@@ -27,7 +27,7 @@ enum UpdatesPanelMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Text size of the popover's Updates panel (Settings → Popover). macOS
+/// Text size of the popover's Updates panel (Settings → Menu bar → Popover). macOS
 /// ignores Dynamic Type for text styles, so each choice maps to explicit
 /// point sizes; `.standard` matches the caption styles the panel used before.
 enum UpdatesFontSize: String, CaseIterable, Identifiable, Sendable {

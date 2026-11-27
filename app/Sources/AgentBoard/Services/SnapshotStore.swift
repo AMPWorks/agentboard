@@ -41,7 +41,7 @@ final class SnapshotStore: ObservableObject {
     @Published private(set) var dataDirectory: String?
 
     /// `<data dir>/agentboard.log`, once the data directory is resolved.
-    /// Settings → Diagnostics and the gear menu's Open Log reveal it.
+    /// Settings → Advanced → Diagnostics and the gear menu's Open Log reveal it.
     var logFileURL: URL? {
         dataDirectory.map { URL(fileURLWithPath: $0).appendingPathComponent("agentboard.log") }
     }
@@ -63,7 +63,7 @@ final class SnapshotStore: ObservableObject {
     }
 
     /// hook-errors.log's size in bytes and last write, or nil when it is
-    /// missing or empty (Settings → Diagnostics shows a row only then).
+    /// missing or empty (Settings → Advanced → Diagnostics shows a row only then).
     var hookErrorsLogInfo: (size: Int64, modified: Date)? {
         guard let url = hookErrorsLogURL,
               let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),

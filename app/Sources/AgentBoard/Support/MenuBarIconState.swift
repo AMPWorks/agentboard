@@ -164,7 +164,7 @@ enum RemoteIconMode: String, CaseIterable, Identifiable, Sendable {
     static func from(_ raw: String) -> RemoteIconMode { RemoteIconMode(rawValue: raw) ?? .separate }
 }
 
-/// `@AppStorage` keys for the Settings → Menu bar icon section.
+/// `@AppStorage` keys for the Settings → Menu bar → Menu bar icon section.
 enum MenuBarIconSettings {
     /// Color the icon by the most urgent session (default on; off = template icon).
     static let coloredKey = "menuBarIconColored"

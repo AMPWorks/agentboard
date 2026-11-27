@@ -1,6 +1,6 @@
 import Foundation
 
-/// The sound one attention event plays, as Settings → Sounds stores it.
+/// The sound one attention event plays, as Settings → Notifications → Sounds stores it.
 ///
 /// Stored in UserDefaults as one string, losslessly: `none`, `default`,
 /// `system:<name>` (a sound in the system sounds folder, named without its

@@ -1,225 +1,77 @@
 import AppKit
 import SwiftUI
 
+/// The Settings window, laid out like System Settings: a top bar with the
+/// five tabs (`SettingsTab`) and, beside them, a search field. A query
+/// opens a popup list of matching settings under the field, over the
+/// selected tab; picking one goes to its tab and highlights its row
+/// (`SettingsNavigator`).
 struct SettingsView: View {
     @ObservedObject var store: SnapshotStore
-    @AppStorage(SettingsKeys.appearance) private var appearance: String = Appearance.system.rawValue
-    @AppStorage(SettingsKeys.notifyOnNeedsYou) private var notifyOnNeedsYou: Bool = false
-    @AppStorage(SettingsKeys.notifyOnTurnFinished) private var notifyOnTurnFinished: Bool = false
-    @AppStorage(MenuBarIconSettings.coloredKey) private var menuBarIconColored: Bool = true
-    @AppStorage(MenuBarIconSettings.flashKey) private var menuBarIconFlash: Bool = true
-    @AppStorage(MenuBarIconSettings.flashStopKey) private var menuBarIconFlashStop: String = FlashStopPolicy.onOpen.rawValue
-    @AppStorage(AgentBoardCLI.pathDefaultsKey) private var cliPath: String = ""
-    @AppStorage(AgentBoardCLI.useFixtureDefaultsKey) private var useFixture: Bool = false
-    @AppStorage(AgentBoardCLI.fixturePathDefaultsKey) private var fixturePath: String = ""
-    @AppStorage(CLIRunner.verboseLoggingKey) private var verboseLogging: Bool = false
-    @AppStorage(SettingsKeys.showPlanUsage) private var showPlanUsage: Bool = true
-    @AppStorage(SettingsKeys.showClosedAndMergedPRs) private var showClosedAndMergedPRs: Bool = false
-    // Empty means never picked: the row shows `AttentionEvent.choice`'s
-    // default, which follows the matching notification toggle.
-    @AppStorage(SettingsKeys.soundNeedsYou) private var soundNeedsYou: String = ""
-    @AppStorage(SettingsKeys.soundTurnFinished) private var soundTurnFinished: String = ""
-    @AppStorage(SettingsKeys.soundDenied) private var soundDenied: String = ""
-    @AppStorage(SettingsKeys.soundReviewReady) private var soundReviewReady: String = ""
-    @AppStorage(PopoverUpdatesSettings.modeKey) private var updatesMode: String = UpdatesPanelMode.default.rawValue
-    @AppStorage(PopoverUpdatesSettings.fontSizeKey) private var updatesFontSize: String = UpdatesFontSize.default.rawValue
-    @AppStorage(PopoverUpdatesSettings.compactLimitKey) private var updatesCompactLimit: Int = UpdatesFeed.compactLimit
-    @AppStorage(PopoverSizing.autoExpandKey) private var popoverAutoExpand: Bool = false
-    @AppStorage(PopoverSizing.autoWidthKey) private var popoverAutoWidth: Bool = true
-    @AppStorage(PopoverSizing.widthKey) private var popoverWidth: Double = 0
-    @State private var launchAtLogin: Bool = false
-    @State private var systemSounds: [String] = SoundChoice.systemSoundNames()
+    @ObservedObject private var navigator = SettingsNavigator.shared
+    @FocusState private var searchFocused: Bool
     /// The Settings window, so opening it can leave nothing focused.
     @State private var window: NSWindow?
     /// Set on each open and spent the first time the window becomes key.
     @State private var clearFocusOnNextKey = false
+    @State private var keyMonitor = SettingsKeyMonitor()
+
+    /// Fixed so the five tabs and the search field fit side by side; the
+    /// height follows the pane, up to most of the screen (the Machines pane
+    /// scrolls past that).
+    static let width: CGFloat = 580
+    /// The top bar's height, which the results popup hangs below.
+    static let topBarHeight: CGFloat = 56
 
     var body: some View {
-        Form {
-            Section {
-                Picker("Appearance", selection: $appearance) {
-                    ForEach(Appearance.allCases) { option in
-                        Text(option.rawValue).tag(option.rawValue)
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                SettingsTabBar(selection: navigator.tab) { tab in
+                    navigator.query = ""
+                    navigator.select(tab)
+                }
+                Spacer(minLength: 8)
+                SettingsSearchField(
+                    query: $navigator.query, focused: $searchFocused, onSubmit: revealSelection
+                )
+            }
+            .padding(.horizontal, 12)
+            .frame(height: Self.topBarHeight)
+            // A click on the bar's empty part is outside the popup too
+            // (the tabs and the field take their own clicks).
+            .background {
+                Color.black.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .onTapGesture { navigator.query = "" }
+                    .accessibilityHidden(true)
+            }
+            Divider()
+            pane(for: navigator.tab)
+                .overlay(alignment: .topTrailing) {
+                    if !SettingsSearch(navigator.query).isEmpty {
+                        SettingsSearchPopup(navigator: navigator, reveal: reveal)
                     }
                 }
-                .pickerStyle(.segmented)
-                .onChange(of: appearance) { _, newValue in
-                    (Appearance(rawValue: newValue) ?? .system).apply()
-                }
-                .help("Use the system's light or dark mode for AgentBoard's windows, or always dark or light")
-            } header: {
-                header("Appearance", topic: .settings)
-            }
-
-            Section {
-                Toggle("Color the menu bar icon by session state", isOn: $menuBarIconColored)
-                    .help("Tint the menu bar icon with the most urgent session's color; off shows the plain monochrome icon")
-                Toggle("Flash when a session needs you", isOn: $menuBarIconFlash)
-                    .disabled(!menuBarIconColored)
-                    .help("Flash the menu bar icon when a session newly needs you (needs the colored icon)")
-                Picker("Stop flashing", selection: $menuBarIconFlashStop) {
-                    ForEach(FlashStopPolicy.allCases) { policy in
-                        Text(policy.label).tag(policy.rawValue)
-                    }
-                }
-                .disabled(!menuBarIconColored || !menuBarIconFlash)
-                .help("Choose when a flashing icon stops: when you open AgentBoard, after a delay, or only once every session is handled")
-                Text("The icon takes the color of the most urgent session. With Reduce motion on, it shows an exclamation badge instead of flashing.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                header("Menu bar icon", topic: .settings)
-            }
-
-            Section {
-                Toggle("Notify when a session needs you", isOn: $notifyOnNeedsYou)
-                    .onChange(of: notifyOnNeedsYou) { _, newValue in
-                        if newValue { NotificationManager.shared.requestAuthorizationIfNeeded() }
-                    }
-                    .help("Post a macOS notification when a session newly needs you; click it to jump to that terminal")
-                Toggle("Notify when a session finishes a turn", isOn: $notifyOnTurnFinished)
-                    .onChange(of: notifyOnTurnFinished) { _, newValue in
-                        if newValue { NotificationManager.shared.requestAuthorizationIfNeeded() }
-                    }
-                    .help("Post a macOS notification when a session you are working with finishes its turn; click it to jump to that terminal")
-                Text("Clicking a notification focuses the session's terminal. Loop sessions idling between ticks and turns still waiting on background tasks never notify. A turn that ends needing you notifies only through the needs-you toggle.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                header("Notifications", topic: .settings)
-            }
-
-            Section {
-                SoundSettingsRow(event: .needsYou, stored: $soundNeedsYou,
-                                 notifyOn: notifyOnNeedsYou, systemSounds: systemSounds)
-                SoundSettingsRow(event: .turnFinished, stored: $soundTurnFinished,
-                                 notifyOn: notifyOnTurnFinished, systemSounds: systemSounds)
-                SoundSettingsRow(event: .denied, stored: $soundDenied,
-                                 notifyOn: false, systemSounds: systemSounds)
-                SoundSettingsRow(event: .reviewReady, stored: $soundReviewReady,
-                                 notifyOn: false, systemSounds: systemSounds)
-                Text("Sounds play even when notifications are off or not allowed, and Focus does not silence them; notification banners themselves are silent. Until you pick one, Needs you and Turn finished play the alert sound only while their notification toggle is on. Nothing plays for sessions already waiting when AgentBoard starts.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                header("Sounds", topic: .settings)
-            }
-
-            Section {
-                Picker("Updates panel", selection: $updatesMode) {
-                    ForEach(UpdatesPanelMode.allCases) { mode in
-                        Text(mode.label).tag(mode.rawValue)
-                    }
-                }
-                .help("Choose whether the popover's Updates panel starts hidden behind the Updates button, remembers how you left it, or is always shown")
-                Picker("Updates text size", selection: $updatesFontSize) {
-                    ForEach(UpdatesFontSize.allCases) { size in
-                        Text(size.label).tag(size.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .help("Text size of the rows and header in the popover's Updates panel")
-                Picker("Updates listed before Show all", selection: $updatesCompactLimit) {
-                    ForEach(PopoverUpdatesSettings.compactLimits, id: \.self) { limit in
-                        Text("\(limit)").tag(limit)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .help("How many updates besides the ones that need you the Updates panel lists before Show all")
-                Text(Self.popoverFootnote(UpdatesPanelMode.parse(updatesMode)))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                header("Popover", topic: .settings)
-            }
-
-            Section {
-                Toggle("Fit height to active sessions", isOn: $popoverAutoExpand)
-                    .help("Grow or shrink the popover to show every Needs you, Review and Running session, up to the screen's height; while on, the corner grip changes only the width")
-                Toggle("Use the full width to the screen edge", isOn: autoWidthBinding)
-                    .help("Make the popover as wide as the room from the menu bar icon to the right edge of the screen; turning this off keeps the width you last dragged to (or the current width if you never dragged), and dragging the corner grip sideways turns it off")
-                HStack {
-                    Text(Self.sizeFootnote(autoExpand: popoverAutoExpand))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Reset size") { PopoverSizing.resetSize() }
-                        .help("Go back to the default height and the full width (the same as double-clicking the corner grip); Fit height stays as it is")
-                }
-            } header: {
-                header("Popover size", topic: .settings)
-            }
-
-            Section {
-                Toggle("Launch at login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { _, newValue in
-                        LaunchAtLogin.setEnabled(newValue)
-                    }
-                    .help("Start AgentBoard automatically when you log in to this Mac")
-                Toggle("Show plan usage", isOn: $showPlanUsage)
-                    .help("Show each plan-usage source (how much of each limit window is used, and when it resets) in the popover footer and the dashboard sidebar, whenever a source has numbers")
-                Toggle("Show closed and merged PRs", isOn: $showClosedAndMergedPRs)
-                    .help("Also show buttons for merged and closed PRs on session rows; the detail view lists every link either way")
-            } header: {
-                header("General", topic: .settings)
-            }
-
-            MachinesSettingsSection(store: store)
-
-            Section {
-                TextField("agentboard path override (optional)", text: $cliPath)
-                    .help("Full path to the agentboard CLI, used only when it is not in the app bundle or on $PATH")
-                Text("AgentBoard looks for the CLI in its own bundle, then $PATH, then this override.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Toggle("Use fixture data (development)", isOn: $useFixture)
-                    .help("Show a saved sample snapshot instead of calling the CLI; actions are logged, not run")
-                if useFixture {
-                    TextField("Fixture path (optional, uses bundled fixture if empty)", text: $fixturePath)
-                        .help("Snapshot JSON file to show; empty uses the sample bundled in the app")
-                }
-            } header: {
-                header("CLI & Data", topic: .settings)
-            }
-
-            Section {
-                Toggle("Verbose logging", isOn: $verboseLogging)
-                    .help("Also log every background snapshot and the CLI's debug detail, in the app and in agentboard.log")
-                Text("Also logs every background snapshot and the CLI's debug detail (hook events, each focus step). Read it back with `agentboard logs`.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Open log") { store.revealLog() }
-                    .disabled(!store.logFileExists)
-                    .help("Reveal agentboard.log, the diagnostic log, in Finder")
-                // Only when the hook has logged a failure.
-                if let info = store.hookErrorsLogInfo {
-                    HStack {
-                        Text("hook-errors.log: \(Self.byteCount(info.size)), last written \(Self.relative(info.modified))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Reveal") { store.revealHookErrorsLog() }
-                            .help("Reveal hook-errors.log, where the hooks record their own failures, in Finder")
-                    }
-                }
-            } header: {
-                header("Diagnostics", topic: .diagnostics)
-            }
         }
-        .formStyle(.grouped)
-        .frame(width: 420)
-        .padding()
+        .navigationTitle(navigator.tab.title)
+        // Picking a tab (or a deep link) ends a search.
+        .onChange(of: navigator.tab) { _, _ in
+            if !navigator.query.isEmpty { navigator.query = "" }
+        }
+        .frame(width: Self.width)
         .background(WindowReader { window = $0 })
         .onAppear {
-            launchAtLogin = LaunchAtLogin.isEnabled
             clearFocusOnNextKey = true
             clearInitialFocus()
+            startKeyMonitor()
         }
-        // AppKit picks the first key view (with keyboard navigation on, the
-        // Appearance header's ? button) when the window first becomes key,
-        // which can be after onAppear; clear it then too.
+        // AppKit picks the first key view (the search field, or with
+        // keyboard navigation a tab button) when the window first becomes
+        // key, which can be after onAppear; clear it then too.
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
-            guard clearFocusOnNextKey, let window, note.object as? NSWindow === window else { return }
+            guard let window, note.object as? NSWindow === window else { return }
+            startKeyMonitor()
+            guard clearFocusOnNextKey else { return }
             clearFocusOnNextKey = false
             clearInitialFocus()
         }
@@ -229,70 +81,283 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
             guard let window, note.object as? NSWindow === window else { return }
             clearFocusOnNextKey = true
+            keyMonitor.stop()
+            // The next open shows no stale results popup.
+            navigator.query = ""
         }
+    }
+
+    @ViewBuilder
+    private func pane(for tab: SettingsTab) -> some View {
+        switch tab {
+        case .general: SettingsGeneralPane()
+        case .menuBar: SettingsMenuBarPane()
+        case .notifications: SettingsNotificationsPane()
+        case .machines:
+            SettingsPane(tab: .machines) {
+                MachinesSettingsSection(store: store)
+            }
+        case .advanced: SettingsAdvancedPane(store: store)
+        }
+    }
+
+    /// The tallest a pane grows before it scrolls: most of the screen,
+    /// less the title bar and the top bar.
+    static var maxPaneHeight: CGFloat {
+        ((NSScreen.main?.visibleFrame.height) ?? 900) - 160
     }
 
     /// Opening Settings focuses nothing: the window itself takes first
     /// responder, so no control wears a focus ring it was never given (and
-    /// that a click on the form's background would not clear). Tab still
-    /// moves into the controls from there. `defaultFocus` cannot do this:
-    /// it needs a focusable target, which would wear the ring instead.
+    /// that a click on the form's background would not clear). Tab or ⌘F
+    /// still move into the controls from there. `defaultFocus` cannot do
+    /// this: it needs a focusable target, which would wear the ring instead.
     private func clearInitialFocus() {
         DispatchQueue.main.async {
+            searchFocused = false
             window?.makeFirstResponder(nil)
         }
     }
 
-    static func popoverFootnote(_ mode: UpdatesPanelMode) -> String {
-        let red = "The Updates button turns red while any update needs you."
-        switch mode {
-        case .hiddenUntilClicked:
-            return "The popover opens on the sessions. Click Updates next to the search field to show the panel; it hides again the next time the popover opens. " + red
-        case .rememberLast:
-            return "The panel stays open or closed the way you last left it with the Updates button. " + red
-        case .alwaysShown:
-            return "The panel sits above the sessions whenever there are updates, and there is no Updates button."
-        }
+    private func reveal(_ item: SettingsItem) {
+        navigator.reveal(item)
+        searchFocused = false
     }
 
-    /// Turning auto width off gives the popover a width of its own (the
-    /// current full width unless one was dragged before), so the toggle has
-    /// a visible meaning instead of waiting for a drag.
-    private var autoWidthBinding: Binding<Bool> {
-        Binding(
-            get: { popoverAutoWidth },
-            set: { on in
-                if !on, let width = PopoverSizing.widthWhenAutoTurnsOff(
-                    stored: popoverWidth, available: PopoverWindowPlacer.iconScreen()?.availableWidth) {
-                    popoverWidth = width
-                }
-                popoverAutoWidth = on
-            }
+    private func revealSelection() {
+        if navigator.revealSelection() { searchFocused = false }
+    }
+
+    private func startKeyMonitor() {
+        keyMonitor.window = window
+        keyMonitor.start(
+            queryEmpty: { navigator.query.isEmpty },
+            clearQuery: { navigator.query = "" },
+            focusSearch: { searchFocused = true },
+            moveSelection: { navigator.moveSelection(by: $0) }
         )
     }
+}
 
-    static func sizeFootnote(autoExpand: Bool) -> String {
-        autoExpand
-            ? "Drag the grip in the popover's bottom-right corner to change its width; the height follows the active sessions."
-            : "Drag the grip in the popover's bottom-right corner to resize it; AgentBoard remembers the size."
-    }
+/// The five tabs as toolbar-style buttons: symbol over title, the
+/// selected one tinted.
+private struct SettingsTabBar: View {
+    let selection: SettingsTab
+    let select: (SettingsTab) -> Void
 
-    private static func byteCount(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-    }
-
-    private static func relative(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
-    }
-
-    /// A section title with a ? button that opens Help at `topic`.
-    private func header(_ title: String, topic: HelpTopic.ID) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            HelpButton(topic: topic, tooltip: "Explain the \(title) settings in AgentBoard Help")
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(SettingsTab.allCases) { tab in
+                let selected = tab == selection
+                Button { select(tab) } label: { // not-searchable: a tab, not a setting
+                    VStack(spacing: 2) {
+                        Image(systemName: tab.symbol)
+                            .font(.system(size: 17))
+                            .frame(height: 22)
+                        Text(tab.title)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.primary.opacity(selected ? 0.08 : 0))
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Show the \(tab.title) settings")
+                .accessibilityLabel(tab.title)
+                .accessibilityAddTraits(selected ? [.isSelected] : [])
+            }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Settings tabs")
+    }
+}
+
+/// A search field with the usual magnifying glass and, once something is
+/// typed, a clear button.
+private struct SettingsSearchField: View {
+    @Binding var query: String
+    var focused: FocusState<Bool>.Binding
+    let onSubmit: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            TextField("Search", text: $query) // not-searchable: the search field itself
+                .textFieldStyle(.plain)
+                .focused(focused)
+                .onSubmit(onSubmit)
+                .help("Find a setting by its name, its description, its section or tab, or its defaults key; pick a match to go to it")
+                .accessibilityLabel("Search settings")
+            if !query.isEmpty {
+                Button { query = "" } label: { // not-searchable: clears the search field
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear the search")
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(focused.wrappedValue ? Color.accentColor.opacity(0.6) : Color(nsColor: .separatorColor),
+                              lineWidth: focused.wrappedValue ? 2 : 1)
+        )
+        .frame(width: 180)
+    }
+}
+
+/// The popup list of matching settings, hanging under the search field
+/// over the selected tab: each row is the setting's name and its
+/// `Tab → Section` path, the selected one (arrow keys, hover) tinted.
+/// A click outside it closes it and clears the search.
+private struct SettingsSearchPopup: View {
+    @ObservedObject var navigator: SettingsNavigator
+    let reveal: (SettingsItem) -> Void
+
+    static let width: CGFloat = 300
+    /// The rows' full height, so the popup is no taller than its rows.
+    @State private var contentHeight: CGFloat = 0
+
+    var body: some View {
+        let rows = navigator.results
+        GeometryReader { geometry in
+            ZStack(alignment: .topTrailing) {
+                Color.black.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .onTapGesture { navigator.query = "" }
+                    .accessibilityHidden(true)
+                list(rows, maxHeight: max(geometry.size.height - 12, 80))
+                    .frame(width: Self.width)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(nsColor: .separatorColor)))
+                    .shadow(color: .black.opacity(0.2), radius: 8, y: 3)
+                    .padding(.top, 4)
+                    .padding(.trailing, 12)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func list(_ rows: [SettingsItem], maxHeight: CGFloat) -> some View {
+        if rows.isEmpty {
+            Text("No settings match")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(rows) { item in
+                            row(item)
+                        }
+                    }
+                    .padding(5)
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: SettingsPopupHeightKey.self, value: geometry.size.height)
+                    })
+                }
+                .frame(height: min(contentHeight > 0 ? contentHeight : maxHeight, maxHeight))
+                .onPreferenceChange(SettingsPopupHeightKey.self) { contentHeight = $0 }
+                // Only a keyboard move scrolls: scrolling to a row the
+                // pointer picked would slide another under the pointer.
+                .onChange(of: navigator.selectedResult) { _, id in
+                    if let id, navigator.selectionScrolls { proxy.scrollTo(id) }
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Matching settings")
+        }
+    }
+
+    private func row(_ item: SettingsItem) -> some View {
+        let selected = navigator.selectedResult == item.id
+        return Button { reveal(item) } label: { // not-searchable: a search result
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.label)
+                    .lineLimit(1)
+                Text(item.path)
+                    .font(.caption)
+                    .foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(selected ? Color.white : Color.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 5).fill(selected ? Color.accentColor : Color.clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(item.help)
+        .onHover { inside in if inside { navigator.selectResult(item.id) } }
+        .accessibilityLabel("\(item.label), \(item.path)")
+        .accessibilityHint("Goes to this setting")
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+        .id(item.id)
+    }
+}
+
+private struct SettingsPopupHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// A local key-down monitor scoped to the Settings window, for ⌘F, Escape,
+/// Tab and the popup's arrow keys (`SettingsKeyAction`).
+@MainActor
+final class SettingsKeyMonitor {
+    weak var window: NSWindow?
+    private var monitor: Any?
+
+    func start(
+        queryEmpty: @escaping @MainActor () -> Bool,
+        clearQuery: @escaping @MainActor () -> Void,
+        focusSearch: @escaping @MainActor () -> Void,
+        moveSelection: @escaping @MainActor (Int) -> Void
+    ) {
+        stop()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let window = self?.window, event.window === window else { return event }
+            switch SettingsKeyAction.action(
+                keyCode: event.keyCode, characters: event.charactersIgnoringModifiers,
+                modifiers: event.modifierFlags, queryEmpty: queryEmpty()
+            ) {
+            case .clearQuery:
+                clearQuery()
+                return nil
+            case .focusSearch:
+                focusSearch()
+                return nil
+            case .moveSelection(let delta):
+                moveSelection(delta)
+                return nil
+            case .clearQueryAndPass:
+                clearQuery()
+                return event
+            case nil:
+                return event
+            }
+        }
+    }
+
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
     }
 }

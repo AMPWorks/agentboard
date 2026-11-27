@@ -32,7 +32,7 @@ QUALIFIED_CONTROLS = ("Link",)
 NO_TOOLTIP = "// no-tooltip:"
 # Constructors the real-source run inspected when this was written; fewer
 # means the scan broke (or controls were removed: lower it then).
-MIN_CONSTRUCTORS = 53
+MIN_CONSTRUCTORS = 106
 
 _CONSTRUCTOR_RE = re.compile(
     r"(?<![\w.])(?:SwiftUI\.)?("

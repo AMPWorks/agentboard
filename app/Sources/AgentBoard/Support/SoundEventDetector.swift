@@ -1,7 +1,7 @@
 import Foundation
 
 /// Decides which `AttentionEvent`s one snapshot raises, for Settings →
-/// Sounds. Pure value type, fed every snapshot by `MenuBarLabel`.
+/// Notifications → Sounds. Pure value type, fed every snapshot by `MenuBarLabel`.
 ///
 /// Needs-you and turn-finished reuse the diffs that already drive the
 /// flash and the notifications (`AttentionController.note`,

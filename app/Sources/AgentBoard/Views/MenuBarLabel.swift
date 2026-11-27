@@ -11,7 +11,7 @@ struct MenuBarLabel: View {
     /// Runs on every snapshot even with the toggle off, so turning it on
     /// later never replays old turns.
     @State private var turns = TurnFinishDetector()
-    /// Settings → Sounds; plays even with the notification toggles off.
+    /// Settings → Notifications → Sounds; plays even with the notification toggles off.
     @State private var sounds = SoundEventDetector()
     @AppStorage(MenuBarIconSettings.coloredKey) private var colored: Bool = true
     @AppStorage(MenuBarIconSettings.flashKey) private var flash: Bool = true

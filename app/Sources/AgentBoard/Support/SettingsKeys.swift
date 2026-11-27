@@ -47,7 +47,12 @@ enum SettingsKeys {
         PopoverSizing.autoWidthKey,
         SettingsKeys.showRemoteSessions,
         SettingsKeys.notifyRemoteSessions,
+        SettingsKeys.settingsLastTab,
     ]
+
+    /// The Settings tab that was open last (a `SettingsTab` raw value), so
+    /// Settings reopens on it. Missing or unknown means General.
+    static let settingsLastTab = "settingsLastTab"
 
     /// Show the sessions of paired Macs (Settings → Machines; default on).
     /// Off also stops `peer-sync`.
