@@ -1205,6 +1205,19 @@ rearranged or changed resolution) it leaves the panel where macOS put it. Each o
 `popover.open` line and each frame the app sets one `popover.place` line (see
 [Diagnostics](#diagnostics)).
 
+## Popover background
+
+The popover is a MenuBarExtra panel whose system material is translucent, so in dark appearance a
+white window behind it would show through and dim secondary text (path lines, the usage footer,
+an offline Mac's faded rows). The app draws its own layer behind the popover's content
+(`PopoverBackdrop`): in dark appearance a #1E1E1E layer at 90% opacity, which keeps white text at
+the secondary-text opacity above 4.5:1 contrast even over a pure white window; in light
+appearance nothing, so the system material looks as before. With **Reduce transparency** or
+**Increase contrast** on (System Settings → Accessibility → Display) the layer is fully opaque in
+both appearances (the window background color in light). Both follow the settings live, as does
+the in-app Appearance setting. The same layer sits behind the Dashboard and Help sidebars; their
+content panes and Settings are opaque window backgrounds already.
+
 ## Search
 
 Both the menu bar popover and the dashboard have a search field, and both read a query the same

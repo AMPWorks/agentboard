@@ -5,11 +5,14 @@ Writes one snapshot fixture per scenario into OUT_DIR, every timestamp
 shifted so the newest reads "now" (docs/DEVELOPMENT.md, "Regenerating the
 screenshots", step 2), plus OUT_DIR/scenarios.tsv with one line per capture:
 
-    name <TAB> fixture path <TAB> defaults <TAB> query
+    name <TAB> fixture path <TAB> defaults <TAB> backdrop <TAB> query
 
 `defaults` is a space-separated list of key=type:value (type is string,
 bool, int or float) written into the capture app's own defaults domain;
-`query` is typed into the popover's search field ("" for none). Every
+`backdrop` is what sits behind the panel: `none`, or `white` for a plain
+white window under it (never empty, since the shell's tab-splitting read
+collapses empty middle fields); `query` is typed into the popover's search
+field ("" for none) and stays last. Every
 session is built from app/Fixtures/snapshot.json, so only its fixture
 projects, branches and titles can appear. Stdlib only, Python 3.9+.
 
@@ -131,14 +134,14 @@ LONG = ("Investigate why the nightly rollup double-counts late events after the 
 
 
 def scenarios(sample):
-    """(name, snapshot dict or raw text, defaults, query) per scenario."""
+    """(name, snapshot dict or raw text, defaults, query, backdrop) per scenario."""
     board = Board(sample)
     fixed = ["popoverAutoWidth=bool:false", "popoverWidth=float:460"]
     shown = ["updatesPanelMode=string:alwaysShown"]
     out = []
 
-    def add(name, snap, defaults=(), query=""):
-        out.append((name, snap, list(defaults), query))
+    def add(name, snap, defaults=(), query="", backdrop="none"):
+        out.append((name, snap, list(defaults), query, backdrop))
 
     add("sample", sample, fixed)
     add("sample-full-width", sample)
@@ -271,6 +274,21 @@ def scenarios(sample):
         if session["stale"]:
             machines["counts"][session["state"]] -= 1
     add("machines", machines, fixed)
+    # A white window right behind the panel: dim text (path lines, the usage
+    # footer, an offline Mac's faded rows) must stay readable over it.
+    bright = [board.session(i, MIX[i % len(MIX)],
+                            cwd="/Users/dev/projects/clients/acme/" + PROJECTS[i % len(PROJECTS)]
+                            + "/services/backend-with-a-long-path")
+              for i in range(6)]
+    bright += [remote(board.session(6, "review", alive=False), studio, stale=True, remote_open="resume"),
+               remote(board.session(7, "running"), studio, stale=True)]
+    bright_snap = board.snapshot(bright)
+    for session in bright_snap["sessions"]:
+        if session["stale"]:
+            bright_snap["counts"][session["state"]] -= 1
+    bright_snap["machine"] = dict(machines["machine"])
+    bright_snap["peers"] = [p for p in machines["peers"] if p["id"] == studio["id"]]
+    add("bright-backdrop", bright_snap, fixed, backdrop="white")
     add("banner", "{ this is not a snapshot", fixed)
     return out
 
@@ -295,14 +313,15 @@ def main(argv):
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     lines = []
-    for name, snap, defaults, query in chosen:
+    for name, snap, defaults, query, backdrop in chosen:
         path = out / (name + ".json")
         text = snap if isinstance(snap, str) else shift_to_now(json.dumps(snap, indent=1),
                                                                sample["generated_at"])
         path.write_text(text)
         for look in appearances:
             settings = defaults + ["appearance=string:" + look.capitalize()]
-            lines.append("\t".join(["%s-%s" % (name, look), str(path), " ".join(settings), query]))
+            lines.append("\t".join(["%s-%s" % (name, look), str(path), " ".join(settings),
+                                     backdrop, query]))
     (out / "scenarios.tsv").write_text("\n".join(lines) + "\n")
     return 0
 

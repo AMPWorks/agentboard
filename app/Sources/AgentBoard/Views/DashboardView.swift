@@ -226,6 +226,7 @@ struct DashboardView: View {
             UsageLineView(usage: store.snapshot.usage, lineLimit: 3,
                           insets: EdgeInsets(top: 0, leading: 8, bottom: 8, trailing: 8))
         }
+        .popoverBackdrop()
         .navigationSplitViewColumnWidth(min: 160, ideal: 180)
     }
 

@@ -1138,3 +1138,26 @@ list could feed itself: a scroll slides a new row under a resting pointer, which
 The navigator therefore ignores hover until the pointer has moved since the last keyboard change
 (an arrow key or a new query), and a selection the pointer made does not scroll. A click on the
 top bar's empty part, and Tab out of the field, close the popup too.
+
+## 2026-11-27 07:40:40 UTC — A dark backdrop layer keeps the popover readable over a bright window
+
+The popover is a MenuBarExtra panel with the system's translucent material and no background of
+its own, so in dark appearance a white window behind it showed through and washed out every dim
+style: secondary and tertiary text, the faded rows of an offline Mac, capsule fills. Rather than
+recolour those (about a hundred call sites), one modifier at the popover's root draws a #1E1E1E
+layer at 90% opacity behind the content in dark appearance. A pure function
+(`PopoverBackdrop.opacity`) picks the opacity from the appearance and the Reduce transparency and
+Increase contrast settings, either of which makes the layer fully opaque in both appearances;
+light appearance otherwise keeps the system material untouched. A unit test pins the constants by
+WCAG contrast: white text at the secondary opacity over the layer on a pure white backdrop must
+reach 4.5:1 (about 4.9:1 at 90%; 85% would miss). The plain `.background` reached the panel's
+edges and rounded corners, so the panel's own effect view is left alone. The trade-off is that a
+dark popover loses most of its vibrancy; a hint of what is behind remains. The owner chose to put
+the same layer behind the Dashboard and Help sidebars.
+
+The capture harness gained a `bright-backdrop` scenario: a white window under the panel, a
+screen-rect capture (a window-only capture leaves out what shows through) and a mean-luminance
+verb to compare a before/after pair. Over white, the dark popover's mean luminance fell from about
+0.28 on main to about 0.04. On macOS 27 status items moved into the system's MenuBarAgent process,
+which had broken the harness's icon lookup, so it now looks there by process name, and the click
+hovers before pressing so a menu bar that hides itself is shown first.

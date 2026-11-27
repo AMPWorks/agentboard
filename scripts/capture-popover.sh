@@ -17,7 +17,9 @@ Usage: $0 [--verbose] [--binary PATH] [--out DIR] [--only REGEX] [--list]
 Runs the bare app binary (default app/.build/release/AgentBoard, from
 scripts/build-app.sh --no-install) once per scenario on a fixture generated
 from app/Fixtures/snapshot.json, opens the popover by clicking its menu bar
-icon, and saves the popover panel as DIR/<scenario>.png.
+icon, and saves the popover panel as DIR/<scenario>.png. A scenario with a
+white backdrop first puts a plain white window under the panel and captures
+the panel's screen rect, so what shows through is in the shot.
 
   --binary PATH   the AgentBoard binary to run
   --out DIR       where the PNGs go (default app/build/usability/shots)
@@ -117,8 +119,20 @@ APP="$WORK_DIR/bin/$NAME"
 cp "$BINARY" "$APP"
 DATA_HOME="$(mktemp -d "${TMPDIR:-/tmp}/agentboard-capture.XXXXXX")"
 APP_PID=""
+# open_popover runs in a command substitution, so the backdrop tool's pid
+# travels through this file rather than a variable.
+BACKDROP_PID_FILE="$WORK_DIR/backdrop.pid"
+rm -f "$BACKDROP_PID_FILE"
+
+stop_backdrop() {
+  local pid=""
+  if [[ -f "$BACKDROP_PID_FILE" ]]; then pid="$(cat "$BACKDROP_PID_FILE")"; fi
+  if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
+  rm -f "$BACKDROP_PID_FILE"
+}
 
 stop_app() {
+  stop_backdrop
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
     kill "$APP_PID" 2>/dev/null || true
     local i
@@ -144,28 +158,98 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-# Waits for the status item, clicks it, and prints the panel's window id.
-open_popover() {
-  local i pos="" x y w h id=""
-  for i in $(seq 1 40); do
-    pos="$(osascript -e "tell application \"System Events\" to tell process \"$NAME\" to get {position, size} of menu bar item 1 of menu bar 2" 2>/dev/null || true)"
-    [[ -n "$pos" ]] && break
+# Prints the app's menu bar icon as "x, y, w, h", or nothing yet. Before
+# macOS 27 the status item is the app's own menu bar 2; from 27 the system's
+# MenuBarAgent hosts every item, each third-party one in a group whose
+# element is titled with the owning process's name.
+icon_rect() {
+  osascript - "$NAME" 2>/dev/null <<'APPLESCRIPT' || true
+on run argv
+  set target to item 1 of argv
+  tell application "System Events"
+    try
+      tell process target to set {p, s} to {position, size} of menu bar item 1 of menu bar 2
+      return "" & (item 1 of p) & ", " & (item 2 of p) & ", " & (item 1 of s) & ", " & (item 2 of s)
+    end try
+    if not (exists process "MenuBarAgent") then return ""
+    tell process "MenuBarAgent"
+      repeat with w in windows
+        repeat with g in groups of w
+          set t to ""
+          try
+            set t to (value of attribute "AXTitle" of UI element 1 of g) as text
+          end try
+          if t is target then
+            set {p, s} to {position, size} of g
+            return "" & (item 1 of p) & ", " & (item 2 of p) & ", " & (item 1 of s) & ", " & (item 2 of s)
+          end if
+        end repeat
+      end repeat
+    end tell
+  end tell
+  return ""
+end run
+APPLESCRIPT
+}
+
+# Shows the white backdrop window behind the open panel (its screen rect plus
+# a margin, so the whole panel is over white wherever it opened) and waits
+# until it is up. Logs go to stderr: this runs inside open_popover's $(...).
+start_backdrop() {
+  local ready="$WORK_DIR/backdrop.out" i rect="" bx by bw bh
+  for i in 1 2 3 4 5 6 7 8; do
+    rect="$("$TOOL" bounds "$APP_PID" 2>/dev/null || true)"
+    [[ -n "$rect" ]] && break
     /bin/sleep 0.25
   done
-  [[ -n "$pos" ]] || return 1
-  IFS=', ' read -r x y w h <<<"$pos"
-  "$TOOL" click "$((x + w / 2))" "$((y + h / 2))"
-  for i in $(seq 1 20); do
-    id="$("$TOOL" window "$APP_PID" 2>/dev/null || true)"
-    [[ -n "$id" ]] && break
+  [[ -n "$rect" ]] || { log "could not read the panel's bounds for the backdrop" >&2; return 1; }
+  read -r bx by bw bh <<<"$rect"
+  : >"$ready"
+  "$TOOL" backdrop "$((bx - 100))" "$by" "$((bw + 200))" "$((bh + 100))" >"$ready" 2>>"$LOG" &
+  local pid=$!
+  printf '%s\n' "$pid" >"$BACKDROP_PID_FILE"
+  for i in $(seq 1 40); do
+    grep -qx ready "$ready" 2>/dev/null && return 0
+    kill -0 "$pid" 2>/dev/null || break
     /bin/sleep 0.25
+  done
+  log "the backdrop window did not come up" >&2
+  return 1
+}
+
+# Waits for the status item, clicks it, shows the scenario's backdrop, and
+# prints the panel's window id.
+open_popover() {
+  local backdrop="$1" i try pos="" prev="" x y w h id=""
+  for try in 1 2 3; do
+    # The icon is placed with an animation: wait until two reads agree.
+    prev=""
+    for i in $(seq 1 40); do
+      pos="$(icon_rect)"
+      [[ -n "$pos" && "$pos" == "$prev" ]] && break
+      prev="$pos"
+      /bin/sleep 0.25
+    done
+    [[ -n "$pos" ]] || return 1
+    IFS=', ' read -r x y w h <<<"$pos"
+    "$TOOL" click "$((x + w / 2))" "$((y + h / 2))"
+    for i in $(seq 1 12); do
+      id="$("$TOOL" window "$APP_PID" 2>/dev/null || true)"
+      [[ -n "$id" ]] && break
+      /bin/sleep 0.25
+    done
+    [[ -n "$id" ]] && break
+    log "click $try at $pos opened no panel" >&2
   done
   [[ -n "$id" ]] || return 1
+  # After the click, so nothing new is on screen when it lands. The
+  # backdrop sits below the panel's level.
+  if [[ "$backdrop" == white ]]; then start_backdrop || return 1; fi
   printf '%s\n' "$id"
 }
 
 capture() {
-  local name="$1" fixture="$2" settings="$3" query="$4" setting key value type id
+  local name="$1" fixture="$2" settings="$3" backdrop="$4" query="$5" setting key value type id rect
   defaults delete "$NAME" >/dev/null 2>&1 || true
   for setting in $settings; do
     key="${setting%%=*}"
@@ -174,10 +258,10 @@ capture() {
     value="${value#*:}"
     defaults write "$NAME" "$key" "-$type" "$value"
   done
-  log "== $name ($settings) query='$query'"
+  log "== $name ($settings) backdrop=$backdrop query='$query'"
   AGENTBOARD_HOME="$DATA_HOME" AGENTBOARD_FIXTURE_PATH="$fixture" "$APP" >>"$LOG" 2>&1 &
   APP_PID=$!
-  if ! id="$(open_popover)"; then
+  if ! id="$(open_popover "$backdrop")"; then
     stop_app
     return 1
   fi
@@ -193,17 +277,25 @@ capture() {
   # Let the list settle (auto-expand, scroll, fonts) before the shot.
   /bin/sleep 1.2
   id="$("$TOOL" window "$APP_PID" 2>/dev/null || printf '%s' "$id")"
-  screencapture -x -o -l "$id" "$OUT_DIR/$name.png" >>"$LOG" 2>&1 || { stop_app; return 1; }
+  if [[ "$backdrop" == white ]]; then
+    # The panel's screen rect, so the white window behind it is in the shot.
+    rect="$("$TOOL" bounds "$APP_PID" 2>/dev/null || true)"
+    [[ -n "$rect" ]] || { log "could not read the panel's bounds"; stop_app; return 1; }
+    screencapture -x -R "$(printf '%s' "$rect" | tr ' ' ',')" "$OUT_DIR/$name.png" >>"$LOG" 2>&1 \
+      || { stop_app; return 1; }
+  else
+    screencapture -x -o -l "$id" "$OUT_DIR/$name.png" >>"$LOG" 2>&1 || { stop_app; return 1; }
+  fi
   stop_app
   [[ -s "$OUT_DIR/$name.png" ]]
 }
 
 total=0
 failed=()
-while IFS=$'\t' read -r name fixture settings query; do
+while IFS=$'\t' read -r name fixture settings backdrop query; do
   [[ -n "$name" ]] || continue
   total=$((total + 1))
-  if capture "$name" "$fixture" "$settings" "$query"; then
+  if capture "$name" "$fixture" "$settings" "$backdrop" "$query"; then
     log "ok $name"
   else
     log "FAILED $name"

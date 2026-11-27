@@ -184,6 +184,7 @@ struct MenuBarView: View {
             }
         }
         .frame(width: popoverWidth)
+        .popoverBackdrop()
         .overlay(alignment: .bottomTrailing) { resizeGrip }
         .onGeometryChange(for: CGSize.self) { $0.size } action: { placer.setContentSize($0) }
         .background(WindowReader { window in
