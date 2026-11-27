@@ -311,27 +311,49 @@ struct AgentBoardCLI: Sendable {
                                         from: try await runPeers(["add", "--code", code, "--dry-run"]))
     }
 
-    func peersAdd(code: String, allowOpen: Bool) async throws {
-        _ = try await runPeers(["add", "--code", code, "--allow-open", allowOpen ? "on" : "off"])
+    func peersAdd(code: String, host: String, allowOpen: Bool) async throws {
+        _ = try await runPeers(Self.peersAddArguments(code: code, host: host, allowOpen: allowOpen))
+    }
+
+    /// `add` always passes `--host`: the address the sheet shows, which
+    /// starts as the code's own. Typed values go as `--opt=value`, so one
+    /// starting with `-` reaches the CLI's own check instead of argparse.
+    static func peersAddArguments(code: String, host: String, allowOpen: Bool) -> [String] {
+        ["add", "--code", code, "--host=\(host)", "--allow-open", allowOpen ? "on" : "off"]
     }
 
     func peersRemove(id: String) async throws {
         _ = try await runPeers(["remove", "--id", id])
     }
 
-    func peersSet(id: String, host: String? = nil, name: String? = nil, allowOpen: Bool? = nil) async throws {
+    func peersSet(id: String, host: String? = nil, name: String? = nil, allowOpen: Bool? = nil,
+                  dismissAddress: String? = nil) async throws {
         var args = ["set", "--id", id]
-        if let host { args += ["--host", host] }
+        if let host { args.append("--host=\(host)") }
         if let name { args += ["--name", name] }
         if let allowOpen { args += ["--allow-open", allowOpen ? "on" : "off"] }
+        if let dismissAddress { args.append("--dismiss-address=\(dismissAddress)") }
         _ = try await runPeers(args)
     }
 
-    func peersSetSelf(name: String? = nil, share: String? = nil) async throws {
+    func peersSetSelf(name: String? = nil, share: String? = nil, address: String? = nil,
+                      autoAddress: Bool = false) async throws {
+        _ = try await runPeers(Self.peersSetSelfArguments(name: name, share: share, address: address,
+                                                          autoAddress: autoAddress))
+    }
+
+    /// `--auto-address` wins over `address` (the CLI refuses both at once).
+    static func peersSetSelfArguments(name: String? = nil, share: String? = nil, address: String? = nil,
+                                      autoAddress: Bool = false) -> [String] {
         var args = ["set-self"]
         if let name { args += ["--name", name] }
         if let share { args += ["--share", share] }
-        _ = try await runPeers(args)
+        if autoAddress {
+            args.append("--auto-address")
+        } else if let address {
+            args.append("--address=\(address)")
+        }
+        return args
     }
 
     private func runPeers(_ arguments: [String]) async throws -> Data {
@@ -374,15 +396,29 @@ struct PeersInfo: Decodable, Sendable, Equatable {
     var remoteLogin: String
     var share: String
     var peers: [Peer]
+    /// The address in this Mac's pairing code and how it was chosen; nil
+    /// from an older CLI.
+    var address: PeerAddress?
+    /// What Automatic picks now (shown in the Choose… menu).
+    var addressAutomatic: PeerAddress?
+    /// The detected addresses the Choose… menu offers.
+    var addressCandidates: [AddressCandidate] = []
 
     enum CodingKeys: String, CodingKey {
-        case machine, code, fingerprint, host, user, share, peers
+        case machine, code, fingerprint, host, user, share, peers, address
         case codeError = "code_error"
         case remoteLogin = "remote_login"
+        case addressAutomatic = "address_automatic"
+        case addressCandidates = "address_candidates"
     }
 
     init(machine: Machine, code: String?, fingerprint: String?, host: String?, user: String?,
-         codeError: String?, remoteLogin: String, share: String, peers: [Peer]) {
+         codeError: String?, remoteLogin: String, share: String, peers: [Peer],
+         address: PeerAddress? = nil, addressAutomatic: PeerAddress? = nil,
+         addressCandidates: [AddressCandidate] = []) {
+        self.address = address
+        self.addressAutomatic = addressAutomatic
+        self.addressCandidates = addressCandidates
         self.machine = machine
         self.code = code
         self.fingerprint = fingerprint
@@ -405,12 +441,71 @@ struct PeersInfo: Decodable, Sendable, Equatable {
         remoteLogin = ((try? c.decodeIfPresent(String.self, forKey: .remoteLogin)) ?? nil) ?? "unknown"
         share = ((try? c.decodeIfPresent(String.self, forKey: .share)) ?? nil) ?? "full"
         peers = (try? c.decodeIfPresent(LenientList<Peer>.self, forKey: .peers))?.items ?? []
+        address = (try? c.decodeIfPresent(PeerAddress.self, forKey: .address)) ?? nil
+        addressAutomatic = (try? c.decodeIfPresent(PeerAddress.self, forKey: .addressAutomatic)) ?? nil
+        addressCandidates = (try? c.decodeIfPresent(LenientList<AddressCandidate>.self,
+                                                    forKey: .addressCandidates))?.items ?? []
     }
 
     static let fixture = PeersInfo(
         machine: Machine(id: "fixture", name: "This Mac"), code: "agentboard-pair:fixture",
         fingerprint: "0000-0000-0000-0000-0000-0000", host: "this-mac.local", user: "you", codeError: nil,
-        remoteLogin: "on", share: "full", peers: [])
+        remoteLogin: "on", share: "full", peers: [],
+        address: PeerAddress(address: "this-mac.local", source: "auto", kind: "local"),
+        addressAutomatic: PeerAddress(address: "this-mac.local", source: "auto", kind: "local"),
+        addressCandidates: [
+            AddressCandidate(address: "this-mac.example.ts.net", kind: "vpn", label: "VPN name"),
+            AddressCandidate(address: "this-mac.local", kind: "local", label: "Local name (same network only)"),
+        ])
+}
+
+/// The address in this Mac's pairing code (`peers list` `address`).
+struct PeerAddress: Decodable, Sendable, Equatable {
+    var address: String
+    /// `config` (set by the owner) or `auto`.
+    var source: String
+    /// `vpn`, `local`, `lan` or `custom`.
+    var kind: String
+
+    init(address: String, source: String = "auto", kind: String = "custom") {
+        self.address = address
+        self.source = source
+        self.kind = kind
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        address = try c.decode(String.self, forKey: .address)
+        source = ((try? c.decodeIfPresent(String.self, forKey: .source)) ?? nil) ?? "auto"
+        kind = ((try? c.decodeIfPresent(String.self, forKey: .kind)) ?? nil) ?? "custom"
+    }
+
+    enum CodingKeys: String, CodingKey { case address, source, kind }
+
+    var isChosen: Bool { source == "config" }
+}
+
+/// One detected address the Choose… menu offers (`address_candidates`).
+struct AddressCandidate: Decodable, Sendable, Equatable, Identifiable {
+    var address: String
+    var kind: String
+    var label: String
+    var id: String { address }
+
+    init(address: String, kind: String, label: String) {
+        self.address = address
+        self.kind = kind
+        self.label = label
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        address = try c.decode(String.self, forKey: .address)
+        kind = ((try? c.decodeIfPresent(String.self, forKey: .kind)) ?? nil) ?? "custom"
+        label = ((try? c.decodeIfPresent(String.self, forKey: .label)) ?? nil) ?? address
+    }
+
+    enum CodingKeys: String, CodingKey { case address, kind, label }
 }
 
 /// Decoded `agentboard peers add --code CODE --dry-run`.
@@ -430,6 +525,8 @@ struct PeerPreview: Decodable, Sendable, Equatable {
     var error: String?
     /// The paired Mac this code replaces (same id, or the same key under another id).
     var replaces: Replaced?
+    /// The address this Mac reaches the already-paired Mac at, else nil.
+    var currentHost: String?
 
     struct Replaced: Decodable, Sendable, Equatable {
         var id: String
@@ -461,11 +558,13 @@ struct PeerPreview: Decodable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, name, user, host, fingerprint, own, known, error, replaces
         case copiedIdentity = "copied_identity"
+        case currentHost = "current_host"
     }
 
     init(id: String, name: String, user: String, host: String, fingerprint: String,
          own: Bool, known: Bool, copiedIdentity: Bool = false, error: String? = nil,
-         replaces: Replaced? = nil) {
+         replaces: Replaced? = nil, currentHost: String? = nil) {
+        self.currentHost = currentHost
         self.id = id
         self.name = name
         self.user = user
@@ -490,6 +589,7 @@ struct PeerPreview: Decodable, Sendable, Equatable {
         copiedIdentity = ((try? c.decodeIfPresent(Bool.self, forKey: .copiedIdentity)) ?? nil) ?? false
         error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
         replaces = (try? c.decodeIfPresent(Replaced.self, forKey: .replaces)) ?? nil
+        currentHost = (try? c.decodeIfPresent(String.self, forKey: .currentHost)) ?? nil
     }
 
     /// The code can be added (not this Mac's own, not a copied identity).
@@ -509,6 +609,6 @@ struct PeerPreview: Decodable, Sendable, Equatable {
         guard let replaces else { return known ? "Already paired: adding it again replaces it." : nil }
         let opening = replaces.allowOpen ? "on" : "off"
         let who = replaces.id == id ? replaces.name : "\(replaces.name) (paired under another id)"
-        return "Already paired: adding it replaces \(who) and keeps its host. \"Allow opening\" starts at its current setting (\(opening))."
+        return "Already paired: adding it replaces \(who). \"Allow opening\" starts at its current setting (\(opening))."
     }
 }

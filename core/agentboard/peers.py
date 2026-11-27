@@ -143,6 +143,14 @@ def valid_host(value) -> bool:
     return isinstance(value, str) and bool(_HOST_RE.match(value))
 
 
+def same_host(a, b) -> bool:
+    """True when two addresses name the same host: DNS names ignore case and
+    a trailing dot (the `.local` name keeps LocalHostName's case)."""
+    if not isinstance(a, str) or not isinstance(b, str):
+        return False
+    return a.rstrip(".").lower() == b.rstrip(".").lower()
+
+
 def valid_user(value) -> bool:
     return isinstance(value, str) and bool(_USER_RE.match(value))
 
@@ -273,11 +281,9 @@ def login_name() -> str:
 
 
 def suggested_host(run=subprocess.run) -> str:
-    local = _scutil(run, "LocalHostName")
-    if local and valid_host(local + ".local"):
-        return local + ".local"
-    node = platform.node() or "localhost"
-    return node if valid_host(node) else "localhost"
+    """The `.local` name (peer_address.local_name)."""
+    from . import peer_address
+    return peer_address.local_name(run)
 
 
 # -- config -----------------------------------------------------------------------
@@ -326,6 +332,41 @@ def _update_config_locked(path, mutate) -> dict:
     return data
 
 
+def advertised_address(config, run=subprocess.run, candidates=None) -> dict:
+    """The address this Mac's pairing code and export carry, as
+    {address, source, kind}: config.json's `peer_address` when it is a
+    valid host (no detection runs then), else the automatic choice from
+    `candidates` (detected when not given)."""
+    value = config.get("peer_address")
+    if value is not None:
+        if valid_host(value):
+            return {"address": value, "source": "config", "kind": "custom"}
+        diag.debug("peers", "peer_address_invalid", value=str(value)[:80])
+    from . import peer_address
+    if candidates is None:
+        candidates = peer_address.candidates(run)
+    return {**peer_address.automatic(candidates), "source": "auto"}
+
+
+def set_address(value, home=None) -> None:
+    """Save the address other Macs reach this one at (`peer_address`);
+    None goes back to choosing it automatically."""
+    if value is not None:
+        value = value.strip() if isinstance(value, str) else value
+        if not valid_host(value):
+            raise PeerError(f"invalid address: {value!r} (use a host name or IP address, "
+                            "starting with a letter or digit)")
+
+    def mutate(data):
+        if value is None:
+            data.pop("peer_address", None)
+        else:
+            data["peer_address"] = value
+
+    update_config(mutate, home)
+    touch_stamp(home)
+
+
 def share_level(config) -> str:
     value = config.get("peer_share")
     return value if value in SHARE_LEVELS else DEFAULT_SHARE
@@ -358,6 +399,8 @@ def _clean_peer(entry) -> dict | None:
         "host_key": host_key if valid_key(host_key) else None,
         "fingerprint": fp if isinstance(fp := entry.get("fingerprint"), str)
         and _FINGERPRINT_RE.match(fp) else None,
+        "dismissed_address": dismissed if valid_host(dismissed := entry.get("dismissed_address"))
+        else None,
     }
 
 
@@ -397,8 +440,11 @@ def fingerprint(payload) -> str:
     return "-".join(digest[i:i + 4] for i in range(0, 4 * FINGERPRINT_GROUPS, 4))
 
 
-def build_code(home=None, run=subprocess.run, host_key_path=HOST_KEY_PATH) -> dict:
-    """This Mac's pairing code and the parts shown next to it."""
+def build_code(home=None, run=subprocess.run, host_key_path=HOST_KEY_PATH, address=None) -> dict:
+    """This Mac's pairing code and the parts shown next to it. Its host is
+    `address`, else advertised_address()'s."""
+    if address is not None and not valid_host(address):
+        raise PeerError(f"invalid address: {address!r}")
     machine = ensure_machine(home, run)
     public_key = ensure_keypair(home, run)
     host_key = read_host_key(host_key_path)
@@ -410,7 +456,7 @@ def build_code(home=None, run=subprocess.run, host_key_path=HOST_KEY_PATH) -> di
         "id": machine["id"],
         "name": machine["name"],
         "user": login_name(),
-        "host": suggested_host(run),
+        "host": address or advertised_address(load_config(home), run)["address"],
         "key": public_key,
         "host_key": host_key,
     }
@@ -795,9 +841,14 @@ def remove_peer(peer_id=None, home=None, dry_run=False) -> int:
     return dropped
 
 
-def set_peer(peer_id, home=None, host=None, name=None, allow_open=None, bin_path=None) -> dict:
+def set_peer(peer_id, home=None, host=None, name=None, allow_open=None, bin_path=None,
+             dismiss_address=None) -> dict:
+    """Change a paired Mac's host, name or allow-opening switch, or stop
+    suggesting an address it advertises (`dismiss_address`)."""
     if host is not None and not valid_host(host):
         raise PeerError(f"invalid host: {host!r}")
+    if dismiss_address is not None and not valid_host(dismiss_address):
+        raise PeerError(f"invalid address: {dismiss_address!r}")
     if name is not None and clean_name(name) is None:
         raise PeerError(f"invalid name: {name!r}")
     found = {}
@@ -812,6 +863,8 @@ def set_peer(peer_id, home=None, host=None, name=None, allow_open=None, bin_path
                     p["name"] = clean_name(name)
                 if allow_open is not None:
                     p["allow_open"] = bool(allow_open)
+                if dismiss_address is not None:
+                    p["dismissed_address"] = dismiss_address
                 found["peer"] = p
 
     config = load_config(home)
@@ -946,9 +999,11 @@ def export_entry(entry, level, allow_open) -> dict:
     return out
 
 
-def build_export(conn, level, allow_open=True, home=None, now=None, snapshot=None) -> dict:
+def build_export(conn, level, allow_open=True, home=None, now=None, snapshot=None,
+                 address=None) -> dict:
     """One export line: this Mac's own sessions (never ones received from a
-    peer) at share level `level`."""
+    peer) at share level `level`, and the address it advertises (`address`,
+    when given) so a paired Mac can offer to switch to it."""
     if snapshot is None:
         from . import cli
         snapshot = cli.build_snapshot(conn, now=now, include_peers=False)
@@ -960,13 +1015,16 @@ def build_export(conn, level, allow_open=True, home=None, now=None, snapshot=Non
     sessions = [export_entry(e, level, allow_open) for e in _within_cap(local, MAX_SESSIONS)]
     if len(sessions) < len(local):
         diag.debug("peers", "export_capped", sessions=len(local), sent=len(sessions))
-    return {
+    export = {
         "v": PROTOCOL_VERSION,
         "machine": {"id": machine["id"], "name": machine["name"]},
         "generated_at": now_iso(now),
         "share": level,
         "sessions": sessions,
     }
+    if address is not None and valid_host(address):
+        export["advertised_address"] = address
+    return export
 
 
 def _send_rank(entry):
@@ -995,6 +1053,11 @@ def encode_export(export) -> str:
         sessions = _within_cap(sessions, len(sessions) * 4 // 5)
         line = json.dumps({**export, "sessions": sessions}, separators=(",", ":"))
     return line
+
+
+# What a peer's `error` is about (peer_sync._SSH_ERRORS), so the app can say
+# what to fix: `address` and `unreachable` point at the peer's address.
+ERROR_KINDS = ("address", "unreachable", "host_key", "auth", "remote_login", "refused")
 
 
 def rejection_error(reason, sessions=None) -> str:
@@ -1190,8 +1253,11 @@ def validate_line(line) -> dict:
         raise LineRejected("sessions")
     if len(sessions) > MAX_SESSIONS:
         raise LineRejected("too many sessions", sessions=len(sessions))
+    # Absent from older peers; anything that is not a valid host is dropped.
+    advertised = data.get("advertised_address")
     return {
         "machine": {"id": machine["id"], "name": clean_name(machine.get("name"))},
+        "advertised_address": advertised if valid_host(advertised) else None,
         "generated_at": generated,
         "share": data.get("share") if data.get("share") in SHARE_LEVELS else None,
         "sessions": _unique_sessions(_clean_session(s) for s in sessions),
@@ -1260,6 +1326,11 @@ def remote_entries(config, now, home=None) -> tuple:
             entry["title"] = entry.get("title") or entry.get("project") or session_id
             entries.append(entry)
             count += 1
+        suggested = (cache or {}).get("suggested_address")
+        if not valid_host(suggested) or any(same_host(suggested, known) for known in
+                                            (peer["host"], peer.get("dismissed_address"))):
+            suggested = None
+        error_kind = (cache or {}).get("error_kind")
         peers.append({
             "id": peer["id"],
             "name": peer["name"],
@@ -1267,6 +1338,8 @@ def remote_entries(config, now, home=None) -> tuple:
             "status": status,
             "last_seen_at": last_seen,
             "error": (cache or {}).get("error") if isinstance((cache or {}).get("error"), str) else None,
+            "error_kind": error_kind if error_kind in ERROR_KINDS else None,
+            "suggested_address": suggested,
             "session_count": count,
             "allow_open": peer["allow_open"],
             "clock_skew_secs": (cache or {}).get("clock_skew_secs")

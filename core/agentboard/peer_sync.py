@@ -83,25 +83,29 @@ class _Latest:
         return item
 
 
+_HOST_KEY_ERROR = "its ssh host key does not match the pinned one; remove and pair it again"
+_UNREACHABLE_ERROR = "not reachable at this address (asleep, on another network, or the address is wrong)"
+# (needle in ssh's stderr, message, kind); kinds are peers.ERROR_KINDS.
 _SSH_ERRORS = (
-    ("Host key verification failed", "its ssh host key does not match the pinned one; remove and pair it again"),
-    ("REMOTE HOST IDENTIFICATION HAS CHANGED", "its ssh host key does not match the pinned one; remove and pair it again"),
-    ("Permission denied", "this Mac is not authorized there; add this Mac's pairing code on it"),
-    ("Could not resolve hostname", "its host name can't be found; edit the host"),
-    ("Connection refused", "Remote Login is off there"),
-    ("Operation timed out", "not reachable (asleep, or on another network)"),
-    ("Connection timed out", "not reachable (asleep, or on another network)"),
-    ("No route to host", "not reachable (asleep, or on another network)"),
-    ("refused:", "it refused the connection (paired there? see its log)"),
+    ("Host key verification failed", _HOST_KEY_ERROR, "host_key"),
+    ("REMOTE HOST IDENTIFICATION HAS CHANGED", _HOST_KEY_ERROR, "host_key"),
+    ("Permission denied", "this Mac is not authorized there; add this Mac's pairing code on it", "auth"),
+    ("Could not resolve hostname", "its address can't be found; change the address", "address"),
+    ("Connection refused", "Remote Login is off there", "remote_login"),
+    ("Operation timed out", _UNREACHABLE_ERROR, "unreachable"),
+    ("Connection timed out", _UNREACHABLE_ERROR, "unreachable"),
+    ("No route to host", _UNREACHABLE_ERROR, "unreachable"),
+    ("refused:", "it refused the connection (paired there? see its log)", "refused"),
 )
 
 
 def _friendly_error(stderr_text):
+    """(message, kind) for ssh's stderr; kind is None when no row matches."""
     text = (stderr_text or "").strip()
-    for needle, message in _SSH_ERRORS:
+    for needle, message, kind in _SSH_ERRORS:
         if needle in text:
-            return message
-    return diag.tail_text(text, 200) or "the connection closed"
+            return message, kind
+    return diag.tail_text(text, 200) or "the connection closed", None
 
 
 def default_spawner(peer, argv):
@@ -228,9 +232,9 @@ class PeerSync:
         this error instead of ssh's."""
         error = peers.rejection_error(reason, sessions)
         if reason == "incompatible":
-            self._write(link, generation, status="incompatible", error=error)
+            self._write(link, generation, status="incompatible", error=error, error_kind=None)
         else:
-            self._write(link, generation, error=error)
+            self._write(link, generation, error=error, error_kind=None)
 
     def handle_line(self, link, raw, generation=None):
         """Validate one received line and cache it. Bad lines are dropped
@@ -252,7 +256,13 @@ class PeerSync:
         generated = peers.parse_ts(data["generated_at"])
         skew = round((generated - now).total_seconds(), 1) if generated else None
         stamp = peers.now_iso(now)
-        self._write(link, generation, status="online", error=None, received_at=stamp, last_seen_at=stamp,
+        # Only a suggestion: the saved host changes only through the app's
+        # explicit edit (peers set --host), and the pinned host key stays.
+        advertised = data.get("advertised_address")
+        suggested = (advertised if advertised and not peers.same_host(advertised, link.peer["host"])
+                     else None)
+        self._write(link, generation, status="online", error=None, error_kind=None,
+                    suggested_address=suggested, received_at=stamp, last_seen_at=stamp,
                     generated_at=data["generated_at"], clock_skew_secs=skew,
                     machine=data["machine"], share=data["share"], sessions=data["sessions"])
         link.lines += 1
@@ -326,14 +336,14 @@ class PeerSync:
         try:
             argv = self.ssh_argv(link.peer)
         except peer_cli.PeerUnavailable as exc:
-            self._failed(link, str(exc))
+            self._failed(link, str(exc), kind=None)
             return
         link.connection_lines = 0
         link.last_stderr = ""
         try:
             proc = self.spawner(link.peer, argv)
         except OSError as exc:
-            self._failed(link, f"couldn't start ssh ({type(exc).__name__})")
+            self._failed(link, f"couldn't start ssh ({type(exc).__name__})", kind=None)
             return
         with link.lock:
             link.generation += 1
@@ -346,7 +356,7 @@ class PeerSync:
         link.handler.start()
         diag.debug("peer_sync", "connect", peer=link.peer["id"], host=link.peer["host"])
 
-    def _failed(self, link, error):
+    def _failed(self, link, error, kind=None):
         link.proc = None
         link.reader = None
         link.handler = None
@@ -357,7 +367,7 @@ class PeerSync:
         link.backoff = min(link.backoff * 2, BACKOFF_MAX_SECS)
         cache = peers.read_cache(link.peer["id"], self.home) or {}
         if cache.get("status") != "incompatible":
-            self._write(link, status="offline", error=error)
+            self._write(link, status="offline", error=error, error_kind=kind)
         diag.debug("peer_sync", "disconnected", peer=link.peer["id"], retry_in=delay, error=error)
         if self.once:
             self.done_once.add(link.peer["id"])
@@ -372,12 +382,13 @@ class PeerSync:
         with link.lock:
             link.generation += 1  # whatever the old handler still holds is stale now
         rc = proc.poll()
-        error = None if rc == 0 and link.connection_lines else _friendly_error(link.last_stderr)
+        error, kind = ((None, None) if rc == 0 and link.connection_lines
+                       else _friendly_error(link.last_stderr))
         if error is None:
             error = "the connection closed"
         diag.debug("peer_sync", "exit", peer=link.peer["id"], rc=rc,
                    stderr=diag.tail_text(link.last_stderr, STDERR_TAIL) or None)
-        self._failed(link, error)
+        self._failed(link, error, kind)
 
     def _stop(self, link):
         with link.lock:

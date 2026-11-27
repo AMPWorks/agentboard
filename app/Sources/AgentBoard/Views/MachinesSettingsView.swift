@@ -35,6 +35,70 @@ enum MachinesDisplay {
         return text
     }
 
+    /// A Bonjour name, which resolves only on the same network.
+    static func isLocalName(_ host: String) -> Bool {
+        host.trimmingCharacters(in: .whitespaces).lowercased().hasSuffix(".local")
+    }
+
+    static let sameNetworkHint = "A .local name only works while both Macs are on the same network."
+
+    /// The caption under this Mac's address: how it was chosen, and that
+    /// Macs already paired keep the address they saved.
+    static func addressCaption(_ address: PeerAddress?) -> String {
+        let mode = address?.isChosen == true ? "Set by you." : "Chosen automatically."
+        return "\(mode) Macs already paired keep the address they saved: change it there under this Mac's Address, or paste the new pairing code again."
+    }
+
+    /// The Choose… menu's first item.
+    static func automaticTitle(_ automatic: PeerAddress?) -> String {
+        guard let automatic, !automatic.address.isEmpty else { return "Automatic" }
+        return "Automatic (\(automatic.address))"
+    }
+
+    /// One detected address in the Choose… menu: "<label>: <address>".
+    static func candidateTitle(_ candidate: AddressCandidate) -> String {
+        "\(candidate.label): \(candidate.address)"
+    }
+
+    /// What to do about a paired Mac that can't be reached at its address,
+    /// else nil (it is online, or the failure is not about the address).
+    static func addressAdvice(_ peer: Peer) -> String? {
+        guard peer.status != "online" else { return nil }
+        let local = isLocalName(peer.host)
+        let aboutAddress = peer.errorKind == "address" || peer.errorKind == "unreachable"
+        let offlineLocal = local && (peer.status == "never" || peer.status == "offline")
+        guard aboutAddress || offlineLocal else { return nil }
+        if local {
+            return "A .local name only works on the same network. On \(peer.name), open Settings → Machines, pick an address that works from anywhere, then enter it here."
+        }
+        return "Check the address: enter the one \(peer.name) shows under Settings → Machines."
+    }
+
+    /// The row offering an address the peer now advertises, else nil.
+    /// Names the address being replaced, so it can be typed back if the new
+    /// one doesn't work from here.
+    static func suggestionText(_ peer: Peer) -> String? {
+        guard let address = peer.suggestedAddress, !address.isEmpty, !sameHost(address, peer.host) else { return nil }
+        return "\(peer.name) now advertises \(address) (this Mac uses \(peer.host)). Switching works only while this Mac can still reach it; once the old address fails, use Edit address or paste its new pairing code. If the new address doesn't work from here, enter \(peer.host) under Address again."
+    }
+
+    /// Mirrors `peers.same_host`: DNS names ignore case and a trailing dot.
+    static func sameHost(_ a: String, _ b: String) -> Bool {
+        func norm(_ s: String) -> String {
+            var s = s.lowercased()
+            while s.hasSuffix(".") { s.removeLast() }
+            return s
+        }
+        return norm(a) == norm(b)
+    }
+
+    /// The sheet's note when the code's address differs from the one this
+    /// Mac already reaches that Mac at, else nil.
+    static func currentHostNote(_ preview: PeerPreview) -> String? {
+        guard let current = preview.currentHost, !current.isEmpty, !sameHost(current, preview.host) else { return nil }
+        return "Currently reached at \(current); the code says \(preview.host)."
+    }
+
     static func remoteLoginText(_ status: String) -> String {
         switch status {
         case "on": return "Remote Login is on"
@@ -52,6 +116,8 @@ struct MachinesSettingsSection: View {
     @AppStorage(SettingsKeys.notifyRemoteSessions) private var notifyRemote: Bool = true
     @AppStorage(MenuBarIconSettings.remoteModeKey) private var remoteIconMode: String = RemoteIconMode.separate.rawValue
     @State private var name = ""
+    /// The address field's unsaved edit; nil shows the saved address.
+    @State private var addressDraft: String?
     @State private var showingAdd = false
     @State private var removing: Peer?
     @State private var copied = false
@@ -133,6 +199,35 @@ struct MachinesSettingsSection: View {
                 .onSubmit { Task { _ = await store.setThisMac(name: name) } }
                 .help("How this Mac is named on your other Macs' boards; press Return to save")
         }
+        let savedAddress = info.address?.address ?? info.host ?? ""
+        HStack {
+            TextField("Address others use to reach this Mac", text: Binding(
+                get: { addressDraft ?? savedAddress },
+                set: { addressDraft = $0 }
+            ))
+            .onSubmit { saveAddress(savedAddress) }
+            .help("The address your other Macs connect to, put in this Mac's pairing code: a VPN or DNS name or an IP address works from anywhere, a .local name only on the same network. Press Return to save")
+            Menu("Choose…") {
+                Button(MachinesDisplay.automaticTitle(info.addressAutomatic)) {
+                    addressDraft = nil
+                    Task { _ = await store.setThisMac(autoAddress: true) }
+                }
+                .help("Let AgentBoard pick the address: a detected VPN name or address, else the .local name")
+                ForEach(info.addressCandidates) { candidate in
+                    Button(MachinesDisplay.candidateTitle(candidate)) {
+                        addressDraft = nil
+                        Task { _ = await store.setThisMac(address: candidate.address) }
+                    }
+                    .help("Use this address in this Mac's pairing code")
+                }
+            }
+            .fixedSize()
+            .help("Pick Automatic or one of the addresses detected on this Mac")
+        }
+        Text(MachinesDisplay.addressCaption(info.address))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
         Picker("Share with other machines", selection: Binding(
             get: { info.share },
             set: { level in Task { _ = await store.setThisMac(share: level) } }
@@ -170,8 +265,28 @@ struct MachinesSettingsSection: View {
                     }
                 }
             }
-            .disabled(info.code == nil)
-            .help("Copy this Mac's pairing code to paste into Add machine… on your other Mac; it holds only public keys and names")
+            .disabled(info.code == nil || hasUnsavedAddress(info))
+            .help("Copy this Mac's pairing code to paste into Add machine… on your other Mac; it holds only public keys, names and this Mac's address. Press Return in the address field first to save an edit")
+        }
+    }
+
+    private func hasUnsavedAddress(_ info: PeersInfo) -> Bool {
+        guard let draft = addressDraft else { return false }
+        return draft != (info.address?.address ?? info.host ?? "")
+    }
+
+    private func saveAddress(_ saved: String) {
+        guard let draft = addressDraft else { return }
+        let value = draft.trimmingCharacters(in: .whitespaces)
+        guard value != saved else {
+            addressDraft = nil
+            return
+        }
+        Task {
+            // On failure the error shows in the red line and the field goes
+            // back to the saved address.
+            _ = await store.setThisMac(address: value)
+            addressDraft = nil
         }
     }
 }
@@ -184,6 +299,7 @@ private struct PeerRow: View {
     @ObservedObject var store: SnapshotStore
     let remove: () -> Void
     @State private var host = ""
+    @FocusState private var addressFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -204,9 +320,36 @@ private struct PeerRow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            TextField("Host", text: $host)
-                .onSubmit { Task { _ = await store.setPeer(peer.id, host: host) } }
-                .help("The name ssh reaches \(peer.name) by; a .local name works on the same network only, so use a VPN or DNS name to reach it from elsewhere. Press Return to save")
+            if let advice = MachinesDisplay.addressAdvice(peer) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(advice)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Edit address") { addressFocused = true }
+                        .controlSize(.small)
+                        .help("Put the cursor in \(peer.name)'s Address field to change it")
+                }
+            }
+            if let suggestion = MachinesDisplay.suggestionText(peer), let suggested = peer.suggestedAddress {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(suggestion)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Use new address") { Task { _ = await store.setPeer(peer.id, host: suggested) } }
+                            .controlSize(.small)
+                            .help("Reach \(peer.name) at \(suggested) from now on; its pinned host key still has to match")
+                        Button("Dismiss") { Task { _ = await store.setPeer(peer.id, dismissAddress: suggested) } }
+                            .controlSize(.small)
+                            .help("Keep the current address and stop suggesting \(suggested) until \(peer.name) advertises another one")
+                    }
+                }
+            }
+            TextField("Address", text: $host)
+                .focused($addressFocused)
+                .onSubmit { Task { _ = await store.setPeer(peer.id, host: host.trimmingCharacters(in: .whitespaces)) } }
+                .help("The address this Mac reaches \(peer.name) at over ssh: the one \(peer.name) shows under Settings → Machines. A .local name works on the same network only; a VPN or DNS name or an IP address works from elsewhere. Press Return to save")
             Toggle("Allow opening sessions on this Mac", isOn: Binding(
                 get: { peer.allowOpen },
                 set: { allow in Task { _ = await store.setPeer(peer.id, allowOpen: allow) } }
@@ -233,6 +376,8 @@ private struct AddMachineSheet: View {
     @State private var error: String?
     @State private var allowOpen = true
     @State private var working = false
+    /// The address to reach the Mac at, prefilled from the code.
+    @State private var address = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -248,10 +393,23 @@ private struct AddMachineSheet: View {
                 .onChange(of: code) { _, _ in
                     preview = nil
                     error = nil
+                    address = ""
                 }
             if let preview {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("\(preview.name) (\(preview.user)@\(preview.host))").font(.body.weight(.medium))
+                    Text("\(preview.name) (login \(preview.user))").font(.body.weight(.medium))
+                    if preview.canAdd {
+                        TextField("Address", text: $address)
+                            .help("The address this Mac reaches \(preview.name) at; it starts as the one in the code. Change it if \(preview.name) is reachable at another name or IP address")
+                        if let note = MachinesDisplay.currentHostNote(preview) {
+                            Text(note).font(.caption)
+                        }
+                        if MachinesDisplay.isLocalName(address) {
+                            Text(MachinesDisplay.sameNetworkHint)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Text("Fingerprint \(preview.fingerprint)")
                         .font(.caption.monospaced())
                     Text("Check that the other Mac shows the same name and fingerprint before adding it.")
@@ -297,6 +455,7 @@ private struct AddMachineSheet: View {
             switch await store.previewPeer(code: code) {
             case .success(let parsed):
                 preview = parsed
+                address = parsed.host
                 // A re-pair starts from the replaced Mac's switch, not the default.
                 allowOpen = parsed.replaces?.allowOpen ?? true
                 error = parsed.blockingMessage
@@ -311,7 +470,9 @@ private struct AddMachineSheet: View {
     private func add() {
         working = true
         Task {
-            if let failure = await store.addPeer(code: code, allowOpen: allowOpen) {
+            let typed = address.trimmingCharacters(in: .whitespaces)
+            let host = typed.isEmpty ? (preview?.host ?? "") : typed
+            if let failure = await store.addPeer(code: code, host: host, allowOpen: allowOpen) {
                 error = MachinesSettingsMessages.clean(failure)
             } else {
                 isPresented = false

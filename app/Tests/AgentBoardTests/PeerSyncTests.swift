@@ -342,3 +342,108 @@ struct PeerPreviewTests {
         #expect(preview.blockingMessage == nil)
     }
 }
+
+@Suite("Advertised address")
+struct AdvertisedAddressTests {
+    private func decodeInfo(_ json: String) throws -> PeersInfo {
+        try JSONDecoder().decode(PeersInfo.self, from: Data(json.utf8))
+    }
+
+    private let machine = #""machine":{"id":"m","name":"Laptop"}"#
+
+    @Test func peersInfoDecodesTheAddressAndCandidates() throws {
+        let info = try decodeInfo("{\(machine),\"host\":\"mac.vpn\","
+            + "\"address\":{\"address\":\"mac.vpn\",\"source\":\"config\",\"kind\":\"custom\"},"
+            + "\"address_automatic\":{\"address\":\"Laptop.local\",\"kind\":\"local\",\"source\":\"auto\"},"
+            + "\"address_candidates\":[{\"address\":\"Laptop.local\",\"kind\":\"local\",\"label\":\"Local name\",\"via\":\"local\"},"
+            + "{\"kind\":\"vpn\"},{\"address\":\"10.8.0.2\"}]}")
+        #expect(info.address == PeerAddress(address: "mac.vpn", source: "config", kind: "custom"))
+        #expect(info.address?.isChosen == true)
+        #expect(info.addressAutomatic?.address == "Laptop.local")
+        // A malformed entry is dropped; a missing label falls back to the address.
+        #expect(info.addressCandidates.map(\.address) == ["Laptop.local", "10.8.0.2"])
+        #expect(info.addressCandidates.last?.label == "10.8.0.2")
+    }
+
+    @Test func peersInfoWithoutTheAddressFieldsDecodes() throws {
+        let info = try decodeInfo("{\(machine),\"host\":\"mac.local\"}")
+        #expect(info.address == nil)
+        #expect(info.addressAutomatic == nil)
+        #expect(info.addressCandidates.isEmpty)
+        #expect(info.host == "mac.local")
+    }
+
+    @Test func peerDecodesErrorKindAndSuggestion() throws {
+        let peer = try JSONDecoder().decode(Peer.self, from: Data(
+            #"{"id":"a","name":"Mini","host":"mini.local","error_kind":"address","suggested_address":"mini.vpn"}"#.utf8))
+        #expect(peer.errorKind == "address")
+        #expect(peer.suggestedAddress == "mini.vpn")
+        let old = try JSONDecoder().decode(Peer.self, from: Data(#"{"id":"a","name":"Mini"}"#.utf8))
+        #expect(old.errorKind == nil)
+        #expect(old.suggestedAddress == nil)
+    }
+
+    @Test func previewDecodesCurrentHost() throws {
+        let base = #""id":"a","name":"Mini","user":"u","host":"mini.vpn","fingerprint":"f","own":false,"known":true"#
+        let preview = try JSONDecoder().decode(PeerPreview.self, from: Data("{\(base),\"current_host\":\"mini.local\"}".utf8))
+        #expect(preview.currentHost == "mini.local")
+        #expect(MachinesDisplay.currentHostNote(preview) == "Currently reached at mini.local; the code says mini.vpn.")
+        let older = try JSONDecoder().decode(PeerPreview.self, from: Data("{\(base)}".utf8))
+        #expect(older.currentHost == nil)
+        #expect(MachinesDisplay.currentHostNote(older) == nil)
+    }
+
+    @Test func addressAdvice() {
+        let addressError = Peer(id: "a", name: "Mini", host: "mini.vpn", status: "offline", errorKind: "address")
+        #expect(MachinesDisplay.addressAdvice(addressError)?.hasPrefix("Check the address") == true)
+        let unreachableLocal = Peer(id: "a", name: "Mini", host: "mini.local", status: "offline", errorKind: "unreachable")
+        let advice = MachinesDisplay.addressAdvice(unreachableLocal)
+        #expect(advice?.hasPrefix("A .local name only works on the same network. On Mini,") == true)
+        let offlineLocal = Peer(id: "a", name: "Mini", host: "Mini.LOCAL", status: "offline")
+        #expect(MachinesDisplay.addressAdvice(offlineLocal) != nil)
+        #expect(MachinesDisplay.addressAdvice(Peer(id: "a", name: "Mini", host: "mini.local", status: "never")) != nil)
+        #expect(MachinesDisplay.addressAdvice(Peer(id: "a", name: "Mini", host: "mini.local")) == nil)
+        #expect(MachinesDisplay.addressAdvice(Peer(id: "a", name: "Mini", host: "192.0.2.5", status: "offline")) == nil)
+        let authError = Peer(id: "a", name: "Mini", host: "192.0.2.5", status: "offline", errorKind: "auth")
+        #expect(MachinesDisplay.addressAdvice(authError) == nil)
+    }
+
+    @Test func captionAndMenuTitles() {
+        let auto = PeerAddress(address: "Laptop.local", source: "auto", kind: "local")
+        let chosen = PeerAddress(address: "mac.vpn", source: "config", kind: "custom")
+        #expect(MachinesDisplay.addressCaption(auto).hasPrefix("Chosen automatically."))
+        #expect(MachinesDisplay.addressCaption(chosen).hasPrefix("Set by you."))
+        #expect(MachinesDisplay.addressCaption(nil).hasPrefix("Chosen automatically."))
+        #expect(MachinesDisplay.addressCaption(chosen).contains("keep the address they saved"))
+        #expect(MachinesDisplay.automaticTitle(auto) == "Automatic (Laptop.local)")
+        #expect(MachinesDisplay.automaticTitle(nil) == "Automatic")
+        #expect(MachinesDisplay.candidateTitle(AddressCandidate(address: "100.64.0.9", kind: "vpn", label: "VPN address"))
+                == "VPN address: 100.64.0.9")
+    }
+
+    @Test func suggestionText() {
+        let peer = Peer(id: "a", name: "Mini", host: "mini.local", suggestedAddress: "mini.vpn")
+        #expect(MachinesDisplay.suggestionText(peer)?.hasPrefix("Mini now advertises mini.vpn (this Mac uses mini.local).") == true)
+        #expect(MachinesDisplay.suggestionText(Peer(id: "a", name: "Mini", host: "mini.vpn", suggestedAddress: "mini.vpn")) == nil)
+        #expect(MachinesDisplay.suggestionText(Peer(id: "a", name: "Mini", host: "mini.local")) == nil)
+        #expect(MachinesDisplay.suggestionText(peer)?.contains("enter mini.local under Address again") == true)
+        #expect(MachinesDisplay.suggestionText(Peer(id: "a", name: "Mini", host: "mini.local", suggestedAddress: "Mini.local.")) == nil)
+    }
+
+    @Test func cliArgumentLists() {
+        #expect(AgentBoardCLI.peersSetSelfArguments(address: "mac.vpn") == ["set-self", "--address=mac.vpn"])
+        #expect(AgentBoardCLI.peersSetSelfArguments(address: "-bad") == ["set-self", "--address=-bad"])
+        #expect(AgentBoardCLI.peersSetSelfArguments(address: "x", autoAddress: true) == ["set-self", "--auto-address"])
+        #expect(AgentBoardCLI.peersSetSelfArguments(name: "Laptop", share: "full")
+                == ["set-self", "--name", "Laptop", "--share", "full"])
+        #expect(AgentBoardCLI.peersAddArguments(code: "C", host: "mini.vpn", allowOpen: false)
+                == ["add", "--code", "C", "--host=mini.vpn", "--allow-open", "off"])
+    }
+
+    @Test func localNameHint() {
+        #expect(MachinesDisplay.isLocalName("mini.local"))
+        #expect(MachinesDisplay.isLocalName(" Mini.Local "))
+        #expect(!MachinesDisplay.isLocalName("mini.vpn"))
+        #expect(!MachinesDisplay.isLocalName("local"))
+    }
+}

@@ -90,8 +90,17 @@ CONFIG_KEYS = (
         "pairing code is added: `id` is the peer's machine id, `name` its display name, "
         "`host` and `user` where ssh reaches it, `allow_open` whether it may open sessions "
         "on this Mac, `public_key` and `host_key` its AgentBoard key and pinned ssh host key, "
-        "`fingerprint` its pairing code's fingerprint when it was added.",
-        fields=("id", "name", "host", "user", "allow_open", "public_key", "host_key", "fingerprint"),
+        "`fingerprint` its pairing code's fingerprint when it was added, `dismissed_address` "
+        "an address it advertised that you chose not to use.",
+        fields=("id", "name", "host", "user", "allow_open", "public_key", "host_key", "fingerprint",
+                "dismissed_address"),
+    ),
+    ConfigKey(
+        "peer_address", "string", "automatic",
+        "The address other Macs reach this one at, put in its pairing code and sent to "
+        "paired Macs: a VPN or DNS name, an IP address or the `.local` name. Absent, it is "
+        "chosen automatically (a detected VPN name or address, else the `.local` name); "
+        "Settings → Machines sets it.",
     ),
     ConfigKey(
         "peer_share", "full | titles | state", "full",

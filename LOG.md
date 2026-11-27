@@ -1028,3 +1028,28 @@ As a safety net, the scroll content is also framed at the popover's width with l
 A row whose fixed-size tags still can't fit now runs off the trailing edge on its own, and the
 rest of the list stays aligned. The cost is that such a row hides its trailing tags instead of
 the whole list shifting.
+
+## 2026-11-27 03:09:00 UTC — Each Mac advertises one address it chooses
+
+Pairing codes carried the Bonjour `.local` name, so two Macs on different networks paired and
+then failed with "host name can't be found"; the per-peer host field could fix it, but nothing
+pointed there. Each Mac now advertises one address, chosen under Settings → Machines and stored
+as the optional `peer_address` config key; absent, it is picked automatically. That address goes
+in the code's existing `host` field, so the code format, its fingerprint rule and every existing
+pairing are unchanged, and an older build parses new codes.
+
+Detection is generic and optional: a table of VPN CLI probes (one entry today, each a bounded
+local status call to its daemon), an `ifconfig` scan for IPv4 on tunnel interfaces (any VPN, no
+CLI knowledge) and `en*` interfaces (offered as "this network only", never automatic, since DHCP
+moves them), and the `.local` name. Automatic prefers a VPN CLI's name or address, then a tunnel
+address in 100.64.0.0/10, then `.local`; the owner chose VPN-first knowing a Mac whose peers are
+outside the VPN then needs `.local` picked by hand. Detection runs only from `peers list`,
+`set-self` and the export, never `snapshot`.
+
+An address change reaches Macs already paired only as a suggestion: the export carries an
+additive, validated `advertised_address`, and the receiver shows "Use new address" / "Dismiss"
+instead of switching, since the saved host is part of what the owner approved and the pinned
+host key and forced command stay the trust boundary. It cannot help once the old address is
+unreachable, which the UI says. ssh failures now carry an `error_kind`, so a row whose address
+is the problem says what to change and offers Edit address, and the Add machine sheet shows the
+code's address in an editable field. A typed IPv6 address is bracketed in the Screen Sharing URL.

@@ -413,20 +413,26 @@ final class SnapshotStore: ObservableObject {
         }
     }
 
-    func addPeer(code: String, allowOpen: Bool) async -> String? {
-        await changePeers("add machine") { try await cli.peersAdd(code: code, allowOpen: allowOpen) }
+    func addPeer(code: String, host: String, allowOpen: Bool) async -> String? {
+        await changePeers("add machine") { try await cli.peersAdd(code: code, host: host, allowOpen: allowOpen) }
     }
 
     func removePeer(_ id: String) async -> String? {
         await changePeers("remove machine") { try await cli.peersRemove(id: id) }
     }
 
-    func setPeer(_ id: String, host: String? = nil, name: String? = nil, allowOpen: Bool? = nil) async -> String? {
-        await changePeers("set machine") { try await cli.peersSet(id: id, host: host, name: name, allowOpen: allowOpen) }
+    func setPeer(_ id: String, host: String? = nil, name: String? = nil, allowOpen: Bool? = nil,
+                 dismissAddress: String? = nil) async -> String? {
+        await changePeers("set machine") {
+            try await cli.peersSet(id: id, host: host, name: name, allowOpen: allowOpen, dismissAddress: dismissAddress)
+        }
     }
 
-    func setThisMac(name: String? = nil, share: String? = nil) async -> String? {
-        await changePeers("set this mac") { try await cli.peersSetSelf(name: name, share: share) }
+    func setThisMac(name: String? = nil, share: String? = nil, address: String? = nil,
+                    autoAddress: Bool = false) async -> String? {
+        await changePeers("set this mac") {
+            try await cli.peersSetSelf(name: name, share: share, address: address, autoAddress: autoAddress)
+        }
     }
 
     /// Dismisses one note (the popover's and the detail view's per-note x).

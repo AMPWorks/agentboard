@@ -3955,9 +3955,16 @@ def build_parser():
     q.add_argument("--host", default=None)
     q.add_argument("--name", default=None)
     q.add_argument("--allow-open", dest="allow_open", choices=["on", "off"], default=None)
+    q.add_argument("--dismiss-address", dest="dismiss_address", default=None,
+                   help="stop suggesting this address the peer advertises")
     q = peers_sub.add_parser("set-self")
     q.add_argument("--name", default=None, help="this Mac's name on other boards")
     q.add_argument("--share", choices=["full", "titles", "state"], default=None)
+    group = q.add_mutually_exclusive_group()
+    group.add_argument("--address", default=None,
+                       help="the address other Macs reach this one at (put in its pairing code)")
+    group.add_argument("--auto-address", dest="auto_address", action="store_true",
+                       help="choose that address automatically again")
     p.set_defaults(func=cmd_peers)
 
     p = sub.add_parser("peer-sync", help="keep pulling every paired Mac's sessions over ssh")

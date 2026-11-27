@@ -596,6 +596,12 @@ struct Peer: Codable, Sendable, Equatable, Identifiable {
     var status: String
     var lastSeenAt: String?
     var error: String?
+    /// What `error` is about: `address`, `unreachable`, `host_key`, `auth`,
+    /// `remote_login`, `refused`, or nil.
+    var errorKind: String?
+    /// An address the peer now advertises that differs from `host` (and
+    /// was not dismissed), else nil.
+    var suggestedAddress: String?
     var sessionCount: Int
     var allowOpen: Bool
     var clockSkewSecs: Double?
@@ -608,6 +614,8 @@ struct Peer: Codable, Sendable, Equatable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, name, host, status, error, user, authorized, fingerprint
         case lastSeenAt = "last_seen_at"
+        case errorKind = "error_kind"
+        case suggestedAddress = "suggested_address"
         case sessionCount = "session_count"
         case allowOpen = "allow_open"
         case clockSkewSecs = "clock_skew_secs"
@@ -615,7 +623,9 @@ struct Peer: Codable, Sendable, Equatable, Identifiable {
 
     init(id: String, name: String, host: String = "", status: String = "online",
          lastSeenAt: String? = nil, error: String? = nil, sessionCount: Int = 0,
-         allowOpen: Bool = true) {
+         allowOpen: Bool = true, errorKind: String? = nil, suggestedAddress: String? = nil) {
+        self.errorKind = errorKind
+        self.suggestedAddress = suggestedAddress
         self.id = id
         self.name = name
         self.host = host
@@ -634,6 +644,8 @@ struct Peer: Codable, Sendable, Equatable, Identifiable {
         status = ((try? c.decodeIfPresent(String.self, forKey: .status)) ?? nil) ?? "offline"
         lastSeenAt = (try? c.decodeIfPresent(String.self, forKey: .lastSeenAt)) ?? nil
         error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
+        errorKind = (try? c.decodeIfPresent(String.self, forKey: .errorKind)) ?? nil
+        suggestedAddress = (try? c.decodeIfPresent(String.self, forKey: .suggestedAddress)) ?? nil
         sessionCount = ((try? c.decodeIfPresent(Int.self, forKey: .sessionCount)) ?? nil) ?? 0
         allowOpen = ((try? c.decodeIfPresent(Bool.self, forKey: .allowOpen)) ?? nil) ?? true
         clockSkewSecs = (try? c.decodeIfPresent(Double.self, forKey: .clockSkewSecs)) ?? nil
