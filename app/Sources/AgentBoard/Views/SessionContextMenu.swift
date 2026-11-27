@@ -98,6 +98,9 @@ enum SessionActionHelp {
     static let markDone = "Mark this session done and hide it; a new prompt reopens it"
     static let reopen = "Put this session back on the board"
     static let snooze = "Hide this session for 24 hours"
+    /// A held popover row whose session left the board meanwhile.
+    static let noLongerOnBoard = "This session is no longer on the board; Update list in the footer shows the newest sessions"
+    static let showInDashboard = "Open the dashboard on this session"
 
     static func open(_ link: Link) -> String { "Open \(link.kindLabel) \(link.ref) in the browser" }
 }
@@ -108,8 +111,47 @@ enum SessionActionHelp {
 struct SessionContextMenu: View {
     let session: Session
     @ObservedObject var store: SnapshotStore
+    /// A held popover row whose session left the board: only copy and
+    /// Show in Dashboard; the rest are disabled.
+    var noLongerOnBoard: Bool = false
 
     var body: some View {
+        Group {
+            if noLongerOnBoard {
+                goneMenu
+            } else {
+                liveMenu
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var goneMenu: some View {
+        Button("Show in Dashboard") {
+            let popoverWindow = NSApp.keyWindow
+            store.requestSelection(session.key)
+            DashboardWindowController.show()
+            popoverWindow?.close()
+        }
+        .help(SessionActionHelp.showInDashboard)
+        Button("Copy Resume Command") {
+            Task {
+                let command = await store.resumeCommand(for: session)
+                ClipboardHelper.copy(command)
+            }
+        }
+        .help(SessionActionHelp.copyResumeHelp(session))
+        Divider()
+        Button("Mark Done") {}
+            .disabled(true)
+            .help(SessionActionHelp.noLongerOnBoard)
+        Button("Snooze 1 Day") {}
+            .disabled(true)
+            .help(SessionActionHelp.noLongerOnBoard)
+    }
+
+    @ViewBuilder
+    private var liveMenu: some View {
         Group {
             if session.isFocusable {
                 Button(SessionActionHelp.focusTitle(session)) { Task { await store.focusOrShowDashboard(session) } }

@@ -5,17 +5,34 @@ struct SessionRowView: View {
     let session: Session
     @ObservedObject var store: SnapshotStore
     var compact: Bool = true
+    /// Popover rows: the live session a click on this (possibly held) row
+    /// acts on, looked up by key at click time (`PopoverHold.resolve`); nil
+    /// from the closure means the session left the board. Unset (dashboard
+    /// rows), the row acts on `session`.
+    var resolveLive: ((Session) -> Session?)? = nil
+    /// What a held row's session is now (`PopoverHold.status`).
+    var holdStatus: PopoverHold.RowStatus = .current
 
     @State private var isHovering = false
 
+    /// The session this row's actions use: the live one with the same key,
+    /// nil when it is no longer on the board.
+    private var actionSession: Session? {
+        guard let resolveLive else { return session }
+        return resolveLive(session)
+    }
+
     var body: some View {
-        // A remote session whose Mac is offline: its last-known state, dimmed.
+        // A remote session whose Mac is offline (its last-known state), or
+        // a held row whose session changed meanwhile: dimmed.
         let decorated = rowContent
-            .opacity(session.stale ? 0.55 : 1)
+            .opacity(session.stale || holdStatus.isDimmed ? 0.55 : 1)
             .padding(.vertical, 4)
             .padding(.horizontal, 6)
             .contentShape(Rectangle())
             .onHover { isHovering = $0 }
+            .optionalHelp(holdStatus.help)
+            .optionalAccessibilityValue(holdStatus.label)
 
         // Popover rows aren't in a List, so they drive their own click and
         // context menu. Dashboard rows are List rows: selection, the
@@ -26,7 +43,10 @@ struct SessionRowView: View {
             if compact {
                 decorated
                     .onTapGesture { handlePopoverTap() }
-                    .contextMenu { SessionContextMenu(session: session, store: store) }
+                    .contextMenu {
+                        let live = actionSession
+                        SessionContextMenu(session: live ?? session, store: store, noLongerOnBoard: live == nil)
+                    }
             } else {
                 decorated
             }
@@ -332,15 +352,41 @@ struct SessionRowView: View {
         session.isFocusable ? .focus : .showDashboard
     }
 
+    /// A click on a row that shows `held`: acts on the live session with
+    /// the same key (its present state decides focus or dashboard), never on
+    /// whatever sits at the row's position; a session no longer on the
+    /// board opens the dashboard on its key.
+    static func popoverTap(held: Session, live: [Session]) -> (session: Session, tap: PopoverTap) {
+        popoverTap(held: held, resolved: PopoverHold.resolve(held, live: live))
+    }
+
+    static func popoverTap(held: Session, resolved: Session?) -> (session: Session, tap: PopoverTap) {
+        guard let resolved else { return (held, .showDashboard) }
+        return (resolved, popoverTap(for: resolved))
+    }
+
+    /// Which actions a held row offers: every one while its session is on
+    /// the board (on the live value), only copy and show-in-dashboard (on
+    /// the held value) once it is gone.
+    enum HeldActions: Equatable {
+        case all, copyAndDashboard
+    }
+
+    static func allowedActions(held: Session, live: [Session]) -> HeldActions {
+        PopoverHold.resolve(held, live: live) == nil ? .copyAndDashboard : .all
+    }
+
     /// Row click (and the desktop icon) in the popover: acts on the
     /// session, then closes the popover, whatever section the row is in.
     private func handlePopoverTap() {
         let popoverWindow = NSApp.keyWindow
-        switch Self.popoverTap(for: session) {
+        let target = Self.popoverTap(held: session, resolved: actionSession)
+        switch target.tap {
         case .focus:
-            Task { await store.focusOrShowDashboard(session) }
+            let live = target.session
+            Task { await store.focusOrShowDashboard(live) }
         case .showDashboard:
-            store.requestSelection(session.key)
+            store.requestSelection(target.session.key)
             DashboardWindowController.show()
         }
         popoverWindow?.close()
@@ -421,9 +467,15 @@ struct SessionRowView: View {
 
     @ViewBuilder
     private func hoverButton(_ button: SessionRowLayout.HoverButton) -> some View {
+        // State-changing actions use the live session; a session no longer
+        // on the board keeps its buttons in place, disabled.
+        let live = actionSession
         switch button {
         case .resume:
-            iconButton(button.systemImage, help: SessionActionHelp.resumeHelp(session)) { Task { await store.resume(session) } }
+            iconButton(button.systemImage, help: live.map(SessionActionHelp.resumeHelp) ?? SessionActionHelp.noLongerOnBoard) {
+                if let live { Task { await store.resume(live) } }
+            }
+            .disabled(live == nil)
         case .copy:
             iconButton(button.systemImage, help: SessionActionHelp.copyResumeHelp(session)) {
                 Task {
@@ -432,9 +484,15 @@ struct SessionRowView: View {
                 }
             }
         case .markDone:
-            iconButton(button.systemImage, help: SessionActionHelp.markDone) { Task { await store.markDone(session) } }
+            iconButton(button.systemImage, help: live == nil ? SessionActionHelp.noLongerOnBoard : SessionActionHelp.markDone) {
+                if let live { Task { await store.markDone(live) } }
+            }
+            .disabled(live == nil)
         case .snooze:
-            iconButton(button.systemImage, help: SessionActionHelp.snooze) { Task { await store.snooze(session, hours: 24) } }
+            iconButton(button.systemImage, help: live == nil ? SessionActionHelp.noLongerOnBoard : SessionActionHelp.snooze) {
+                if let live { Task { await store.snooze(live, hours: 24) } }
+            }
+            .disabled(live == nil)
         case .openLink:
             // A ticket or URL; PRs have their own buttons on the row.
             if let link = SessionRowLayout.hoverLink(for: session), let url = link.openURL {
@@ -469,6 +527,20 @@ private extension SessionRowLayout.Icon {
         case .mode: return "mode"
         case .desktop: return "desktop"
         }
+    }
+}
+
+extension View {
+    /// `.help(text)` when there is one; nothing otherwise, so a row's
+    /// controls keep their own tooltips.
+    @ViewBuilder
+    func optionalHelp(_ text: String?) -> some View {
+        if let text { help(text) } else { self }
+    }
+
+    @ViewBuilder
+    func optionalAccessibilityValue(_ text: String?) -> some View {
+        if let text { accessibilityValue(text) } else { self }
     }
 }
 

@@ -1218,6 +1218,63 @@ both appearances (the window background color in light). Both follow the setting
 the in-app Appearance setting. The same layer sits behind the Dashboard and Help sidebars; their
 content panes and Settings are opaque window backgrounds already.
 
+## Popover list hold
+
+The app polls the snapshot every 3 s while the popover is open, and the directory watcher and
+every action refresh it too, so without a hold rows would re-sort (each section is ordered by
+`updated_at`), appear and vanish while the owner reads them, and a click could land on the row
+that just slid under the pointer. **Held list:** while the popover is open and the pointer is
+inside its window, or one of its menus (a row's context menu, the gear menu) is tracking, the
+list is built from the sessions it showed when the hold began (`PopoverHold`, a pure value type in
+`app/Sources/AgentBoard/Support/PopoverHold.swift`). Everything above the footer derives from
+them: the sections and their header counts, the summary line, the filter notice, the Updates
+panel and the Updates button's count and tint. Row content is held too, since a title wrapping or
+a reason line appearing changes a row's height. Relative times still tick. The footer (usage line,
+pending control), the status banner, the menu bar icon, notifications, sounds and the dashboard
+read the live snapshot.
+
+Pointer tracking is `.onHover` on the popover's root view plus a recheck of `NSEvent.mouseLocation`
+against the popover window's frame when the window is first known, on open, when it becomes key
+and before every snapshot change is shown, so a popover that opens under a still pointer holds
+before its first poll. A popover opened from the menu bar icon takes its opening refresh live, as
+the pointer is on the icon. The newest snapshot applies when the pointer leaves the window, the
+popover closes (the next open starts live), the filter text changes (the matching set is rebuilt
+from the newest snapshot, so typing never waits), or the owner clicks the footer's pending
+control.
+
+While held, the footer's button row (where Refresh is, so nothing above moves) shows what
+**Update list** would change: e.g. `3 changes · Update list`, or `1 needs you · Update list` in
+the Needs you colour when a pending change is a session newly in Needs you or Interrupted or a
+new `needs_you` update. It counts, over the sessions the query keeps and the popover can list,
+sessions new in the snapshot, held sessions in another section now, held sessions no longer in
+it, and new open updates. **Refresh** still reloads the store; while held it moves no rows.
+
+Clicks are bound to identity, never to a list position: a click on a held row (and its hover
+buttons and context menu, and an Updates row's context menu) looks up the session with the same
+`key` in the newest snapshot at click time and acts on that value, so "focus or open the
+dashboard" follows the session's present state. Keys include the Mac, so two Macs' sessions with
+the same `session_id` never stand in for each other. A held row whose session moved to another
+section, or left the snapshot, stays in its slot with the text the owner saw, dimmed (0.55
+opacity), with a tooltip and accessibility value saying what it is now (`Now in Needs you`, `No
+longer on the board`). A row whose session left opens the dashboard on its key; its Mark done and
+Snooze are disabled, leaving Copy Resume Command and Show in Dashboard.
+
+The owner's own actions apply to the held list for that session only: after mark done, snooze,
+reopen, focus or resume succeeds, `SnapshotStore.lastOwnAction` publishes its session key and the
+held entry takes the live value (or leaves); after a note dismissal (one update's x, a session's
+Dismiss All, a grouped row's x, Clear all / Clear matching) it publishes the dismissals instead,
+and only the held notes those name and that are no longer open drop out: the session's state,
+section and other notes stay as held, and notes closed meanwhile by anything else stay pending.
+When the hold begins on a snapshot change (the pointer was inside but no hover event arrived), it
+keeps the list shown before that snapshot and counts the change as pending. A session counts once
+in the needs-you figure however many of its changes need the owner. Nothing else pending rides
+along. A dismissal never reaches an update the held list has not shown: while new updates are
+pending, the Updates panel's Clear all / Clear matching reads **Clear these** and dismisses only
+the listed rows, and a grouped row whose session gained an update dismisses only the notes it
+lists (a held session that left the board still drops the note its x dismissed). There is no
+Settings toggle. The trade-off: a held list can be as stale as one pointer visit, which the footer
+control says.
+
 ## Search
 
 Both the menu bar popover and the dashboard have a search field, and both read a query the same

@@ -25,6 +25,13 @@ struct AgentBoardCLI: Sendable {
     private let runner = CLIRunner()
     private let log = Logger(subsystem: "io.github.agentboard", category: "cli")
 
+    /// A fixture file that wins over the environment and defaults (tests).
+    private let fixtureOverride: URL?
+
+    init(fixtureOverride: URL? = nil) {
+        self.fixtureOverride = fixtureOverride
+    }
+
     /// Resolves the agentboard CLI location in order: a copy bundled in the
     /// app's Resources, then $PATH, then the agentboardPath UserDefaults
     /// override. No path is hard-coded so the app stays portable.
@@ -59,6 +66,7 @@ struct AgentBoardCLI: Sendable {
 
     /// Non-nil when fixture data should be used instead of shelling out.
     var fixtureURL: URL? {
+        if let fixtureOverride { return fixtureOverride }
         let env = ProcessInfo.processInfo.environment
         if let envPath = env["AGENTBOARD_FIXTURE_PATH"], !envPath.isEmpty {
             return URL(fileURLWithPath: (envPath as NSString).expandingTildeInPath)
