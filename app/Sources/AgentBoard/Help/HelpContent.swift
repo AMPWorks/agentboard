@@ -135,6 +135,7 @@ enum HelpContent {
                 "By default the popover is as wide as the room from the menu bar icon to the right edge of the screen. Its left edge stays at the icon; it moves left only when the icon is too close to the right edge for the narrowest popover. Dragging the grip sideways keeps your width instead (Settings → Menu bar → Popover size → **Use the full width to the screen edge** turns full width back on).",
                 "Settings → Menu bar → Popover size → **Fit height to active sessions** sizes the height to show every Needs you, Review and Running session; the grip then changes only the width.",
                 "The popover never runs past the bottom or right edge of the screen: a size saved on a larger display is shrunk to fit, and comes back on that display. A long title or status line wraps onto more lines instead of being cut off.",
+                "In dark appearance the popover (and the dashboard and Help sidebars) has a nearly opaque dark background, so a bright window behind it cannot wash out its gray text. In light appearance it keeps the standard see-through look. Turn on **Reduce transparency** or **Increase contrast** in System Settings → Accessibility → Display to make the background fully opaque in both.",
             ]),
             .heading("Keyboard"),
             .shortcut(keys: "Type", action: "The search field has the cursor when the popover opens, so you can type a filter right away."),

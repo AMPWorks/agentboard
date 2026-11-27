@@ -38,7 +38,7 @@ class CaptureScenariosTest(unittest.TestCase):
         cls.tmp.cleanup()
 
     def fixtures(self):
-        return {name: snap for name, snap, _, _ in self.mod.scenarios(self.sample)}
+        return {name: snap for name, snap, *_ in self.mod.scenarios(self.sample)}
 
     def test_every_fixture_parses_and_sessions_keep_the_sample_keys(self):
         # The keys every sample session has (the sample's own rows differ
@@ -77,16 +77,28 @@ class CaptureScenariosTest(unittest.TestCase):
                 self.assertTrue(session["cwd"].startswith("/Users/dev/projects/")
                                 or session["cwd"] in {s["cwd"] for s in self.sample["sessions"]}, name)
 
-    def test_every_scenario_line_has_four_tab_separated_fields(self):
+    def test_every_scenario_line_has_five_tab_separated_fields(self):
         lines = (self.out / "scenarios.tsv").read_text().splitlines()
         self.assertEqual(len(lines), 2 * len(self.fixtures()))
         for line in lines:
             fields = line.split("\t")
-            self.assertEqual(len(fields), 4, line)
-            name, path, settings, _query = fields
+            self.assertEqual(len(fields), 5, line)
+            name, path, settings, backdrop, _query = fields
             self.assertTrue(name.endswith(("-light", "-dark")), line)
             self.assertTrue(Path(path).is_file(), line)
             self.assertIn("appearance=string:", settings)
+            # Never empty: the shell's tab-splitting read collapses empty
+            # middle fields.
+            self.assertIn(backdrop, ("none", "white"), line)
+
+    def test_only_the_bright_backdrop_scenario_has_a_white_backdrop(self):
+        rows = [line.split("\t") for line in (self.out / "scenarios.tsv").read_text().splitlines()]
+        white = sorted(row[0] for row in rows if row[3] == "white")
+        self.assertEqual(white, ["bright-backdrop-dark", "bright-backdrop-light"])
+        snap = self.fixtures()["bright-backdrop"]
+        self.assertTrue(any(s["stale"] for s in snap["sessions"]))
+        self.assertTrue(snap["usage"])
+        self.assertTrue(any(len(s["cwd"]) > 60 for s in snap["sessions"]))
 
     def test_the_polish_scenarios_show_what_they_are_named_for(self):
         fixtures = self.fixtures()
@@ -94,7 +106,7 @@ class CaptureScenariosTest(unittest.TestCase):
         kinds = [n["kind"] for s in mixed for n in s["notes"]]
         self.assertEqual(sorted(kinds), ["error", "needs_you", "update"])
         self.assertTrue(any(s["state"] == "needs_you" and not s["notes"] for s in mixed))
-        settings = {n: d for n, _snap, d, _q in self.mod.scenarios(self.sample)}
+        settings = {n: d for n, _snap, d, *_ in self.mod.scenarios(self.sample)}
         self.assertIn("updatesPanelMode=string:alwaysShown", settings["updates-always-mixed"])
         self.assertIn("updatesPanelMode=string:alwaysShown", settings["two-notes-one-project"])
         two = fixtures["two-notes-one-project"]["sessions"]

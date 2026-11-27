@@ -114,12 +114,27 @@ everything; also what `AGENTBOARD_USE_FIXTURE=1` loads from the app bundle).
 `scripts/capture-popover.sh` screenshots the popover once per scenario: empty, 1 to 40 sessions,
 many needing you, all running, Done sessions behind a query, the Updates panel at each text size,
 default, tall and auto-expand heights, full width, long titles and branches at 460 and 320 points,
-every permission mode, and the "Snapshot failed" banner, each in light and dark. It builds the
+every permission mode, the "Snapshot failed" banner, and `bright-backdrop` (a mixed board with
+long paths, an offline Mac's faded rows and the usage footer over a plain white window), each in
+light and dark. It builds the
 fixtures with `scripts/capture_scenarios.py` from `app/Fixtures/snapshot.json` (time-shifted to
 now, so only fixture projects appear), runs the bare binary under a unique name with an empty
 `AGENTBOARD_HOME`, sets each scenario's Settings in that binary's own defaults domain (light or
 dark through the app's Appearance setting, never System Settings), clicks its menu bar icon and
 captures just the panel window. It removes the defaults domain and data directory when done.
+
+`scenarios.tsv` has five tab-separated columns: name, fixture, defaults, backdrop (`none`, or
+`white` for a white window behind the panel; never empty, since the shell's tab-splitting read
+collapses empty middle fields) and query (last). For a `white` scenario the script starts
+`capture-tool backdrop X Y W H` (a borderless white window above normal windows and below the
+panel, placed on the open panel's rect plus a margin, and gone after 60 s even if the run is
+killed hard) after the click, then captures the panel's screen rect from `capture-tool bounds PID` with
+`screencapture -R`, since a window-only capture (`-l`) leaves out what shows through.
+`capture-tool luminance FILE` prints a PNG's mean relative luminance (0 to 1), a number to
+compare a before/after pair by: over white, a dark popover should stay well under 0.15. On macOS
+27 the system's MenuBarAgent hosts every status item, so the script finds the icon there by the
+capture binary's name (and in the app's own menu bar 2 on older releases), and the click hovers
+first so a menu bar that hides itself is shown.
 
 ```
 scripts/build-app.sh --no-install

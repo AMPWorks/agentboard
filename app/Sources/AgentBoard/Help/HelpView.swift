@@ -64,6 +64,7 @@ struct HelpView: View {
                 }
             }
         }
+        .popoverBackdrop()
         .navigationSplitViewColumnWidth(min: 190, ideal: 220)
     }
 }
