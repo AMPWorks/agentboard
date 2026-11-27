@@ -444,7 +444,8 @@ class GateTests(AgentBoardTestCase):
             return n >= 4
 
         peer = peers.find_peer(peers.load_config(), PEER_ID)
-        rc = self.gate.serve(peer, out=out, clock=lambda: clock["t"], wait=wait)
+        rc = self.gate.serve(peer, out=out, clock=lambda: clock["t"], wait=wait,
+                             detect=lambda config: None)
         self.assertEqual(rc, 0)
         lines = [json.loads(l) for l in out.getvalue().splitlines()]
         self.assertEqual(len(lines), 3, steps)
@@ -467,7 +468,7 @@ class GateTests(AgentBoardTestCase):
             return len(steps) > 5
 
         peer = peers.find_peer(peers.load_config(), PEER_ID)
-        rc = self.gate.serve(peer, out=out, wait=wait)
+        rc = self.gate.serve(peer, out=out, wait=wait, detect=lambda config: None)
         self.assertEqual(rc, 0)
         lines = [json.loads(l) for l in out.getvalue().splitlines()]
         # Opening turned off reaches the next line; removal ends the stream.
@@ -483,7 +484,49 @@ class GateTests(AgentBoardTestCase):
                 pass
 
         peer = peers.find_peer(peers.load_config(), PEER_ID)
-        self.assertEqual(self.gate.serve(peer, out=Broken(), wait=lambda: False), 0)
+        self.assertEqual(self.gate.serve(peer, out=Broken(), wait=lambda: False,
+                                         detect=lambda config: None), 0)
+
+    def test_serve_refreshes_the_advertised_address(self):
+        import io
+        out = io.StringIO()
+        clock = {"t": 0.0}
+        calls, steps = [], []
+
+        def detect(config):
+            calls.append(clock["t"])
+            if config.get("peer_address") == "boom":
+                raise RuntimeError("detector failed")
+            return config.get("peer_address") or "auto.vpn"
+
+        def touch(n):
+            self.conn.execute("UPDATE sessions SET last_prompt=?, updated_at=? WHERE session_id='s1'",
+                              (f"p{n}", f"2026-06-15T11:00:0{n}.000000Z"))
+
+        def wait():
+            steps.append(1)
+            n = len(steps)
+            if n == 1:
+                clock["t"] = 30.0  # inside the refresh window: cached
+                touch(n)
+            elif n == 2:
+                clock["t"] = 30.0 + self.gate.ADDRESS_REFRESH_SECS  # past it: detected again
+                touch(n)
+            elif n == 3:
+                peers.set_address("mini.vpn")  # a new choice refreshes at once
+            elif n == 4:
+                peers.set_address("boom")  # a raising detector keeps the stream
+            return n >= 5
+
+        peer = peers.find_peer(peers.load_config(), PEER_ID)
+        self.assertEqual(self.gate.serve(peer, out=out, clock=lambda: clock["t"], wait=wait,
+                                         detect=detect), 0)
+        lines = [json.loads(l) for l in out.getvalue().splitlines()]
+        self.assertEqual([l.get("advertised_address") for l in lines],
+                         ["auto.vpn", "auto.vpn", "auto.vpn", "mini.vpn", None])
+        self.assertEqual(calls, [0.0, 30.0 + self.gate.ADDRESS_REFRESH_SECS,
+                                 30.0 + self.gate.ADDRESS_REFRESH_SECS,
+                                 30.0 + self.gate.ADDRESS_REFRESH_SECS])
 
 
 class FakeProc:
@@ -772,6 +815,7 @@ class MergeTests(AgentBoardTestCase):
         self.cache()
         boom = AssertionError("network or process in snapshot")
         with mock.patch("subprocess.run", side_effect=boom), \
+                mock.patch("agentboard.peer_address.candidates", side_effect=boom), \
                 mock.patch("subprocess.Popen", side_effect=boom), \
                 mock.patch("socket.socket", side_effect=boom), \
                 mock.patch("socket.create_connection", side_effect=boom):
@@ -1450,7 +1494,8 @@ class SecurityReviewTests(AgentBoardTestCase):
             return len(steps) > 5
 
         out = io.StringIO()
-        self.assertEqual(peer_gate.serve(peer, out=out, wait=wait), 0)
+        self.assertEqual(peer_gate.serve(peer, out=out, wait=wait,
+                                         detect=lambda config: None), 0)
         self.assertEqual(len(out.getvalue().splitlines()), 1)
         self.assertEqual(len(steps), 1)
 
@@ -2010,6 +2055,248 @@ def _kill_quietly(pid):
 def _login():
     import pwd
     return pwd.getpwuid(os.getuid()).pw_name
+
+
+class RecordingRun:
+    """Records argv; scutil fails, ifconfig and any VPN probe answer from
+    canned text, ssh-keygen really runs (into the temp data directory)."""
+
+    def __init__(self, ifconfig="", probe=None):
+        self.calls, self.ifconfig, self.probe = [], ifconfig, probe
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        if argv[0] == "ssh-keygen":
+            return subprocess.run(argv, **kwargs)
+        if argv[0].endswith("ifconfig"):
+            return subprocess.CompletedProcess(argv, 0, self.ifconfig, "")
+        if argv[0].endswith("scutil") or self.probe is None:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, self.probe, "")
+
+    def detection(self):
+        return [c for c in self.calls if c[0] not in ("ssh-keygen",) and not c[0].endswith("scutil")]
+
+
+TUNNEL_IFCONFIG = ("utun3: flags=8051<UP> mtu 1400\n\tinet 10.8.0.2 --> 10.8.0.1 netmask 0xffffff00\n"
+                   "en0: flags=8863<UP> mtu 1500\n\tinet 192.168.1.20 netmask 0xffffff00\n")
+
+
+class AdvertisedAddressTests(AgentBoardTestCase):
+    def host_key(self):
+        path = self.tmp_path / "host.pub"
+        path.write_text(fake_key(9) + " root@mac\n")
+        return path
+
+    def test_list_payload_keeps_the_address_when_the_code_fails_and_detects_once(self):
+        from agentboard import peer_cli
+        run = RecordingRun(ifconfig=TUNNEL_IFCONFIG, probe='{"BackendState": "Stopped"}')
+        with mock.patch("agentboard.peer_address.shutil.which", return_value="/x/tailscale"), \
+                mock.patch.object(peers, "read_host_key", return_value=None):
+            payload = peer_cli._list_payload(run=run, connect=lambda *a, **k: (_ for _ in ()).throw(OSError()))
+        self.assertIsNone(payload["code"])
+        self.assertIn("Remote Login", payload["code_error"])
+        self.assertEqual(payload["address"]["source"], "auto")
+        addresses = [c["address"] for c in payload["address_candidates"]]
+        self.assertIn("10.8.0.2", addresses)
+        self.assertIn("192.168.1.20", addresses)
+        # A non-CGNAT tunnel address is offered but not chosen automatically.
+        self.assertNotEqual(payload["address"]["address"], "10.8.0.2")
+        self.assertEqual(payload["address_automatic"]["address"], payload["address"]["address"])
+        detection = run.detection()
+        self.assertEqual(sum(c[0].endswith("ifconfig") for c in detection), 1)
+        self.assertEqual(sum(c[0] == "/x/tailscale" for c in detection), 1)
+
+    def test_code_round_trip_carries_the_chosen_address(self):
+        host_key = self.host_key()
+        for address in ("mac.example.net", "192.0.2.10", "fd7a:115c:a1e0::1", "a" * 253):
+            with self.subTest(address=address[:20]):
+                peers.set_address(address)
+                run = RecordingRun()
+                built = peers.build_code(run=run, host_key_path=host_key)
+                self.assertEqual(built["host"], address)
+                self.assertEqual(peers.parse_code(built["code"])["host"], address)
+                self.assertEqual(run.detection(), [])  # a chosen address detects nothing
+
+    def test_invalid_stored_address_falls_back_to_automatic(self):
+        run = RecordingRun()
+        for value in ("-oProxyCommand=x", "", 5, "a b"):
+            with self.subTest(value=value):
+                chosen = peers.advertised_address({"peer_address": value}, run=run)
+                self.assertEqual(chosen["source"], "auto")
+        self.assertEqual(peers.advertised_address({"peer_address": "mini.vpn"}, run=run),
+                         {"address": "mini.vpn", "source": "config", "kind": "custom"})
+
+    def test_set_address_validates_and_none_clears(self):
+        peers.set_address("  mac.vpn ")
+        self.assertEqual(peers.load_config()["peer_address"], "mac.vpn")
+        before = peers.config_file().read_text()
+        for bad in ("-oProxyCommand=x", "", "   ", "a b", "x" * 254):
+            with self.subTest(bad=bad[:20]):
+                with self.assertRaises(peers.PeerError):
+                    peers.set_address(bad)
+                self.assertEqual(peers.config_file().read_text(), before)
+        peers.set_address(None)
+        self.assertNotIn("peer_address", peers.load_config())
+
+    def test_pre_change_codes_still_parse(self):
+        parsed = peers.parse_code(make_code())
+        self.assertEqual(parsed["host"], "mini.local")
+
+    def test_cli_set_self_address_list_and_dry_run(self):
+        run = lambda *args: subprocess.run([str(SHIM), *args], env=stub_env(self),
+                                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(run("peers", "add", "--code", make_code()).returncode, 0)
+        peers.set_peer(PEER_ID, host="mini.vpn")
+        result = run("peers", "set-self", "--address", "192.0.2.10")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["address"],
+                         {"address": "192.0.2.10", "source": "config", "kind": "custom"})
+        # Existing pairings keep the address they saved.
+        self.assertEqual(peers.find_peer(peers.load_config(), PEER_ID)["host"], "mini.vpn")
+        listing = json.loads(run("peers", "list", "--json").stdout)
+        self.assertEqual(listing["address"]["source"], "config")
+        self.assertIsInstance(listing["address_candidates"], list)
+        self.assertIn("address_automatic", listing)
+        if listing["code"] is not None:
+            self.assertEqual(listing["host"], "192.0.2.10")
+        else:
+            self.assertTrue(listing["code_error"])
+        plain = run("peers", "list")
+        self.assertIn("address 192.0.2.10 (set by you)", plain.stdout)
+        result = run("peers", "set-self", "--address=-bad")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("invalid address", result.stderr)
+        self.assertEqual(run("peers", "set-self", "--address", "x", "--auto-address").returncode, 2)
+        result = run("peers", "set-self", "--auto-address")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["address"]["source"], "auto")
+        self.assertNotIn("peer_address", peers.load_config())
+        preview = json.loads(run("peers", "add", "--code", make_code(), "--dry-run").stdout)
+        self.assertEqual(preview["current_host"], "mini.vpn")
+        other = make_code(id=OTHER_ID, key=fake_key(5), host_key=fake_key(6))
+        self.assertIsNone(json.loads(run("peers", "add", "--code", other, "--dry-run").stdout)["current_host"])
+
+    def test_vnc_url_brackets_ipv6(self):
+        from agentboard import peer_cli
+        self.assertEqual(peer_cli.vnc_url("u", "mini.local"), "vnc://u@mini.local")
+        self.assertEqual(peer_cli.vnc_url("u", "192.0.2.1"), "vnc://u@192.0.2.1")
+        self.assertEqual(peer_cli.vnc_url("u", "fd7a::1"), "vnc://u@[fd7a::1]")
+        self.assertEqual(peer_cli.vnc_url("u", "fe80::1%en0"), "vnc://u@[fe80::1%25en0]")
+
+
+class ErrorKindTests(AgentBoardTestCase):
+    def test_every_ssh_error_row_has_its_kind(self):
+        from agentboard import peer_sync
+        expected = {
+            "Host key verification failed": "host_key",
+            "REMOTE HOST IDENTIFICATION HAS CHANGED": "host_key",
+            "Permission denied": "auth",
+            "Could not resolve hostname": "address",
+            "Connection refused": "remote_login",
+            "Operation timed out": "unreachable",
+            "Connection timed out": "unreachable",
+            "No route to host": "unreachable",
+            "refused:": "refused",
+        }
+        self.assertEqual({needle: kind for needle, _m, kind in peer_sync._SSH_ERRORS}, expected)
+        for needle, kind in expected.items():
+            message, got = peer_sync._friendly_error(f"ssh: {needle} blah")
+            self.assertEqual(got, kind)
+            self.assertIn(kind, peers.ERROR_KINDS)
+        self.assertEqual(peer_sync._friendly_error("ssh: Could not resolve hostname x"),
+                         ("its address can't be found; change the address", "address"))
+        self.assertEqual(peer_sync._friendly_error("something else"), ("something else", None))
+        self.assertEqual(peer_sync._friendly_error(""), ("the connection closed", None))
+
+
+class AddressSyncTests(AgentBoardTestCase):
+    """error_kind and the advertised address through peer_sync and remote_entries."""
+
+    def setUp(self):
+        super().setUp()
+        from agentboard import peer_sync
+        self.sync_mod = peer_sync
+        peers.ensure_machine(run=no_scutil)
+        peers.add_peer(make_code(), bin_path="/x/agentboard")
+        fake_ssh_files()
+        self.clock = {"t": 0.0}
+        self.spawned = []
+
+    make_sync = SyncTests.make_sync
+    settle = SyncTests.settle
+
+    def listed(self):
+        [item] = peers.remote_entries(peers.load_config(), NOW)[1]
+        return item
+
+    def test_error_kind_reaches_remote_entries_and_clears(self):
+        sync = self.make_sync([FakeProc(stderr=b"ssh: Could not resolve hostname mini.local")])
+        sync.tick()
+        self.settle(sync)
+        self.clock["t"] = 1
+        sync.tick()
+        self.assertEqual(peers.read_cache(PEER_ID)["error_kind"], "address")
+        self.assertEqual(self.listed()["error_kind"], "address")
+        sync._rejected(sync.links[PEER_ID], "not json")
+        self.assertIsNone(peers.read_cache(PEER_ID)["error_kind"])
+        self.assertIsNone(self.listed()["error_kind"])
+
+    def test_an_unknown_error_kind_is_dropped(self):
+        peers.write_cache(PEER_ID, {"peer_id": PEER_ID, "sessions": [], "error": "x", "error_kind": "evil"})
+        self.assertIsNone(self.listed()["error_kind"])
+
+    def test_export_carries_the_advertised_address(self):
+        self.assertEqual(peers.build_export(None, "state", snapshot={"sessions": []},
+                                            address="mac.vpn")["advertised_address"], "mac.vpn")
+        self.assertNotIn("advertised_address", peers.build_export(None, "state", snapshot={"sessions": []}))
+        self.assertNotIn("advertised_address", peers.build_export(None, "state", snapshot={"sessions": []},
+                                                                  address="-bad"))
+
+    def test_a_differing_valid_address_is_suggested_never_applied(self):
+        lines = [export_line(advertised_address="mini.vpn")]
+        sync = self.make_sync([FakeProc(b"\n".join(lines) + b"\n")])
+        sync.tick()
+        self.settle(sync)
+        self.assertEqual(peers.read_cache(PEER_ID)["suggested_address"], "mini.vpn")
+        self.assertEqual(self.listed()["suggested_address"], "mini.vpn")
+        self.assertEqual(peers.find_peer(peers.load_config(), PEER_ID)["host"], "mini.local")
+        # Dismiss hides that address, not the next one.
+        peers.set_peer(PEER_ID, dismiss_address="mini.vpn")
+        self.assertIsNone(self.listed()["suggested_address"])
+        cache = peers.read_cache(PEER_ID)
+        peers.write_cache(PEER_ID, {**cache, "suggested_address": "mini2.vpn"})
+        self.assertEqual(self.listed()["suggested_address"], "mini2.vpn")
+        # Using it (the app's explicit host edit) ends the suggestion.
+        peers.set_peer(PEER_ID, host="mini2.vpn")
+        self.assertIsNone(self.listed()["suggested_address"])
+        # A cached suggestion differing only in case or a trailing dot is the same host.
+        peers.write_cache(PEER_ID, {**cache, "suggested_address": "MINI2.vpn"})
+        self.assertIsNone(self.listed()["suggested_address"])
+        peers.write_cache(PEER_ID, {**cache, "suggested_address": "Mini.VPN"})
+        self.assertIsNone(self.listed()["suggested_address"])
+        self.assertTrue(peers.same_host("mini.local.", "Mini.local"))
+        self.assertFalse(peers.same_host("mini.local", None))
+
+    def test_an_equal_invalid_or_missing_address_is_not_suggested(self):
+        for line in (export_line(advertised_address="mini.local"),
+                     export_line(advertised_address="Mini.local"),  # case differs only
+                     export_line(advertised_address="-oProxyCommand=x"),
+                     export_line(advertised_address=["a"]),
+                     export_line()):
+            with self.subTest(line=line[-60:]):
+                sync = self.make_sync([])
+                sync.reload(force=True)
+                sync.handle_line(sync.links[PEER_ID], line)
+                self.assertIsNone(peers.read_cache(PEER_ID)["suggested_address"])
+                self.assertIsNone(self.listed()["suggested_address"])
+        self.assertIsNone(peers.validate_line(export_line(advertised_address=7))["advertised_address"])
+
+    def test_dismiss_address_is_validated(self):
+        with self.assertRaises(peers.PeerError):
+            peers.set_peer(PEER_ID, dismiss_address="-x")
+        peers.update_config(lambda d: d["peers"][0].__setitem__("dismissed_address", "-x"))
+        self.assertIsNone(peers.find_peer(peers.load_config(), PEER_ID)["dismissed_address"])
 
 
 if __name__ == "__main__":

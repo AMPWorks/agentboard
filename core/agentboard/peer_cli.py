@@ -34,9 +34,14 @@ def _list_payload(now=None, run=subprocess.run, connect=None):
     now = now or datetime.now(timezone.utc)
     config = peers.load_config()
     machine = peers.ensure_machine(run=run)
+    from . import peer_address
+    # Detected once per listing: the menu, the automatic choice and the code
+    # all read the same candidates.
+    candidates = peer_address.candidates(run)
+    address = peers.advertised_address(config, run, candidates=candidates)
     code, code_error = None, None
     try:
-        code = peers.build_code(run=run)
+        code = peers.build_code(run=run, address=address["address"])
     except peers.PeerError as exc:
         code_error = str(exc)
     _entries, peer_list = peers.remote_entries(config, now)
@@ -53,6 +58,9 @@ def _list_payload(now=None, run=subprocess.run, connect=None):
         "host": code["host"] if code else None,
         "user": code["user"] if code else None,
         "code_error": code_error,
+        "address": address,
+        "address_automatic": peer_address.automatic(candidates),
+        "address_candidates": candidates,
         "remote_login": peers.remote_login_status(connect) if connect else peers.remote_login_status(),
         "share": peers.share_level(config),
         "peers": peer_list,
@@ -68,8 +76,10 @@ def cmd_peers(args):
                 _emit(payload)
             else:
                 m = payload["machine"]
-                print(f"this Mac: {m['name']} ({m['id']}), share {payload['share']}, "
-                      f"Remote Login {payload['remote_login']}")
+                a = payload["address"]
+                print(f"this Mac: {m['name']} ({m['id']}), address {a['address']} "
+                      f"({'set by you' if a['source'] == 'config' else 'automatic'}), "
+                      f"share {payload['share']}, Remote Login {payload['remote_login']}")
                 for p in payload["peers"]:
                     print(f"{p['status']:<12} {p['name']:<24} {p['host']} "
                           f"({p['session_count']} sessions)")
@@ -86,7 +96,8 @@ def cmd_peers(args):
                          "copied_identity": relation == "copied",
                          "error": (peers.COPIED_IDENTITY_ERROR if relation == "copied"
                                    else peers.OWN_CODE_ERROR if relation == "own" else None),
-                         "known": previous is not None, "replaces": replaces or None})
+                         "known": previous is not None, "replaces": replaces or None,
+                         "current_host": previous.get("host") if previous else None})
                 return 0
             allow = None if args.allow_open is None else args.allow_open == "on"
             peer = peers.add_peer(args.code, host=args.host, name=args.name, allow_open=allow)
@@ -104,14 +115,19 @@ def cmd_peers(args):
             return 0
         if action == "set":
             allow = None if args.allow_open is None else args.allow_open == "on"
-            peer = peers.set_peer(args.id, host=args.host, name=args.name, allow_open=allow)
+            peer = peers.set_peer(args.id, host=args.host, name=args.name, allow_open=allow,
+                                  dismiss_address=args.dismiss_address)
             _emit({k: peer[k] for k in ("id", "name", "host", "user", "allow_open")})
             return 0
         if action == "set-self":
+            if args.address is not None or args.auto_address:
+                peers.set_address(None if args.auto_address else args.address)
             if args.share:
                 peers.set_share(args.share)
             machine = peers.set_machine_name(args.name) if args.name else peers.ensure_machine()
-            _emit({"machine": machine, "share": peers.share_level(peers.load_config())})
+            config = peers.load_config()
+            _emit({"machine": machine, "share": peers.share_level(config),
+                   "address": peers.advertised_address(config)})
             return 0
     except peers.PeerError as exc:
         _report(f"{action}_failed", f"error: {exc}")
@@ -297,6 +313,14 @@ def _open_remote_control(peer, session, args, key, run):
     return 0
 
 
+def vnc_url(user, host) -> str:
+    """`vnc://user@host`, with an IPv6 host in brackets and its zone id's
+    `%` encoded as `%25` (RFC 6874)."""
+    if ":" in host:
+        host = "[" + host.replace("%", "%25") + "]"
+    return f"vnc://{user}@{host}"
+
+
 def _screen_share(peer, args, key, run):
     # Best effort: ask the peer to bring the session's tab forward, then
     # open Screen Sharing; a refused or failed focus is ignored.
@@ -308,7 +332,7 @@ def _screen_share(peer, args, key, run):
         focus_rc = None if isinstance(result, cli._TimedOut) else cli._returncode(result)
     except PeerUnavailable:
         focus_rc = None
-    url = f"vnc://{peer['user']}@{peer['host']}"
+    url = vnc_url(peer["user"], peer["host"])
     opened = cli._run_bounded(run, ["open", url])
     rc = None if isinstance(opened, cli._TimedOut) else cli._returncode(opened)
     diag.info("peers", "remote_open", key=key, verb="screen", focus_rc=focus_rc, rc=rc)

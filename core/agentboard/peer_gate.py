@@ -39,6 +39,7 @@ _SESSION_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _HOURS_RE = re.compile(r"\A[0-9]{1,5}(\.[0-9]{1,3})?\Z")
 EXIT_REFUSED = 2
 POLL_SECS = 1.0
+ADDRESS_REFRESH_SECS = 60
 
 
 class Refused(Exception):
@@ -158,16 +159,36 @@ def _stdin_closed(stdin, timeout, sleep=time.sleep, clock=time.monotonic):
 
 
 def serve(peer, out=None, stdin=None, clock=time.monotonic, wait=None, max_lines=None,
-          build=None):
+          build=None, detect=None):
     """Stream exports to `out`: one line now, one whenever the board changes
     (checked every POLL_SECS, so at most one a second), and a heartbeat
     (the full export again) every peers.HEARTBEAT_SECS, which also carries
     time-driven state changes. Returns 0 when the client goes away or the
-    peer is no longer paired (`build` returns None)."""
+    peer is no longer paired (`build` returns None). `detect(config)` returns
+    the advertised address (tests pass a fake)."""
     out = out or sys.stdout
     stdin = stdin if stdin is not None else sys.stdin
     wait = wait or (lambda: _stdin_closed(stdin, POLL_SECS))
     home = db.home_dir()
+    # The advertised address, re-read when config.json's choice changes and
+    # otherwise at most once a minute (automatic mode runs bounded local
+    # detection commands).
+    address_cache = {"at": None, "value": None, "chosen": None}
+    detect = detect or (lambda config: peers.advertised_address(config)["address"])
+
+    def advertised(config):
+        now = clock()
+        chosen = config.get("peer_address")
+        if (address_cache["at"] is None or chosen != address_cache["chosen"]
+                or now - address_cache["at"] >= ADDRESS_REFRESH_SECS):
+            address_cache["chosen"] = chosen
+            try:
+                address_cache["value"] = detect(config)
+            except Exception as exc:  # never let detection end the stream
+                diag.debug("peer", "address_failed", exc=type(exc).__name__)
+                address_cache["value"] = None
+            address_cache["at"] = now
+        return address_cache["value"]
 
     def default_build():
         # Looked up again on every build (a config.json change triggers one):
@@ -181,7 +202,8 @@ def serve(peer, out=None, stdin=None, clock=time.monotonic, wait=None, max_lines
         conn = db.connect()
         try:
             return peers.build_export(conn, peers.share_level(config),
-                                      allow_open=current["allow_open"], home=home)
+                                      allow_open=current["allow_open"], home=home,
+                                      address=advertised(config))
         finally:
             conn.close()
 

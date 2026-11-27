@@ -512,7 +512,9 @@ or attach refused with -1743 exits 4 `needs_automation`. A matched client exits 
   ],
   "machine": {"id": "uuid", "name": "Laptop"},
   "peers": [{"id": "uuid", "name": "Mini", "host": "mini.local", "status": "online|offline|never|expired|incompatible|error",
-             "last_seen_at": "ISO|null", "error": "string|null", "session_count": 3,
+             "last_seen_at": "ISO|null", "error": "string|null",
+             "error_kind": "address|unreachable|host_key|auth|remote_login|refused|null",
+             "suggested_address": "string|null", "session_count": 3,
              "allow_open": true, "clock_skew_secs": 0.4}],
   "usage": [
     {"source": "claude", "label": "Claude", "updated_at": "ISO|null",

@@ -1300,16 +1300,42 @@ the others' boards over ssh, which macOS ships with (Remote Login). Everything i
 3. Do the same the other way round (copy B's code, add it on A). Each direction is its own pull,
    so both Macs need Remote Login and both codes.
 
-A pairing code holds only public data: the Mac's AgentBoard id and name, your login name, a
-suggested host (`<LocalHostName>.local`, which resolves on the same network), AgentBoard's own
-public key, and the Mac's ssh host key. It is not secret, but it must arrive unaltered (a swapped
+A pairing code holds only public data: the Mac's AgentBoard id and name, your login name, the
+address other Macs reach it at, AgentBoard's own public key, and the Mac's ssh host key. It is not secret, but it must arrive unaltered (a swapped
 code would let someone else's key in), which is why both sides show the fingerprint: 96 bits of
 a SHA-256 over every field of the code, so no part of it (host and login name included) can
-change unnoticed. A Mac you
-reach by another name away from home (a VPN, a static DNS name) gets that name in its **Host**
-field. The field takes a name or address that resolves on its own (DNS, mDNS, `/etc/hosts`
-or a VPN's resolver): AgentBoard runs ssh with `-F none`, so a `Host` alias from
-`~/.ssh/config` is not used. Pasting a code whose key is already paired under another id (the
+change unnoticed.
+
+**The address in the code** is the one shown under **This Mac** as "Address others use to reach
+this Mac" (`peer_address` in config.json). Each Mac advertises one address, so the Macs need no
+shared network: a VPN name or address reaches them from anywhere. Left on **Automatic**, it is
+the first of: a name or address reported by a VPN's own CLI when one is installed and connected
+(MagicDNS name, then its IPv4 address), an IPv4 address in 100.64.0.0/10 on a tunnel (`utun`)
+interface, then the `.local` name (`<LocalHostName>.local`, which resolves on the same network
+only), else `localhost`. Detection runs `scutil`, `ifconfig` and the VPN CLI's status command
+(local calls, a second or two each at most) on every listing while Settings is open, even with an
+address chosen (the **Choose…** menu needs the candidates), and, in Automatic mode only, at most
+once a minute in each paired Mac's sync stream; never for the board.
+**Choose…** lists Automatic and every detected address: VPN names and addresses, other tunnel
+addresses, the `.local` name and this network's own IPv4 addresses (**This network only**:
+they change with DHCP, so they are never picked automatically). Typing an address and pressing
+Return sets it; IPv6 addresses are accepted when typed. While Automatic is on, turning a VPN on
+or off changes the code and its fingerprint; choosing an address pins both.
+
+Changing the address does not change Macs already paired: each keeps the address it saved.
+While a paired Mac can still reach this one, it learns the new address from the sync (an
+additive `advertised_address` field in the export, validated on receipt) and shows "<Mac> now
+advertises <address>" with **Use new address** and **Dismiss**. Nothing switches on its own:
+**Use new address** saves it as that Mac's **Address**, the pinned host key still has to match,
+and **Dismiss** hides that address until it changes again (`dismissed_address` in that peer's
+entry). Once the old address no longer works, that Mac can't learn the new one: change it
+under the paired Mac's **Address**, or paste the new code again.
+
+**Add machine…** shows the code's address in an editable **Address** field before you add it,
+and, when that Mac is already paired at another address, both. Each paired Mac's **Address**
+field takes a name or address that resolves on its own (DNS, mDNS, `/etc/hosts` or a VPN's
+resolver): AgentBoard runs ssh with `-F none`, so a `Host` alias from `~/.ssh/config` is not
+used. Pasting a code whose key is already paired under another id (the
 same Mac after its AgentBoard id was lost) replaces that entry, so one key never carries two
 entries with different switches.
 
@@ -1441,7 +1467,7 @@ In the data directory: `machine.json` (this Mac's id and name), `peer-keys/` (Ag
 pair and the generated `known_hosts`, all 0600), `peers/<machine_id>.json` (each peer's last
 update and connection state), `peers.stamp` (rewritten after each update so the app refreshes)
 and `peer-sync.lock`. Outside it: the marked lines in `~/.ssh/authorized_keys`, and the `peers`,
-`peer_share` and `peer_stale_days` keys in config.json.
+`peer_address`, `peer_share` and `peer_stale_days` keys in config.json.
 
 ### Troubleshooting
 
@@ -1451,7 +1477,7 @@ The status under each paired Mac says what went wrong:
 |--------|-----|
 | "Remote Login is off there" | Turn on Remote Login on that Mac. |
 | "this Mac is not authorized there" | Add this Mac's pairing code on that Mac. |
-| "its host name can't be found" / "not reachable" | The `.local` name only works on the same network: edit the host to a name that reaches it (a VPN or DNS name). |
+| "its address can't be found; change the address" / "not reachable at this address" | The row says what to fix and has **Edit address**. A `.local` name only works on the same network: on the other Mac pick an address under **This Mac** that works from anywhere (a VPN or DNS name, or an IP address), then enter it in this Mac's **Address** field for it, or paste that Mac's new pairing code. |
 | "its ssh host key does not match the pinned one" | The other Mac's ssh host key changed (a reinstall): remove it and pair again. |
 | "incompatible AgentBoard version" | Update AgentBoard on both Macs. |
 | Add machine says the code "comes from another Mac that has this Mac's AgentBoard identity" | That Mac's AgentBoard data folder was copied from this one (Migration Assistant, a restored backup), so both have the same machine id and key. On that Mac, quit AgentBoard, move `machine.json` and the `peer-keys` folder from `~/Library/Application Support/AgentBoard` to the Trash, open AgentBoard again and copy its new pairing code. |
@@ -1489,7 +1515,8 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
 | `prune_days` | integer >= 0 | `90` | `prune` deletes sessions idle this many days (never one with an open `needs_you` note, a PR awaiting you, an active snooze or a live process) and dismissed notes older than this; `0` never deletes. |
 | `compact_days` | integer >= 0 | `7` | `prune` deletes tool-use and subagent events, and permission denials, older than this many days; `0` never compacts. |
 | `log_level` | `debug`/`info`/`warn`/`error` | `info` | The diagnostic log's level; `AGENTBOARD_LOG_LEVEL` wins over it. |
-| `peers` | list of objects | none | Your other Macs this board syncs with, written by Settings → Machines when you add a pairing code: `id` (the peer's machine id), `name`, `host` and `user` (where ssh reaches it), `allow_open` (whether it may open sessions on this Mac), `public_key` and `host_key` (its AgentBoard key and pinned ssh host key), `fingerprint` (its pairing code's fingerprint when it was added, shown in Settings). config.json edits hold a lock on the data directory, so two changes at once both land. See [Machines (peer sync)](#machines-peer-sync). |
+| `peers` | list of objects | none | Your other Macs this board syncs with, written by Settings → Machines when you add a pairing code: `id` (the peer's machine id), `name`, `host` and `user` (where ssh reaches it), `allow_open` (whether it may open sessions on this Mac), `public_key` and `host_key` (its AgentBoard key and pinned ssh host key), `fingerprint` (its pairing code's fingerprint when it was added, shown in Settings), `dismissed_address` (an address it advertised that you dismissed). config.json edits hold a lock on the data directory, so two changes at once both land. See [Machines (peer sync)](#machines-peer-sync). |
+| `peer_address` | string | automatic | The address other Macs reach this one at, put in its pairing code and sent to paired Macs: a VPN or DNS name, an IP address or the `.local` name. Absent (or not a valid host name or address), it is chosen automatically; see [Machines (peer sync)](#machines-peer-sync). Set by Settings → Machines or `peers set-self --address`/`--auto-address`. |
 | `peer_share` | `full`/`titles`/`state` | `full` | How much of this Mac's sessions its peers receive: everything, titles without prompt, message, note or cwd text, or state and project name only. |
 | `peer_stale_days` | integer >= 0 | `7` | A peer's last-known sessions stay on the board, dimmed, this many days after it was last reached. |
 
@@ -1538,8 +1565,8 @@ agentboard logs [--since 1h|ISO-8601] [--grep TEXT] [--lines N] [--app]
 agentboard peers list [--json]
 agentboard peers add --code CODE [--host H] [--name N] [--allow-open on|off] [--dry-run]
 agentboard peers remove --id ID | --all [--dry-run]
-agentboard peers set --id ID [--host H] [--name N] [--allow-open on|off]
-agentboard peers set-self [--name N] [--share full|titles|state]
+agentboard peers set --id ID [--host H] [--name N] [--allow-open on|off] [--dismiss-address A]
+agentboard peers set-self [--name N] [--share full|titles|state] [--address A | --auto-address]
 agentboard peer-sync [--once]
 agentboard peer-gate <peer_id>          (forced command; reads SSH_ORIGINAL_COMMAND)
 agentboard peer-open --machine ID --verb attach|resume <tool> <session_id>
@@ -1550,7 +1577,15 @@ commands; Settings → Machines runs `peers` for you. `--machine ID` on `focus`,
 acts on a session of a paired Mac: `focus` opens a new local terminal window running `peer-open`
 (attached to the session's tmux pane on that Mac, or resuming an ended session there), or opens
 Screen Sharing (`vnc://`) for a live session outside tmux; `mark` is one ssh call. All three exit
-6 when the peer is offline or not paired.
+6 when the peer is offline or not paired. `peers list --json` reports this Mac's `address`
+(`{address, source: config|auto, kind}`), `address_automatic` (what Automatic picks now) and
+`address_candidates` (each `{address, kind: vpn|local|lan, label, via}`) beside the legacy `host`
+(the same address), and each peer's `error_kind` (`address`, `unreachable`, `host_key`, `auth`,
+`remote_login`, `refused` or null) and `suggested_address`; `peers add --dry-run` adds
+`current_host` (the address an already-paired Mac is reached at, else null). `peers set-self
+--address A` sets the advertised address (refused unless it is a host name or IP address starting
+with a letter or digit), `--auto-address` goes back to Automatic; `peers set --dismiss-address A`
+stops suggesting an address a paired Mac advertises.
 
 `hook`, `map-codex` and `backfill --session` are what the hooks run; you never need to call them
 yourself. `prune` is the retention sweep described under [Data](#data): `--days` and `--compact-days`
