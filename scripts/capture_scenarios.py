@@ -235,6 +235,7 @@ def scenarios(sample):
     # needing you) and its offline, dimmed rows.
     mini = {"id": "5f1c2a7e-3b4d-4c8e-9a61-2d7b8e0c4f19", "name": "Mac mini"}
     studio = {"id": "0c9d8e7f-6a5b-4c3d-9e2f-1a0b9c8d7e6f", "name": "Studio"}
+    long_name = {"id": "3e8a1f5c-9d2b-4a7e-b6c0-8f1d2e3a4b5c", "name": "Work MacBook Pro 16-inch 2022"}
 
     def remote(session, machine, stale=False, remote_open="tmux"):
         session.update(key="%s@%s" % (session["key"], machine["id"]), machine=dict(machine),
@@ -250,6 +251,12 @@ def scenarios(sample):
         board.session(4, "review"),
         remote(board.session(5, "review", alive=False), studio, stale=True, remote_open="resume"),
         remote(board.session(6, "running"), studio, stale=True),
+        # A long machine name, a model tag and PRButtons.defaultCap PRs on
+        # one repo line: the shape that once widened the list past the popover.
+        remote(board.session(7, "needs_you", tool="claude", links=[
+            {"kind": "pr", "ref": "#%d" % n, "url": "https://github.com/example/app/pull/%d" % n,
+             "state": "OPEN", "title": "Change %d" % n, "branch": "change-%d" % n,
+             "owned": True, "awaits_you": False} for n in (101, 102, 103)]), long_name),
     ])
     machines["machine"] = {"id": "9b3e6f10-7c2a-4d5e-8f91-0a4c3b2d1e6f", "name": "MacBook Pro"}
     machines["peers"] = [
@@ -257,6 +264,8 @@ def scenarios(sample):
              session_count=2, allow_open=True),
         dict(studio, host="studio.local", status="offline", last_seen_at=board.ts(95),
              error="not reachable (asleep, or on another network)", session_count=2, allow_open=True),
+        dict(long_name, host="work-mbp.local", status="online", last_seen_at=board.ts(0), error=None,
+             session_count=1, allow_open=True),
     ]
     for session in machines["sessions"]:
         if session["stale"]:

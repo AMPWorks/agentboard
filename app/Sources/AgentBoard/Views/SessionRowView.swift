@@ -140,18 +140,28 @@ struct SessionRowView: View {
     }
 
     /// A remote session's Mac by name, first on the repo line.
+    /// Whole or not at all: a fixedSize tag next to the model tag and three
+    /// PR buttons made the row wider than the popover (which centred and
+    /// clipped the whole list), and a truncating one could shrink to a bare
+    /// "…" capsule. The chip in the icon column still says which Mac.
     @ViewBuilder
     private var machineTag: some View {
         if let machine = session.machine {
-            Text(machine.name)
-                .font(.caption2)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(.secondary.opacity(0.15), in: Capsule())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .fixedSize()
-                .help(machineHelp)
+            ViewThatFits(in: .horizontal) {
+                Text(machine.name)
+                    .font(.caption2)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(.secondary.opacity(0.15), in: Capsule())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help(machineHelp)
+                Color.clear.frame(width: 0, height: 0)
+            }
+            // Offered space before the wrapping repo text, so the tag only
+            // drops out when the row really has no room for it.
+            .layoutPriority(1)
         }
     }
 

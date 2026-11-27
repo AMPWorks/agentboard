@@ -1009,3 +1009,22 @@ computer icon under the tool badge became a chip with the Mac's initial, two let
 initial and a digit on a collision, derived in machine-id order so a Mac keeps its label; the
 same chip marks the Updates rows, the detail header and Settings → Machines, so two remote Macs
 read apart without the name capsule. The dashboard legend shows the shape key side by side.
+
+## 2026-11-27 03:13:00 UTC — Popover rows never widen the list past the popover
+
+The paired-Mac name tag that #35 put on remote rows' repo line was `fixedSize`. On a row that
+also showed the model tag and the full three PR buttons, the repo line's minimum width came out
+wider than the text column. The list's `VStack` then took that row's width, and the vertical
+`ScrollView` centred the oversized content, so every row lost its state marker and section
+headers on the left and its hover buttons on the right, not just the wide row. The name tag now
+shows whole or not at all (`ViewThatFits` falling back to nothing), because a truncating tag
+could shrink to a bare "…" capsule that read as a glitch. It takes layout priority 1, like the
+model tag, so a long wrapping branch name can't take its room first. Dropping it costs little: the machine
+chip in the icon column still identifies the Mac and carries the full name in its tooltip. The
+capture script's `machines` scenario now has a row with that shape (long machine name, model tag,
+three PRs).
+
+As a safety net, the scroll content is also framed at the popover's width with leading alignment.
+A row whose fixed-size tags still can't fit now runs off the trailing edge on its own, and the
+rest of the list stays aligned. The cost is that such a row hides its trailing tags instead of
+the whole list shifting.
