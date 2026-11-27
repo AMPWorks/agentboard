@@ -40,6 +40,22 @@ final class SnapshotStore: ObservableObject {
     /// until resolved at start.
     @Published private(set) var dataDirectory: String?
 
+    /// One of the owner's own actions finished and its refresh landed: the
+    /// popover's held list (`PopoverHold`) applies that action alone. The
+    /// sequence number makes a repeat of the same action publish again.
+    struct OwnAction: Equatable, Sendable {
+        /// What the held list applies: one session's live value, or only
+        /// the notes a dismissal named.
+        let kind: PopoverHold.OwnAction
+        let sequence: Int
+    }
+
+    @Published private(set) var lastOwnAction: OwnAction?
+
+    private func recordOwnAction(_ kind: PopoverHold.OwnAction) {
+        lastOwnAction = OwnAction(kind: kind, sequence: (lastOwnAction?.sequence ?? 0) + 1)
+    }
+
     /// `<data dir>/agentboard.log`, once the data directory is resolved.
     /// Settings → Advanced → Diagnostics and the gear menu's Open Log reveal it.
     var logFileURL: URL? {
@@ -442,32 +458,33 @@ final class SnapshotStore: ObservableObject {
     func dismissNote(_ note: Note, of session: Session) async {
         // Note ids are per database: never send a remote one to this Mac's CLI.
         guard !session.isRemote else { return }
-        await perform("dismiss note \(note.id)", session) { try await cli.dismissNotes(ids: [note.id]) }
+        await perform("dismiss note \(note.id)", session, ownAction: .notes([.ids([note.id])])) { try await cli.dismissNotes(ids: [note.id]) }
     }
 
     /// Dismisses every open note of one session.
     func dismissNotes(for session: Session) async {
         guard !session.isRemote else { return }
-        await perform("dismiss notes", session) { try await cli.dismissNotes(tool: session.tool, sessionId: session.sessionId) }
+        await perform("dismiss notes", session,
+                      ownAction: .notes([.session(tool: session.tool, sessionId: session.sessionId, kinds: nil)])) { try await cli.dismissNotes(tool: session.tool, sessionId: session.sessionId) }
     }
 
     /// The popover's grouped-row x and its "Clear all"/"Clear matching"
     /// (`UpdatesFeed.clearPlan`): runs each dismissal in order, then
     /// refreshes once.
     func dismiss(_ dismissals: [NoteDismissal], action name: String) async {
-        await runSteps(dismissals, action: name) { try await cli.dismiss($0) }
+        await runSteps(dismissals, action: name, ownAction: .notes(dismissals)) { try await cli.dismiss($0) }
     }
 
     /// Clears one permission denial (a Denials row's or the detail's x).
     func dismissDenial(_ denial: Denial, of session: Session) async {
         guard !session.isRemote else { return }
-        await perform("dismiss denial \(denial.id)", session) { try await cli.dismissDenials(ids: [denial.id]) }
+        await perform("dismiss denial \(denial.id)", session, listed: false) { try await cli.dismissDenials(ids: [denial.id]) }
     }
 
     /// Clears every open denial of one session.
     func dismissDenials(for session: Session) async {
         guard !session.isRemote else { return }
-        await perform("dismiss denials", session) {
+        await perform("dismiss denials", session, listed: false) {
             try await cli.dismissDenials(tool: session.tool, sessionId: session.sessionId)
         }
     }
@@ -476,11 +493,15 @@ final class SnapshotStore: ObservableObject {
     /// (`DenialFeed.clearPlan`): runs each dismissal in order, then
     /// refreshes once.
     func dismissDenials(_ dismissals: [DenialDismissal], action name: String) async {
-        await runSteps(dismissals, action: name) { try await cli.dismiss($0) }
+        await runSteps(dismissals, action: name, ownAction: nil) { try await cli.dismiss($0) }
     }
 
-    private func runSteps<Step: Sendable>(_ steps: [Step], action name: String,
-                                          _ run: (Step) async throws -> Void) async {
+    /// `ownAction` is published once the refresh lands, on both branches
+    /// (earlier steps may have dismissed notes even when a later one
+    /// failed); nil publishes nothing (denials, which the popover does not
+    /// list). Internal for tests.
+    func runSteps<Step: Sendable>(_ steps: [Step], action name: String, ownAction: PopoverHold.OwnAction?,
+                                  _ run: (Step) async throws -> Void) async {
         guard !steps.isEmpty else { return }
         log.notice("action \(name, privacy: .public) steps=\(steps.count, privacy: .public)")
         do {
@@ -494,6 +515,7 @@ final class SnapshotStore: ObservableObject {
             log.error("action \(name, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             await refresh()
         }
+        if let ownAction { recordOwnAction(ownAction) }
     }
 
     /// Asks the dashboard to select a session and, with `note`, to scroll
@@ -517,15 +539,20 @@ final class SnapshotStore: ObservableObject {
 
     /// Runs a user action against the CLI and logs it by name, so `log
     /// show` ties a row click to the CLIRunner invocation that follows it.
-    /// Returns whether the action succeeded.
+    /// Returns whether the action succeeded. On success, after the refresh,
+    /// publishes `ownAction` (nil: the session's own key) unless `listed`
+    /// is false (an action the popover list does not show). Internal for
+    /// tests.
     @discardableResult
-    private func perform(_ name: String, _ session: Session, _ action: () async throws -> Void) async -> Bool {
+    func perform(_ name: String, _ session: Session, ownAction: PopoverHold.OwnAction? = nil, listed: Bool = true,
+                 _ action: () async throws -> Void) async -> Bool {
         let key = session.key
         log.notice("action \(name, privacy: .public) key=\(key, privacy: .public)")
         do {
             try await action()
             lastActionError = nil
             await refresh()
+            if listed { recordOwnAction(ownAction ?? .session(key: key)) }
             return true
         } catch {
             recordActionError(Self.actionTitle(name), error)

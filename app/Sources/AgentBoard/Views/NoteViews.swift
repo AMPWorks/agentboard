@@ -110,6 +110,9 @@ struct UpdatesSectionView: View {
     /// Shown instead of rows when the query keeps none.
     var emptyText: String = "No open updates"
     var onHide: (() -> Void)? = nil
+    /// The live session a row's context menu acts on (`PopoverHold.resolve`),
+    /// so a held row never acts on a stale value; unset, the row's own.
+    var resolveLive: ((Session) -> Session?)? = nil
 
     @State private var expanded = false
 
@@ -156,7 +159,7 @@ struct UpdatesSectionView: View {
                     .padding(.vertical, 6)
             }
             ForEach(compact.shown) { row in
-                UpdateRowView(row: row, store: store, fontSize: fontSize)
+                UpdateRowView(row: row, store: store, fontSize: fontSize, resolveLive: resolveLive)
                     .padding(.horizontal, 4)
             }
             if UpdatesFeed.needsToggle(rows, limit: compactLimit) {
@@ -191,6 +194,7 @@ struct UpdateRowView: View {
     let row: UpdatesFeed.Row
     @ObservedObject var store: SnapshotStore
     var fontSize: UpdatesFontSize = .standard
+    var resolveLive: ((Session) -> Session?)? = nil
 
     @State private var expanded = false
     @State private var isHovering = false
@@ -305,7 +309,10 @@ struct UpdateRowView: View {
         .onHover { isHovering = $0 }
         .onTapGesture { openInDashboard(row.note) }
         .help("Open in the dashboard")
-        .contextMenu { SessionContextMenu(session: row.session, store: store) }
+        .contextMenu {
+            let live: Session? = resolveLive.map { $0(row.session) } ?? row.session
+            SessionContextMenu(session: live ?? row.session, store: store, noLongerOnBoard: live == nil)
+        }
     }
 
     private func dismiss() {

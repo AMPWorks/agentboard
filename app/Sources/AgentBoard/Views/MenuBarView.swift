@@ -56,10 +56,33 @@ struct MenuBarView: View {
     /// the list can fade its bottom while more is below.
     @State private var contentMaxY: CGFloat = 0
 
+    // The held list (PopoverHold): while the pointer is over the open
+    // popover, or one of its menus is open, everything above the footer is
+    // built from the sessions shown when the hold began, so no row moves
+    // under the pointer. The menu bar icon and notifications read the live
+    // snapshot and are unaffected.
+    @State private var hold = PopoverHold()
+    @State private var popoverVisible = false
+    @State private var pointerInside = false
+    @State private var menuOpen = false
+    /// The newest `store.lastOwnAction` sequence the hold has taken in.
+    @State private var appliedOwnAction = 0
+
+    /// The sessions the list shows: held, else the live snapshot's.
+    private var shownSessions: [Session] {
+        hold.displayed(live: store.snapshot.sessions, query: store.popoverQuery)
+    }
+
+    /// The live session with the same key: what a click on a row acts on.
+    private var resolveLive: (Session) -> Session? {
+        let store = store
+        return { held in PopoverHold.resolve(held, live: store.snapshot.sessions) }
+    }
+
     /// The notice counts the needs_you notes the query hides whether the
     /// Updates panel is open or closed: nothing else lists them.
     private var sections: PopoverSections {
-        PopoverSections.make(from: store.snapshot.sessions, query: SessionSearch(store.popoverQuery))
+        PopoverSections.make(from: shownSessions, query: SessionSearch(store.popoverQuery))
     }
 
     private var updatesMode: UpdatesPanelMode { UpdatesPanelMode.parse(updatesModeRaw) }
@@ -71,14 +94,16 @@ struct MenuBarView: View {
     }
 
     var body: some View {
-        let sections = sections
-        let sessions = store.snapshot.sessions
+        let sessions = shownSessions
+        let sections = PopoverSections.make(from: sessions, query: SessionSearch(store.popoverQuery))
         let query = SessionSearch(store.popoverQuery)
         let mode = updatesMode
         let shown = updatesShown
         // The feed sorts every open note, so it is built once, and only
         // while the panel can show it (`panelVisible` is false when hidden).
-        let updates = shown ? UpdatesFeed.rows(from: sessions, query: query) : []
+        // While held, a row's x never covers a note the hold has not shown.
+        let updates = shown
+            ? hold.scoped(UpdatesFeed.rows(from: sessions, query: query), live: store.snapshot.sessions) : []
         let feed = UpdatesState(
             hasUpdates: PopoverUpdatesSettings.hasOpenUpdates(sessions),
             matching: UpdatesFeed.total(from: sessions, query: query),
@@ -116,12 +141,15 @@ struct MenuBarView: View {
                                 rows: updates,
                                 listed: updates.reduce(0) { $0 + $1.notes.count },
                                 total: feed.matching,
-                                clearPlan: UpdatesFeed.clearPlan(from: sessions, query: query),
+                                clearPlan: hold.clearPlan(UpdatesFeed.clearPlan(from: sessions, query: query),
+                                                          rows: updates, live: store.snapshot.sessions,
+                                                          query: store.popoverQuery),
                                 store: store,
                                 fontSize: updatesFont,
                                 compactLimit: PopoverUpdatesSettings.compactLimit(updatesLimitRaw),
                                 emptyText: "No updates match “\(store.popoverQuery)”",
-                                onHide: { setUpdatesShown(false) }
+                                onHide: { setUpdatesShown(false) },
+                                resolveLive: resolveLive
                             )
                             .reportsContentBottom()
                         }
@@ -191,12 +219,22 @@ struct MenuBarView: View {
             keyMonitor.window = window
             placer.window = window
             readScreen()
+            recheckPointer()
         })
+        // Hold the list while the pointer is over the popover.
+        .onHover { inside in
+            pointerInside = inside
+            syncHold()
+        }
         .onAppear {
             placer.onAnchorChange = { readScreen() }
             placer.opened()
             readScreen()
             updatesOpenThisVisit = false
+            popoverVisible = true
+            // An action from before this open is already in the live list.
+            appliedOwnAction = store.lastOwnAction?.sequence ?? 0
+            recheckPointer()
             store.setVisible(true)
             // Every popover open counts as seeing the board.
             attention.popoverDidAppear()
@@ -223,6 +261,11 @@ struct MenuBarView: View {
             dragSize = nil
             dragOrigin = nil
             focusOnNextKey = false
+            // The next open starts live.
+            popoverVisible = false
+            pointerInside = false
+            menuOpen = false
+            hold = PopoverHold()
             store.setVisible(false)
             attention.popoverDidDisappear()
             keyMonitor.stop()
@@ -230,11 +273,37 @@ struct MenuBarView: View {
         // The panel may not be key yet when `onAppear` runs, so focus again
         // when the popover's window first becomes key after each open.
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+            if let window = keyMonitor.window, note.object as? NSWindow === window {
+                recheckPointer()
+            }
             if focusOnNextKey, let window = keyMonitor.window, note.object as? NSWindow === window {
                 focusOnNextKey = false
                 focusSearchField()
             }
         }
+        // A context menu or the gear menu is open: hold while it tracks.
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            guard popoverVisible else { return }
+            menuOpen = true
+            syncHold()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            guard menuOpen else { return }
+            menuOpen = false
+            recheckPointer()
+        }
+        // Recheck the pointer first: `onHover` can miss a popover that
+        // opened under a still pointer, and the hold must begin before this
+        // snapshot is shown in place of the one the owner is reading.
+        .onChange(of: store.snapshot) { old, _ in
+            recheckPointer(previous: old.sessions)
+            // `perform` publishes the snapshot and its own action in one
+            // turn, in either handler order: take the action in here too,
+            // after a hold that began on this snapshot is in place.
+            applyOwnAction(deferWhileLive: false)
+        }
+        .onChange(of: store.popoverQuery) { _, _ in syncHold() }
+        .onChange(of: store.lastOwnAction) { _, _ in applyOwnAction(deferWhileLive: true) }
         .onChange(of: sections.expandsUnconcluded) { _, expands in
             if expands { unconcludedExpandedWhileFiltering = true }
         }
@@ -253,13 +322,16 @@ struct MenuBarView: View {
             title: UpdatesFeed.partTitle(above: above, otherPartHasRows: otherHasRows),
             listed: counts.listed,
             total: counts.total,
-            clearPlan: UpdatesFeed.partClearPlan(rows, whole: UpdatesFeed.clearPlan(from: sessions, query: query),
-                                                 otherPartHasRows: otherHasRows),
+            clearPlan: hold.clearPlan(
+                UpdatesFeed.partClearPlan(rows, whole: UpdatesFeed.clearPlan(from: sessions, query: query),
+                                          otherPartHasRows: otherHasRows),
+                rows: rows, live: store.snapshot.sessions, query: store.popoverQuery),
             store: store,
             fontSize: updatesFont,
             compactLimit: above ? Int.max : PopoverUpdatesSettings.compactLimit(updatesLimitRaw),
             emptyText: "No updates match “\(store.popoverQuery)”",
-            onHide: nil
+            onHide: nil,
+            resolveLive: resolveLive
         )
     }
 
@@ -422,6 +494,35 @@ struct MenuBarView: View {
         /// while there are any (`PopoverUpdatesSettings.buttonTint`).
         let needsYou: Int
         let shown: Bool
+    }
+
+    /// Reads the pointer against the popover window's frame, then updates
+    /// the hold to match.
+    /// `previous`: on a snapshot change, the sessions the list showed
+    /// until now, so a hold that begins here keeps them (the new snapshot
+    /// is already in `store.snapshot`) and counts the change as pending.
+    private func recheckPointer(previous: [Session]? = nil) {
+        if popoverVisible {
+            pointerInside = PopoverHold.pointerInside(mouse: NSEvent.mouseLocation,
+                                                      windowFrame: keyMonitor.window?.frame)
+        }
+        syncHold(previous: previous)
+    }
+
+    /// Applies a `store.lastOwnAction` the hold has not taken in yet.
+    /// `deferWhileLive`: with no hold, leave it for the snapshot handler of
+    /// the same update, whose hold may begin on the list before the action.
+    private func applyOwnAction(deferWhileLive: Bool) {
+        guard let action = store.lastOwnAction, action.sequence > appliedOwnAction else { return }
+        if !hold.isHolding && deferWhileLive { return }
+        appliedOwnAction = action.sequence
+        hold.apply(action.kind, live: store.snapshot.sessions)
+    }
+
+    private func syncHold(previous: [Session]? = nil) {
+        let holding = PopoverHold.shouldHold(popoverVisible: popoverVisible, pointerInside: pointerInside,
+                                             menuOpen: menuOpen)
+        hold.update(live: store.snapshot.sessions, query: store.popoverQuery, holding: holding, previous: previous)
     }
 
     private func setUpdatesShown(_ value: Bool) {
@@ -627,11 +728,18 @@ struct MenuBarView: View {
                 .padding(.top, 4)
                 .help(Self.sectionHelp(section.kind))
             ForEach(section.sessions) { session in
-                SessionRowView(session: session, store: store)
-                    .padding(.horizontal, 4)
+                row(session)
             }
         }
         .id(section.kind)
+    }
+
+    /// A popover row: its click and menus act on the live session with
+    /// the same key; a held row whose session changed is dimmed.
+    private func row(_ session: Session) -> some View {
+        SessionRowView(session: session, store: store, resolveLive: resolveLive,
+                       holdStatus: hold.status(of: session, live: store.snapshot.sessions))
+            .padding(.horizontal, 4)
     }
 
     static func sectionHelp(_ kind: PopoverSections.Kind) -> String {
@@ -658,8 +766,7 @@ struct MenuBarView: View {
         )
         return DisclosureGroup(isExpanded: expanded) {
             ForEach(section.sessions) { session in
-                SessionRowView(session: session, store: store)
-                    .padding(.horizontal, 4)
+                row(session)
             }
         } label: {
             // Auto-expand fits the header, so the section is never out of
@@ -685,6 +792,14 @@ struct MenuBarView: View {
                     DashboardWindowController.show()
                 }
                 Spacer()
+                // While the list is held: what Update list would change,
+                // in this row so the list above never moves.
+                let pending = hold.pending(live: store.snapshot.sessions, query: store.popoverQuery)
+                if let label = pending.label {
+                    PendingChangesButton(label: label, needsYou: pending.needsYou > 0) {
+                        hold.release(live: store.snapshot.sessions)
+                    }
+                }
                 FooterButton(title: "Refresh", help: "Reload every session's state now") {
                     Task { await store.refresh() }
                 }
@@ -768,6 +883,44 @@ private struct FooterButton: View {
             hovering = false
         }
         .help(help)
+    }
+}
+
+/// The footer's "3 changes · Update list" while the list is held: red
+/// wording when a pending change is a session or update that needs the
+/// owner. One line, so the footer keeps its height.
+private struct PendingChangesButton: View {
+    let label: String
+    let needsYou: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    static let help = "The list is held while the pointer is over it so rows don't move; click to show the newest sessions"
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .lineLimit(1)
+                .truncationMode(.head)
+                .foregroundStyle(needsYou ? AnyShapeStyle(SessionColor.needsYouText) : AnyShapeStyle(Color.accentColor))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(.quaternary.opacity(hovering ? 0.9 : 0)))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in
+            guard inside != hovering else { return }
+            hovering = inside
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .onDisappear {
+            if hovering { NSCursor.pop() }
+            hovering = false
+        }
+        .help(Self.help)
+        .accessibilityLabel(label)
+        .accessibilityHint("Shows the newest sessions in the list")
     }
 }
 

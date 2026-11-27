@@ -1161,3 +1161,33 @@ verb to compare a before/after pair. Over white, the dark popover's mean luminan
 0.28 on main to about 0.04. On macOS 27 status items moved into the system's MenuBarAgent process,
 which had broken the harness's icon lookup, so it now looks there by process name, and the click
 hovers before pressing so a menu bar that hides itself is shown first.
+
+## 2026-11-27 08:14:39 UTC — The popover list holds still while the pointer is over it
+
+The popover's list was rebuilt from every snapshot publish (the 3 s poll while it is open, the
+directory watcher, each action's refresh), and each section re-sorts by `updated_at`, so a row
+could slide away just before a click and the owner opened the wrong session. Clicks were never
+index-bound (each row closes over its own `Session`), so the misclick was the row moving, and the
+fix stops the movement: while the popover is open and the pointer is inside it or one of its menus
+is open, the list is built from the sessions it showed when the hold began (`PopoverHold`, pure and
+unit-tested as snapshot in, displayed list out). Everything above the footer is held, including
+row content and the Updates panel, because any change in height there shifts every row below.
+
+What changed meanwhile is marked in place rather than applied: a row whose session moved or left
+is dimmed with a tooltip saying what it is now, and the footer's button row (chosen because
+anything above the list would push it down) offers `N changes · Update list`, red when something
+newly needs the owner. The pointer leaving, the popover closing, typing in the filter, or that
+control show the newest list. A click resolves the session by key in the newest snapshot, so it
+acts on the session the owner saw, as it is now; a session that left opens the dashboard and its
+state-changing actions are disabled. The owner's own actions (mark done, snooze, dismissals) apply
+to their row alone through a store event, so nothing unrelated rides along.
+
+The menu bar icon, notifications, sounds and the dashboard still read the live snapshot; only the
+open list is held. No Settings toggle: the hold only acts under the pointer and Update list is one
+click. Trade-off: a held list can be one pointer visit stale, which the footer says.
+
+Review rounds: the own-action event carries what was done (one session, or the note dismissals),
+so one update's x drops only that note and a mark done leaves other sessions' notes; a hold begun
+on a snapshot change keeps the list shown before it; and while new updates are pending, Clear all
+becomes "Clear these" and a grouped row's x narrows to its listed notes, so nothing is dismissed
+unseen.
