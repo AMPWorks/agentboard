@@ -1390,13 +1390,53 @@ detail view and the context menu) depends on the session:
   window and pane and attaches to it (a shared attach: whoever is attached there stays).
 - **Ended**: the same, resuming the session on the other Mac (`claude --resume` / `codex
   resume` in its folder). A live session is never resumed, since that would fork it.
-- **Live, served by Claude Code Remote Control** (and shared at **Everything**): the session's
-  Remote Control link (`https://claude.ai/code/session_…`, read from the other Mac's
-  `~/.claude/sessions` registry, `bridgeSessionId`) opens in the browser here. That goes through
-  claude.ai with your account, like Remote Control itself; nothing of AgentBoard's does.
+- **Live, served by Claude Code Remote Control** (and shared at **Everything**), in this order:
+  1. a Screen Sharing connection with that Mac is open (see below), in either direction: the
+     other Mac brings the session forward and nothing else opens. When this Mac is the viewer,
+     Screen Sharing comes to the front first; when that Mac is viewing this one (AgentBoard used
+     from inside a Screen Sharing window from it), its own screen shows the session. If that
+     Mac can't bring it forward, the next step runs instead;
+  2. the Claude desktop app is installed: the session opens there, through
+     `claude://claude.ai/code/session_…` (the app does not claim `https://claude.ai` links, so
+     the https URL would only reach the browser). The app drops the link when it is signed out
+     or its deep links are turned off by policy;
+  3. otherwise the session's Remote Control link (`https://claude.ai/code/session_…`) opens in
+     the browser, as before.
+
+  The link is read from the other Mac's `~/.claude/sessions` registry (`bridgeSessionId`); a
+  session without a valid one is treated like the next case. Opening it goes through claude.ai
+  with your account, like Remote Control itself; nothing of AgentBoard's does. The menu item is
+  **Open in Claude App** when the app is installed, else **Open in Remote Control**; the context
+  menu adds **Open Remote Control in Browser** and **Open Screen Sharing to …** for the
+  alternatives.
 - **Live, anywhere else** (a plain terminal tab, the Claude desktop app): AgentBoard asks the
   other Mac to bring the session's tab forward (best effort; macOS may refuse AppleScript from
-  an ssh login) and opens Screen Sharing (`vnc://`) to it. Screen Sharing must be on there.
+  an ssh login). When that worked and a Screen Sharing connection with that Mac is already
+  open, Screen Sharing comes forward (this Mac is viewing it) or nothing opens (that Mac is
+  viewing this one, for example AgentBoard used from inside a Screen Sharing window); otherwise
+  Screen Sharing (`vnc://`) opens to it as before. Screen Sharing must be on there. The context
+  menu's **Open Screen Sharing to …** always opens it (`focus --via screen`).
+
+**Detecting an open Screen Sharing connection** happens only on a click, never in `snapshot`:
+one local `nettop` call (about 0.1 s, bounded at 2 s, no admin rights; it sees the system's
+Screen Sharing server too) looks for an Established TCP connection with port 5900 on one end
+and, on the other, an address the paired host resolves to (`dscacheutil`, bounded at 2 s; no
+lookup when the host is an IP address, such as a VPN address). Remote port 5900 means this Mac
+is viewing that Mac; local port 5900 means that Mac is viewing this one. It reads as "no
+connection", so the click behaves as before, when Screen Sharing was opened through a different
+address than the paired host resolves to (a `.local` name while paired by VPN address, say),
+for relayed or tunnelled VNC, on a port other than 5900, or when the name doesn't resolve in
+time. A third Mac viewing this one is ignored. No process name is matched, so another VNC
+client's connection to that Mac (or another logged-in user's Screen Sharing) also counts as
+this Mac viewing it; Screen Sharing is then brought forward with no window to show. Any open
+connection with that Mac counts, even an idle window left open on it: then a click on a Remote
+Control row brings the session forward over there, and **Open Remote Control in Browser** opens
+it here.
+
+When this Mac is the viewer, Screen Sharing is brought forward before the ssh call to the other
+Mac, so the switch shows at once and the session comes forward inside it a moment later. The
+ssh call is most of a click's time: a new connection each time (connection sharing is off on
+purpose), so over a VPN with a round trip around 0.1 s the handshake alone can take 2 s.
 
 Each click on a tmux row opens another window. **Mark Done**, **Reopen** and **Snooze** work on
 remote rows; dismissing a remote session's updates or denials happens on its own Mac.
@@ -1557,7 +1597,7 @@ agentboard refresh-links
 agentboard install-hooks [--claude] [--codex] [--dry-run]
 agentboard uninstall-hooks [--claude] [--codex] [--dry-run]
 agentboard enable-codex-hooks [--dry-run]
-agentboard focus <tool> <session_id> [--machine ID]
+agentboard focus <tool> <session_id> [--machine ID [--via screen|browser]]
 agentboard resume <tool> <session_id> [--print] [--machine ID]
 agentboard map-codex --session ID --cwd DIR [--at TIME]
 agentboard prune [--days N] [--compact-days N] [--dry-run] [--auto] [--vacuum]
@@ -1575,8 +1615,13 @@ agentboard peer-open --machine ID --verb attach|resume <tool> <session_id>
 `peers`, `peer-sync`, `peer-gate` and `peer-open` are the [Machines (peer sync)](#machines-peer-sync)
 commands; Settings → Machines runs `peers` for you. `--machine ID` on `focus`, `resume` and `mark`
 acts on a session of a paired Mac: `focus` opens a new local terminal window running `peer-open`
-(attached to the session's tmux pane on that Mac, or resuming an ended session there), or opens
-Screen Sharing (`vnc://`) for a live session outside tmux; `mark` is one ssh call. All three exit
+(attached to the session's tmux pane on that Mac, or resuming an ended session there), and for a
+live session outside tmux follows the order under [Opening a remote session](#opening-a-remote-session):
+an already open Screen Sharing connection with that Mac, then the Claude desktop app
+(`claude://claude.ai/code/session_…`) for a Remote Control session, then the browser, then Screen
+Sharing (`vnc://`). `--via screen` always opens Screen Sharing (`vnc://`) and `--via browser` the
+Remote Control link in the browser; `--via` is ignored for tmux and ended sessions and without
+`--machine`. `mark` is one ssh call. All three exit
 6 when the peer is offline or not paired. `peers list --json` reports this Mac's `address`
 (`{address, source: config|auto, kind}`), `address_automatic` (what Automatic picks now) and
 `address_candidates` (each `{address, kind: vpn|local|lan, label, via}`) beside the legacy `host`

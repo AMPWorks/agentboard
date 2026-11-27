@@ -2,7 +2,9 @@
 
 These are the only commands besides `refresh-links` and `peer-sync` that may
 touch the network: each remote action is one bounded ssh call (or, for
-`peer-open`, an interactive ssh exec'd inside a terminal window).
+`peer-open`, an interactive ssh exec'd inside a terminal window). A click on
+a Screen Sharing or Remote Control row may also run screen_link's local,
+bounded connection check.
 """
 
 import json
@@ -272,9 +274,12 @@ def remote_focus(args, run=subprocess.run, now=None):
         _report("remote_focus", f"{peer['name']} does not allow opening its sessions from this Mac",
                 key=key, outcome="not_allowed")
         return 1
-    if how == "remote-control":
-        return _open_remote_control(peer, session, args, key, run)
+    via = getattr(args, "via", None)
     verb = {"tmux": "attach", "resume": "resume"}.get(how)
+    if verb is None and via == "screen":
+        return _screen_share(peer, args, key, run, force=True)
+    if how == "remote-control":
+        return _open_remote_control(peer, session, args, key, run, via=via)
     if verb is None:
         return _screen_share(peer, args, key, run)
     try:
@@ -294,19 +299,42 @@ def remote_focus(args, run=subprocess.run, now=None):
     return 0
 
 
-def _open_remote_control(peer, session, args, key, run):
-    """A session served by Claude Code Remote Control: open its URL in the
-    browser here (validated on receipt, peers._REMOTE_CONTROL_URL_RE)."""
-    from . import cli
+def _open_remote_control(peer, session, args, key, run, via=None):
+    """A session served by Claude Code Remote Control (its URL validated on
+    receipt, peers._REMOTE_CONTROL_URL_RE). Unless `via == "browser"`: a live
+    Screen Sharing link with the peer, in either direction, wins: the peer
+    brings the session forward and nothing opens here (Screen Sharing is
+    brought forward when this Mac is the viewer). Else, or when the peer's
+    focus fails, the Claude desktop app opens it; else the browser."""
+    from . import cli, desktop, screen_link
     url = session.get("remote_control_url")
     if not isinstance(url, str) or not peers._REMOTE_CONTROL_URL_RE.match(url):
         return _screen_share(peer, args, key, run)
     if getattr(args, "print", False):
         print(url)
         return 0
+    if via != "browser":
+        link = screen_link.link_to(peer, run)
+        focus_rc = None
+        if link is not None:
+            # Screen Sharing comes forward first, so the switch shows at once;
+            # the ssh round trip to the peer is most of a click's time.
+            opened = _activate_screen_sharing(run) if link == "outgoing" else "none"
+            focus_rc = _focus_on_peer(peer, args, run)
+            if focus_rc == 0:
+                diag.info("peers", "remote_open", key=key, verb="remote-control", via="screen",
+                          link=link, focus_rc=focus_rc, opened=opened)
+                return 0
+        result = cli._run_bounded(run, ["open", "-b", desktop.DESKTOP_BUNDLE_ID,
+                                        desktop.remote_session_link(url)])
+        rc = None if isinstance(result, cli._TimedOut) else cli._returncode(result)
+        if rc == 0:
+            diag.info("peers", "remote_open", key=key, verb="remote-control", via="desktop",
+                      link=link, focus_rc=focus_rc, rc=rc)
+            return 0
     opened = cli._run_bounded(run, ["open", url])
     rc = None if isinstance(opened, cli._TimedOut) else cli._returncode(opened)
-    diag.info("peers", "remote_open", key=key, verb="remote-control", rc=rc)
+    diag.info("peers", "remote_open", key=key, verb="remote-control", via="browser", rc=rc)
     if rc != 0:
         _report("remote_open", "couldn't open the Remote Control link", key=key)
         return 1
@@ -321,21 +349,55 @@ def vnc_url(user, host) -> str:
     return f"vnc://{user}@{host}"
 
 
-def _screen_share(peer, args, key, run):
-    # Best effort: ask the peer to bring the session's tab forward, then
-    # open Screen Sharing; a refused or failed focus is ignored.
+SCREEN_SHARING_BUNDLE_ID = "com.apple.ScreenSharing"
+
+
+def _focus_on_peer(peer, args, run):
+    """Ask the peer to bring the session's tab forward (one bounded ssh
+    call): its exit code, or None when it timed out or couldn't run."""
     from . import cli
     try:
         result = cli._run_bounded(
             run, ssh_argv(peer, f"focus {args.tool} {args.session_id}"), timeout=REMOTE_CALL_TIMEOUT_SECS,
         )
-        focus_rc = None if isinstance(result, cli._TimedOut) else cli._returncode(result)
     except PeerUnavailable:
-        focus_rc = None
+        return None
+    return None if isinstance(result, cli._TimedOut) else cli._returncode(result)
+
+
+def _activate_screen_sharing(run):
+    """Bring the already open Screen Sharing app forward (no new connection).
+    A failure is logged, not an error: the session is already in front on
+    the peer. Returns the `opened` value to log (`activate`/`activate_failed`)."""
+    from . import cli
+    result = cli._run_bounded(run, ["open", "-b", SCREEN_SHARING_BUNDLE_ID])
+    rc = None if isinstance(result, cli._TimedOut) else cli._returncode(result)
+    if rc != 0:
+        diag.info("peers", "screen_activate_failed", rc=rc)
+        return "activate_failed"
+    return "activate"
+
+
+def _screen_share(peer, args, key, run, force=False):
+    # Best effort: ask the peer to bring the session's tab forward. When that
+    # worked and a Screen Sharing connection with the peer is already live,
+    # nothing new opens (`force`, the explicit menu item, always opens it);
+    # otherwise Screen Sharing opens as before. The link is checked first
+    # (one local nettop call) so an open Screen Sharing window comes forward
+    # before the ssh round trip, not after it.
+    from . import cli, screen_link
+    link = None if force else screen_link.link_to(peer, run)
+    opened = _activate_screen_sharing(run) if link == "outgoing" else "none"
+    focus_rc = _focus_on_peer(peer, args, run)
+    if link is not None and focus_rc == 0:
+        diag.info("peers", "remote_open", key=key, verb="screen", focus_rc=focus_rc,
+                  link=link, opened=opened)
+        return 0
     url = vnc_url(peer["user"], peer["host"])
     opened = cli._run_bounded(run, ["open", url])
     rc = None if isinstance(opened, cli._TimedOut) else cli._returncode(opened)
-    diag.info("peers", "remote_open", key=key, verb="screen", focus_rc=focus_rc, rc=rc)
+    diag.info("peers", "remote_open", key=key, verb="screen", focus_rc=focus_rc, rc=rc,
+              link=link, opened="vnc")
     if rc != 0:
         _report("remote_open", f"couldn't open Screen Sharing to {peer['name']}", key=key)
         return 1

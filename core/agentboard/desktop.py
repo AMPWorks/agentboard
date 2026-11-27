@@ -13,8 +13,14 @@ whose `sessionId` (`local_<id>`) is the app's own id. The app's
 `claude://code/continue?session=local_<id>` link opens that session. Both
 are internal to the desktop app and may change between versions, so every
 use here is read-only, bounded, and falls back to plain app activation
-(`open -b com.anthropic.claudefordesktop`). Nothing here runs from
-`snapshot` or the hook: only `focus`, at click time.
+(`open -b com.anthropic.claudefordesktop`).
+
+The second link shape is for a session on another Mac served by Claude Code
+Remote Control: its `https://claude.ai/code/session_<id>` URL with the scheme
+swapped, `claude://claude.ai/code/session_<id>`, which the app's URL handler
+resolves to that session (the app does not claim https links, so the https
+URL would only open the browser). Nothing here runs from `snapshot` or the
+hook: only `focus`, at click time.
 """
 
 import json
@@ -53,6 +59,15 @@ def store_dir(home: Path | None = None) -> Path:
 
 def deep_link(local_session_id: str) -> str:
     return DEEP_LINK_TEMPLATE.format(quote(local_session_id, safe=""))
+
+
+def remote_session_link(url):
+    """`claude://claude.ai/code/session_<id>` for a valid Remote Control URL
+    (peers._REMOTE_CONTROL_URL_RE), else None."""
+    from . import peers
+    if not isinstance(url, str) or not peers._REMOTE_CONTROL_URL_RE.match(url):
+        return None
+    return "claude://" + url[len("https://"):]
 
 
 def _session_files(root: Path):

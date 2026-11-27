@@ -13,13 +13,18 @@ enum SessionActionHelp {
     static let desktopLabel = "Claude desktop app session"
 
     /// The Focus tooltip: a desktop app session opens in the app, a tmux
-    /// session is focused through tmux.
-    static func focusHelp(_ session: Session) -> String {
+    /// session is focused through tmux. For another Mac's session it says
+    /// what a click does in the CLI's order (`focus --machine`): an open
+    /// Screen Sharing connection first, then the desktop app or browser.
+    static func focusHelp(_ session: Session,
+                          desktopAppInstalled: Bool = ClaudeDesktopApp.isInstalled) -> String {
         if let machine = session.machine {
             switch session.remoteOpen {
             case "tmux": return "Open a new terminal window attached over ssh to this session's tmux pane on \(machine.name)"
-            case "remote-control": return "Open this session through Claude Code Remote Control"
-            default: return "Bring this session forward on \(machine.name) and open Screen Sharing to it"
+            case "remote-control":
+                let target = desktopAppInstalled ? "the Claude desktop app" : "the browser"
+                return "Brings this session forward on \(machine.name) when a Screen Sharing connection with it is open; otherwise opens this session's Remote Control link in \(target)"
+            default: return "Bring this session forward on \(machine.name); opens Screen Sharing to it unless a connection with \(machine.name) is already open"
             }
         }
         if session.desktop { return focusDesktop }
@@ -27,16 +32,37 @@ enum SessionActionHelp {
     }
 
     /// The Focus action's title: a desktop app session has no terminal.
-    static func focusTitle(_ session: Session) -> String {
+    static func focusTitle(_ session: Session,
+                           desktopAppInstalled: Bool = ClaudeDesktopApp.isInstalled) -> String {
         if let machine = session.machine {
             switch session.remoteOpen {
             case "tmux": return "Attach on \(machine.name)"
-            case "remote-control": return "Open in Remote Control"
+            case "remote-control": return desktopAppInstalled ? "Open in Claude App" : "Open in Remote Control"
             default: return "Screen Share to \(machine.name)"
             }
         }
         return session.desktop ? "Open in Claude App" : "Focus"
     }
+
+    /// The explicit Screen Sharing item on a live remote row outside tmux
+    /// (`focus --via screen`), and the browser item on a Remote Control row
+    /// (`focus --via browser`); nil when the row has none.
+    static func screenShareTitle(_ session: Session) -> String? {
+        guard let machine = session.machine, session.isLiveRemote,
+              session.remoteOpen == "screen" || session.remoteOpen == "remote-control" else { return nil }
+        return "Open Screen Sharing to \(machine.name)"
+    }
+
+    static func screenShareHelp(_ session: Session) -> String {
+        "Open Screen Sharing to \(session.machine?.name ?? "its Mac") even when a connection is already open, after asking it to bring this session forward"
+    }
+
+    static func browserTitle(_ session: Session) -> String? {
+        guard session.isLiveRemote, session.remoteOpen == "remote-control" else { return nil }
+        return "Open Remote Control in Browser"
+    }
+
+    static let browserHelp = "Open this session's Remote Control link in the browser, even when a Screen Sharing connection is open or the Claude desktop app is installed"
 
     static func resumeTitle(_ session: Session) -> String {
         session.machine.map { "Resume on \($0.name)" } ?? "Resume"
@@ -88,6 +114,14 @@ struct SessionContextMenu: View {
             if session.isFocusable {
                 Button(SessionActionHelp.focusTitle(session)) { Task { await store.focusOrShowDashboard(session) } }
                     .help(SessionActionHelp.focusHelp(session))
+                if let title = SessionActionHelp.screenShareTitle(session) {
+                    Button(title) { Task { await store.focusOrShowDashboard(session, via: "screen") } }
+                        .help(SessionActionHelp.screenShareHelp(session))
+                }
+                if let title = SessionActionHelp.browserTitle(session) {
+                    Button(title) { Task { await store.focusOrShowDashboard(session, via: "browser") } }
+                        .help(SessionActionHelp.browserHelp)
+                }
             }
             if session.resumeAvailable {
                 Button(SessionActionHelp.resumeTitle(session)) { Task { await store.resume(session) } }

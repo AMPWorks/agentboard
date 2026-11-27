@@ -1053,3 +1053,42 @@ host key and forced command stay the trust boundary. It cannot help once the old
 unreachable, which the UI says. ssh failures now carry an `error_kind`, so a row whose address
 is the problem says what to change and offers Edit address, and the Add machine sheet shows the
 code's address in an editable field. A typed IPv6 address is bracketed in the Screen Sharing URL.
+
+## 2026-11-27 04:07:56 UTC — Remote clicks reuse an open Screen Sharing link and the Claude desktop app
+
+A click on another Mac's row opened more than it needed to. A Remote Control session went to the
+browser, because the Claude desktop app has no associated-domains entitlement and so never
+receives `https://claude.ai/code/…`; and a Screen Sharing row always ran `open vnc://…`, which
+popped a login sheet when the owner was already looking at that Mac, or was using this Mac from
+inside a Screen Sharing window from it. `focus --machine` now checks for a live Screen Sharing
+connection with the peer first: when there is one and the peer's ssh `focus` succeeded, Screen
+Sharing is brought forward (this Mac viewing) or nothing opens (the peer viewing, for example
+AgentBoard on one Mac used from inside a Screen Sharing window from the other), for both row
+kinds. An earlier round sent a Remote Control row on to the desktop app when the peer was the
+viewer, since an idle window left open there can't be told from someone using it; in use that
+opened the desktop app on the shared Mac instead of switching back, so the owner's review
+reversed it, and the browser menu item covers the idle case. Otherwise a Remote Control session opens in the desktop app through
+`claude://claude.ai/code/session_…` (the app's own URL handler resolves that path), falling back
+to the browser when `open -b` says the app isn't installed; a Screen Sharing row opens `vnc://`
+as before.
+
+The connection check is local and bounded: one `nettop` call, which unlike `netstat` and `lsof`
+sees the root-owned Screen Sharing server's sockets without privileges, matched against the
+addresses the paired host resolves to and port 5900 on exactly one end. No process name is
+matched. It runs only in the `--machine` branch of `focus`, never in `snapshot`, and misses
+connections made through another address than the paired one, relayed VNC and other ports,
+which then behave as before. The app's titles depend only on whether the desktop app is
+installed (a cached Launch Services lookup), not on the per-click connection check; the
+tooltips say Screen Sharing wins when open. Instead of a setting, the context menu adds **Open
+Screen Sharing to …** (`--via screen`) and **Open Remote Control in Browser** (`--via browser`)
+for when the automatic choice is wrong, such as a desktop app that is signed out.
+
+The click's lag is mostly the ssh call: connection sharing is off on purpose
+(`ControlMaster=no`), so each click pays a full handshake, several round trips over a VPN,
+while `nettop`, the resolver lookup and `open` are each well under a tenth of a second. The
+connection check now runs before the ssh call, so an open Screen Sharing window comes forward
+at once and the session follows inside it when the peer answers. The remaining wait, in both
+directions, would go with ssh connection reuse: peer-sync already keeps one ssh child per peer,
+which could be the multiplexing master that click-time calls join. That reverses the deliberate
+`ControlMaster=no`/`ControlPath=none` hardening and adds a control socket under the data
+directory (path length limit, uninstall cleanup), so it is left for a separate change.

@@ -121,7 +121,17 @@ struct AgentBoardCLI: Sendable {
         _ = try await runner.run(executable: executablePath, arguments: args)
     }
 
-    func focus(tool: String, sessionId: String, machine: String? = nil) async throws {
+    /// `focus` arguments; `--via` goes only with `--machine`.
+    static func focusArguments(tool: String, sessionId: String, machine: String?,
+                               via: String? = nil) -> [String] {
+        var args = ["focus", tool, sessionId] + machineArguments(machine)
+        if let via, !via.isEmpty, let machine, !machine.isEmpty {
+            args += ["--via", via]
+        }
+        return args
+    }
+
+    func focus(tool: String, sessionId: String, machine: String? = nil, via: String? = nil) async throws {
         if isFixtureMode {
             log.notice("fixture mode: skipping focus \(tool, privacy: .public):\(sessionId, privacy: .public)")
             return
@@ -129,7 +139,8 @@ struct AgentBoardCLI: Sendable {
         guard let executablePath = resolveExecutablePath() else { throw CLIError.notFound }
         do {
             _ = try await runner.run(executable: executablePath,
-                                     arguments: ["focus", tool, sessionId] + Self.machineArguments(machine))
+                                     arguments: Self.focusArguments(tool: tool, sessionId: sessionId,
+                                                                    machine: machine, via: via))
         } catch {
             // The CLI's stderr is already a sentence for the banner; its exit
             // code says which settings pane (if any) fixes it.
