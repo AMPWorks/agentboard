@@ -157,6 +157,11 @@ struct MenuBarView: View {
                                                sessions: sessions, query: query)
                         }
                     }
+                    // Leading-aligned at the popover's width: a row that still
+                    // can't fit runs off the right edge alone, instead of the
+                    // ScrollView centring the whole list and clipping every
+                    // row's state marker on the left.
+                    .frame(width: popoverWidth, alignment: .leading)
                     .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.listSpace)).maxY } action: { bottom in
                         fullContentBottom = PopoverSizing.settledAutoHeight(previous: fullContentBottom, measured: bottom)
                     }
