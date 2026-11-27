@@ -226,7 +226,8 @@ paste it on the other, both ways) and each board shows the other Macs' sessions 
 marked with the Mac they run on and updated within a couple of seconds. There is no server: each
 Mac pulls the others over ssh (macOS's Remote Login), encrypted and with both Macs' keys pinned.
 Clicking a remote session attaches a local terminal to it over ssh when it runs in tmux, resumes
-it there when it has ended, or opens Screen Sharing; a Mac that is asleep shows its last-known
+it there when it has ended, opens a Remote Control session in the Claude desktop app (or the
+browser), or opens Screen Sharing, reusing a Screen Sharing connection already open; a Mac that is asleep shows its last-known
 rows dimmed, without alerting. Each Mac chooses how much it shares.
 [More](docs/REFERENCE.md#machines-peer-sync)
 

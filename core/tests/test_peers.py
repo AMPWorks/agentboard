@@ -6,6 +6,7 @@ home's, never the real one.
 """
 
 import base64
+import io
 import json
 import os
 import stat
@@ -877,7 +878,8 @@ class RemoteActionTests(AgentBoardTestCase):
         self.write_cache("screen")
         rc = self.cli.cmd_focus(self.args(), run_osascript=self.run_fake)
         self.assertEqual(rc, 0)
-        ssh, vnc = self.calls
+        lookup, ssh, vnc = self.calls  # the name resolves to nothing: no nettop
+        self.assertEqual(lookup[0], "dscacheutil")
         self.assertEqual(ssh[0], "/usr/bin/ssh")
         self.assertEqual(ssh[-1], "focus claude r1")
         self.assertEqual(vnc, ["open", "vnc://someone@mini.local"])
@@ -986,7 +988,7 @@ class RemoteControlTests(AgentBoardTestCase):
             got = peers.validate_line(export_line(sessions=[session(bad)]))["sessions"][0]
             self.assertEqual((got["remote_open"], got["remote_control_url"]), ("screen", None))
 
-    def test_click_opens_the_url(self):
+    def test_click_opens_the_desktop_app(self):
         import argparse
         from agentboard import cli
         peers.ensure_machine(run=no_scutil)
@@ -1005,7 +1007,172 @@ class RemoteControlTests(AgentBoardTestCase):
 
         args = argparse.Namespace(tool="claude", session_id="r1", machine=PEER_ID, print=False)
         self.assertEqual(cli.cmd_focus(args, run_osascript=run), 0)
-        self.assertEqual(calls, [["open", self.URL]])
+        self.assertEqual(calls[0][0], "dscacheutil")  # no address: no nettop
+        self.assertEqual(calls[1:], [["open", "-b", "com.anthropic.claudefordesktop",
+                                      "claude://claude.ai/code/session_01KVjE5EzNMnQ54BKG8zNp3J"]])
+
+
+class ClickOrderTests(AgentBoardTestCase):
+    """What a click on a Screen Sharing or Remote Control row of another Mac
+    runs, given the peer's focus result and the local Screen Sharing link."""
+    URL = RemoteControlTests.URL
+    CLAUDE_LINK = "claude://claude.ai/code/session_01KVjE5EzNMnQ54BKG8zNp3J"
+    PEER_ADDR = "100.64.0.7"
+    DESKTOP = ["open", "-b", "com.anthropic.claudefordesktop", CLAUDE_LINK]
+    ACTIVATE = ["open", "-b", "com.apple.ScreenSharing"]
+    VNC = ["open", "vnc://someone@mini.local"]
+    LOOKUP = ["dscacheutil", "-q", "host", "-a", "name", "mini.local"]
+
+    def setUp(self):
+        super().setUp()
+        from agentboard import cli
+        self.cli = cli
+        peers.ensure_machine(run=no_scutil)
+        peers.add_peer(make_code(), bin_path="/x/agentboard")
+        fake_ssh_files()
+        self.calls = []
+
+    def write_cache(self, remote_open, url=None):
+        now = datetime.now(timezone.utc)
+        session = {"tool": "claude", "session_id": "r1", "state": "running",
+                   "remote_open": remote_open}
+        if url:
+            session["remote_control_url"] = url
+        peers.write_cache(PEER_ID, {
+            "peer_id": PEER_ID, "status": "online", "received_at": peers.now_iso(now),
+            "last_seen_at": peers.now_iso(now), "sessions": [session]})
+
+    def click(self, link=None, focus_rc=0, desktop_rc=0, activate_rc=0, **kw):
+        nettop = {"outgoing": f"tcp4 10.0.0.2:51234<->{self.PEER_ADDR}:5900,utun4,Established,\n",
+                  "incoming": f"tcp4 10.0.0.2:5900<->{self.PEER_ADDR}:60001,utun4,Established,\n",
+                  None: ""}[link]
+
+        def run(argv, **kwargs):
+            self.calls.append(argv)
+            out, rc = "", 0
+            if argv[0] == "/usr/bin/ssh":
+                rc = focus_rc
+            elif argv[0] == "dscacheutil":
+                out = f"name: mini.local\nip_address: {self.PEER_ADDR}\n"
+            elif argv[0] == "nettop":
+                out = ",interface,state,\n" + nettop
+            elif argv[:3] == ["open", "-b", "com.anthropic.claudefordesktop"]:
+                if desktop_rc is None:
+                    raise subprocess.TimeoutExpired(argv, 1)
+                rc = desktop_rc
+            elif argv == self.ACTIVATE:
+                rc = activate_rc
+            return subprocess.CompletedProcess(argv, rc, out, "")
+
+        import argparse
+        args = argparse.Namespace(tool="claude", session_id="r1", machine=PEER_ID,
+                                  **{"print": False, "via": None, **kw})
+        with mock.patch("sys.stderr"):
+            return self.cli.cmd_focus(args, run_osascript=run)
+
+    def kinds(self):
+        return [c[0] if c[0] != "open" else c for c in self.calls]
+
+    def test_screen_focus_ok_outgoing_link_activates_only(self):
+        self.write_cache("screen")
+        self.assertEqual(self.click(link="outgoing"), 0)
+        # Screen Sharing comes forward before the ssh round trip, not after it.
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", self.ACTIVATE, "/usr/bin/ssh"])
+
+    def test_screen_focus_ok_no_link_opens_vnc(self):
+        self.write_cache("screen")
+        self.assertEqual(self.click(link=None), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", "/usr/bin/ssh", self.VNC])
+
+    def test_screen_focus_failed_opens_vnc(self):
+        for link in ("outgoing", "incoming", None):
+            self.calls.clear()
+            self.write_cache("screen")
+            self.assertEqual(self.click(link=link, focus_rc=1), 0)
+            self.assertEqual(self.kinds()[-1], self.VNC, link)
+
+    def test_screen_incoming_link_opens_nothing(self):
+        # AgentBoard on this Mac is being used from the peer over Screen Sharing.
+        self.write_cache("screen")
+        self.assertEqual(self.click(link="incoming"), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", "/usr/bin/ssh"])
+
+    def test_remote_control_with_link_uses_screen_sharing(self):
+        self.write_cache("remote-control", self.URL)
+        self.assertEqual(self.click(link="outgoing"), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", self.ACTIVATE, "/usr/bin/ssh"])
+        self.assertEqual(self.calls[3][-1], "focus claude r1")
+
+    def test_screen_activate_failure_still_succeeds_without_vnc(self):
+        self.write_cache("screen")
+        with mock.patch("agentboard.diag.info") as info:
+            self.assertEqual(self.click(link="outgoing", activate_rc=1), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", self.ACTIVATE, "/usr/bin/ssh"])
+        logged = [c.kwargs for c in info.call_args_list if c.args[1:] == ("remote_open",)]
+        self.assertEqual(logged[-1]["opened"], "activate_failed")
+
+    def test_remote_control_incoming_link_focuses_on_the_peer_only(self):
+        # The peer is viewing this Mac (PR #39 owner review): the session comes
+        # forward on the peer and the desktop app does not open here.
+        self.write_cache("remote-control", self.URL)
+        self.assertEqual(self.click(link="incoming"), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", "/usr/bin/ssh"])
+        self.assertEqual(self.calls[2][-1], "focus claude r1")
+
+    def test_remote_control_incoming_link_but_focus_failed_opens_desktop(self):
+        self.write_cache("remote-control", self.URL)
+        self.assertEqual(self.click(link="incoming", focus_rc=1), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", "/usr/bin/ssh", self.DESKTOP])
+
+    def test_remote_control_desktop_timeout_opens_browser(self):
+        self.write_cache("remote-control", self.URL)
+        self.assertEqual(self.click(link=None, desktop_rc=None), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", self.DESKTOP, ["open", self.URL]])
+
+    def test_remote_control_link_but_focus_failed_opens_desktop(self):
+        self.write_cache("remote-control", self.URL)
+        self.assertEqual(self.click(link="outgoing", focus_rc=1), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", self.ACTIVATE, "/usr/bin/ssh",
+                                        self.DESKTOP])
+
+    def test_remote_control_no_link_opens_desktop(self):
+        self.write_cache("remote-control", self.URL)
+        self.assertEqual(self.click(link=None), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", self.DESKTOP])
+
+    def test_remote_control_without_desktop_app_opens_browser(self):
+        self.write_cache("remote-control", self.URL)
+        self.assertEqual(self.click(link=None, desktop_rc=1), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", self.DESKTOP, ["open", self.URL]])
+
+    def test_via_browser_opens_the_https_url_only(self):
+        self.write_cache("remote-control", self.URL)
+        self.assertEqual(self.click(link="outgoing", via="browser"), 0)
+        self.assertEqual(self.calls, [["open", self.URL]])
+
+    def test_via_screen_always_opens_vnc(self):
+        for how, url in (("screen", None), ("remote-control", self.URL)):
+            self.calls.clear()
+            self.write_cache(how, url)
+            self.assertEqual(self.click(link="outgoing", via="screen"), 0)
+            self.assertEqual(self.kinds(), ["/usr/bin/ssh", self.VNC], how)
+
+    def test_via_is_ignored_for_tmux_rows(self):
+        self.write_cache("tmux")
+        self.assertEqual(self.click(via="screen"), 0)
+        self.assertEqual(self.calls[0], ["open", "-Ra", "iTerm"])
+
+    def test_print_is_unchanged(self):
+        self.write_cache("remote-control", self.URL)
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(self.click(link="outgoing", print=True), 0)
+        self.assertEqual(out.getvalue().strip(), self.URL)
+        self.assertEqual(self.calls, [])
+
+    def test_invalid_url_falls_back_to_screen_sharing(self):
+        self.write_cache("remote-control", "https://evil.example/code/session_01KVjE5EzNMnQ54BKG8zNp3J")
+        self.assertEqual(self.click(link=None), 0)
+        self.assertEqual(self.kinds(), ["dscacheutil", "nettop", "/usr/bin/ssh", self.VNC])
 
 
 SHIM = Path(__file__).resolve().parents[1] / "bin" / "agentboard"

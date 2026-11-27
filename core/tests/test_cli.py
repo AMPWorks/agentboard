@@ -832,6 +832,16 @@ class SnapshotLifecycleTests(AgentBoardTestCase):
         self.assertEqual(self.snapshot()["cron"]["state"], "running")
 
 
+class FocusViaTests(AgentBoardTestCase):
+    def test_via_parses_and_defaults_to_none(self):
+        parse = cli.build_parser().parse_args
+        self.assertIsNone(parse(["focus", "claude", "s1"]).via)
+        for via in ("screen", "browser"):
+            self.assertEqual(parse(["focus", "claude", "s1", "--machine", "m", "--via", via]).via, via)
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse(["focus", "claude", "s1", "--via", "tmux"])
+
+
 class MarkTests(AgentBoardTestCase):
     def test_mark_done(self):
         insert_session(self.conn, session_id="s1")

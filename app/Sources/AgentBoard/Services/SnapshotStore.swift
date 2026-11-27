@@ -328,10 +328,11 @@ final class SnapshotStore: ObservableObject {
     /// Returns false when `agentboard focus` failed (the tab was closed,
     /// the terminal quit), so a notification click can open the dashboard.
     @discardableResult
-    func focus(_ session: Session) async -> Bool {
+    func focus(_ session: Session, via: String? = nil) async -> Bool {
         await perform("focus", session) {
             try Self.checkReachable(session)
-            try await cli.focus(tool: session.tool, sessionId: session.sessionId, machine: session.machine?.id)
+            try await cli.focus(tool: session.tool, sessionId: session.sessionId, machine: session.machine?.id,
+                                via: via)
         }
     }
 
@@ -340,8 +341,10 @@ final class SnapshotStore: ObservableObject {
     /// may already be in front (it is still brought forward when the tab is
     /// missing or macOS stayed on this desktop), so open the dashboard on the
     /// session in front of it: its banner says what went wrong.
-    func focusOrShowDashboard(_ session: Session) async {
-        guard await !focus(session) else { return }
+    /// `via` ("screen", "browser") is only for the explicit context menu
+    /// items on another Mac's rows; every other click passes nil.
+    func focusOrShowDashboard(_ session: Session, via: String? = nil) async {
+        guard await !focus(session, via: via) else { return }
         requestSelection(session.key)
         DashboardWindowController.show()
     }

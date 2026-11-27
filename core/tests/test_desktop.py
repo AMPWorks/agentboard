@@ -238,3 +238,16 @@ class FocusDesktopTests(_StoreMixin, AgentBoardTestCase):
         self.assertEqual(self._focus(run), 1)  # no terminal recorded
         run.assert_not_called()
         self.assertIn("outcome=no_terminal", self._focus_line())
+
+
+class RemoteSessionLinkTests(AgentBoardTestCase):
+    def test_valid_url_becomes_a_claude_link(self):
+        self.assertEqual(
+            desktop.remote_session_link("https://claude.ai/code/session_01KVjE5EzNMnQ54BKG8zNp3J"),
+            "claude://claude.ai/code/session_01KVjE5EzNMnQ54BKG8zNp3J")
+
+    def test_bad_urls_are_none(self):
+        for bad in ("https://evil.example/code/session_01KVjE5EzNMnQ54BKG8zNp3J",
+                    "file:///etc/passwd", "https://claude.ai/code/session_x;rm",
+                    "claude://claude.ai/code/session_01KVjE5EzNMnQ54BKG8zNp3J", "", None, 7):
+            self.assertIsNone(desktop.remote_session_link(bad))

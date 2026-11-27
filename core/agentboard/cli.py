@@ -3893,6 +3893,9 @@ def build_parser():
     p.add_argument("tool", choices=["claude", "codex"])
     p.add_argument("session_id")
     p.add_argument("--machine", default=None, help="the paired Mac the session runs on")
+    p.add_argument("--via", choices=["screen", "browser"], default=None,
+                   help="with --machine: always open Screen Sharing, or the Remote Control "
+                        "link in the browser, instead of the automatic order")
     p.set_defaults(func=cmd_focus)
 
     p = sub.add_parser("resume")

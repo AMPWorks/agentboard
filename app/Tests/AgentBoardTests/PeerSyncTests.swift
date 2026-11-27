@@ -66,6 +66,43 @@ struct PeerSyncModelTests {
                 == ["mark", "claude", "s", "snooze", "--hours", "24", "--note", "n"])
     }
 
+    @Test func focusArgumentsCarryViaOnlyWithAMachine() {
+        #expect(AgentBoardCLI.focusArguments(tool: "claude", sessionId: "s", machine: nil)
+                == ["focus", "claude", "s"])
+        #expect(AgentBoardCLI.focusArguments(tool: "claude", sessionId: "s", machine: "m")
+                == ["focus", "claude", "s", "--machine", "m"])
+        #expect(AgentBoardCLI.focusArguments(tool: "claude", sessionId: "s", machine: "m", via: "screen")
+                == ["focus", "claude", "s", "--machine", "m", "--via", "screen"])
+        #expect(AgentBoardCLI.focusArguments(tool: "claude", sessionId: "s", machine: nil, via: "browser")
+                == ["focus", "claude", "s"])
+    }
+
+    @Test func remoteControlTitleAndHelpFollowTheDesktopApp() {
+        let rc = Fixtures.decoded("x", extra: Fixtures.remote("r", "running", remoteOpen: "remote-control"))
+        #expect(SessionActionHelp.focusTitle(rc, desktopAppInstalled: true) == "Open in Claude App")
+        #expect(SessionActionHelp.focusTitle(rc, desktopAppInstalled: false) == "Open in Remote Control")
+        let withApp = SessionActionHelp.focusHelp(rc, desktopAppInstalled: true)
+        #expect(withApp.hasPrefix("Brings this session forward on Mini when a Screen Sharing connection with it is open"))
+        #expect(withApp.hasSuffix("in the Claude desktop app"))
+        #expect(SessionActionHelp.focusHelp(rc, desktopAppInstalled: false).hasSuffix("in the browser"))
+        #expect(SessionActionHelp.screenShareTitle(rc) == "Open Screen Sharing to Mini")
+        #expect(SessionActionHelp.browserTitle(rc) == "Open Remote Control in Browser")
+    }
+
+    @Test func screenRowHelpMentionsAnOpenConnection() {
+        let screen = Fixtures.decoded("x", extra: Fixtures.remote("s", "running", remoteOpen: "screen"))
+        #expect(SessionActionHelp.focusTitle(screen, desktopAppInstalled: true) == "Screen Share to Mini")
+        #expect(SessionActionHelp.focusHelp(screen, desktopAppInstalled: true)
+                == "Bring this session forward on Mini; opens Screen Sharing to it unless a connection with Mini is already open")
+        #expect(SessionActionHelp.screenShareTitle(screen) == "Open Screen Sharing to Mini")
+        #expect(SessionActionHelp.browserTitle(screen) == nil)
+        let tmux = Fixtures.decoded("x", extra: Fixtures.remote("t", "running", remoteOpen: "tmux"))
+        #expect(SessionActionHelp.screenShareTitle(tmux) == nil)
+        let stale = Fixtures.decoded("x", extra: Fixtures.remote("o", "running", stale: true, remoteOpen: "screen"))
+        #expect(SessionActionHelp.screenShareTitle(stale) == nil)
+        #expect(SessionActionHelp.screenShareTitle(Fixtures.decoded("l")) == nil)
+    }
+
     @Test func staleRemoteSessionsDoNotColourTheIcon() {
         let stale = Fixtures.snapshot([Fixtures.remote("r1", "needs_you", stale: true)],
                                       counts: [:])
