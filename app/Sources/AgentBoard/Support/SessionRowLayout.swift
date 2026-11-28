@@ -163,7 +163,6 @@ enum SessionRowLayout {
     /// grouped by machine passes `showsMachineName: false`: the sub-header
     /// names the Mac, so the row leaves out its name capsule (the icon
     /// column's chip stays).
-
     static func repoTags(for session: Session, showsMachineName: Bool = true) -> [RepoTag] {
         var tags: [RepoTag] = []
         if session.isRemote && showsMachineName { tags.append(.machine) }
