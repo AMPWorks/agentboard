@@ -1218,4 +1218,6 @@ under the text once it would get under 72 points.
 A paired Mac's name was fixed at pairing; sync ignored the name it sends. The board now shows a
 local alias when set (Settings → Machines per Mac, `peers set --alias`, `alias` on the peer
 entry, kept when re-pairing, never touched by sync), else the name the Mac sends, else the paired
-name; `peers[]` gains additive `own_name` and `alias`. Macs stay told apart by id.
+name; `peers[]` gains additive `own_name` and `alias`. Macs stay told apart by id. `add --name`
+unlike the code's sets the alias; an older `set --name` is not migrated (the config can't tell
+it from the code's) and gives way to the synced name; `--alias` sets it again.

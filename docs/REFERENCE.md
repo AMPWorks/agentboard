@@ -1760,6 +1760,9 @@ stops suggesting an address a paired Mac advertises. `peers set --alias A` shows
 under the name `A` on this Mac only (1 to 64 printable characters, else refused; pass it as
 `--alias=A` when it starts with `-`), `--clear-alias` goes back to its own name; `--name N` only
 sets the fallback name shown until that Mac's first sync tells its own (renaming is `--alias`).
+`peers add --name N` with a name other than the code's sets it as the alias. A name set with
+`set --name` before this release is replaced by the Mac's own name after its first sync; set it
+again with `--alias`.
 Each entry of `peers list --json`'s and the snapshot's `peers` carries `name` (what the board
 shows), `own_name` (the name the Mac gives itself: the one its last sync line carried, else the
 one saved at pairing) and `alias` (null when unset).

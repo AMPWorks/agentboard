@@ -764,7 +764,11 @@ def add_peer(code, home=None, host=None, name=None, allow_open=None, bin_path=No
         "fingerprint": parsed["fingerprint"],
     }
     # A name set here survives pairing again, like the switch and the host.
-    if previous and previous.get("alias"):
+    # `--name` other than the code's is a rename, so it is the alias: the
+    # name the Mac sends on its first sync would otherwise replace it.
+    if name and clean_name(name) != parsed["name"]:
+        peer["alias"] = clean_name(name)
+    elif previous and previous.get("alias"):
         peer["alias"] = previous["alias"]
 
     replaced = []

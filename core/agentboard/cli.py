@@ -3944,7 +3944,8 @@ def build_parser():
     q = peers_sub.add_parser("add")
     q.add_argument("--code", required=True, help="the other Mac's pairing code")
     q.add_argument("--host", default=None, help="reach the peer by this name instead")
-    q.add_argument("--name", default=None, help="show the peer under this name")
+    q.add_argument("--name", default=None,
+                   help="show the peer under this name (its alias, unless it is the code's name)")
     q.add_argument("--allow-open", dest="allow_open", choices=["on", "off"], default=None,
                    help="whether the peer may open sessions on this Mac (default: on for a "
                         "new Mac, unchanged when pairing again)")

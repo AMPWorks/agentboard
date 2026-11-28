@@ -893,6 +893,19 @@ class DisplayNameTests(AgentBoardTestCase):
         peers.add_peer(make_code(), bin_path="/x/agentboard")
         self.assertEqual(peers.find_peer(peers.load_config(), PEER_ID)["alias"], "Studio")
 
+    def test_add_with_a_name_of_its_own_sets_the_alias(self):
+        # Before aliases, `add --name` was the name shown for good; a sync
+        # sending the Mac's own name must not replace it.
+        peers.add_peer(make_code(), name="Custom", bin_path="/x/agentboard")
+        self.cache("Mac mini")
+        self.assertEqual(self.names(), ("Custom", "Custom", "Mac mini", "Custom"))
+        # The code's own name is not a rename: the alias set above is kept.
+        peers.add_peer(make_code(), name="Mini", bin_path="/x/agentboard")
+        self.assertEqual(self.names()[3], "Custom")
+        peers.set_peer(PEER_ID, clear_alias=True)
+        peers.add_peer(make_code(), name="Mini", bin_path="/x/agentboard")
+        self.assertIsNone(self.names()[3])
+
     def test_errors_name_the_displayed_name(self):
         from agentboard import peer_cli
         self.cache("Mac mini", seen=datetime.now(timezone.utc) - timedelta(minutes=5))
