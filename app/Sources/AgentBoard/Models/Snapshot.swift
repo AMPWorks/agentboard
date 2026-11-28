@@ -610,9 +610,15 @@ struct Peer: Codable, Sendable, Equatable, Identifiable {
     var authorized: Bool?
     var fingerprint: String?
     var user: String?
+    /// The name the Mac gives itself (the one its sync sends, else the one
+    /// saved at pairing); `name` is what the board shows: `alias`, else this.
+    var ownName: String?
+    /// The name this Mac shows for it, set here only; nil when unset.
+    var alias: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, host, status, error, user, authorized, fingerprint
+        case id, name, host, status, error, user, authorized, fingerprint, alias
+        case ownName = "own_name"
         case lastSeenAt = "last_seen_at"
         case errorKind = "error_kind"
         case suggestedAddress = "suggested_address"
@@ -623,7 +629,10 @@ struct Peer: Codable, Sendable, Equatable, Identifiable {
 
     init(id: String, name: String, host: String = "", status: String = "online",
          lastSeenAt: String? = nil, error: String? = nil, sessionCount: Int = 0,
-         allowOpen: Bool = true, errorKind: String? = nil, suggestedAddress: String? = nil) {
+         allowOpen: Bool = true, errorKind: String? = nil, suggestedAddress: String? = nil,
+         ownName: String? = nil, alias: String? = nil) {
+        self.ownName = ownName
+        self.alias = alias
         self.errorKind = errorKind
         self.suggestedAddress = suggestedAddress
         self.id = id
@@ -652,6 +661,8 @@ struct Peer: Codable, Sendable, Equatable, Identifiable {
         authorized = (try? c.decodeIfPresent(Bool.self, forKey: .authorized)) ?? nil
         fingerprint = (try? c.decodeIfPresent(String.self, forKey: .fingerprint)) ?? nil
         user = (try? c.decodeIfPresent(String.self, forKey: .user)) ?? nil
+        ownName = (try? c.decodeIfPresent(String.self, forKey: .ownName)) ?? nil
+        alias = (try? c.decodeIfPresent(String.self, forKey: .alias)) ?? nil
     }
 
     var isOnline: Bool { status == "online" }

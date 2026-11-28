@@ -10,7 +10,7 @@ telemetry.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/popover-dark.png">
-    <img src="docs/images/popover-light.png" width="430" alt="The AgentBoard popover: a count per section under the search field and the Updates button, then sessions grouped by state">
+    <img src="docs/images/popover-light.png" width="430" alt="The AgentBoard popover: a count per section under the search field and the Updates button, then sessions grouped by state, each section under a sub-header naming the Mac they run on">
   </picture>
 </p>
 
@@ -234,7 +234,8 @@ Mac pulls the others over ssh (macOS's Remote Login), encrypted and with both Ma
 Clicking a remote session attaches a local terminal to it over ssh when it runs in tmux, resumes
 it there when it has ended, opens a Remote Control session in the Claude desktop app (or the
 browser), or opens Screen Sharing, reusing a Screen Sharing connection already open; a Mac that is asleep shows its last-known
-rows dimmed, without alerting. Each Mac chooses how much it shares.
+rows dimmed, without alerting. Each Mac chooses how much it shares. In the popover each section
+lists this Mac's sessions first, then each other Mac's under a header with its name.
 [More](docs/REFERENCE.md#machines-peer-sync)
 
 ## Hooking in your own tools

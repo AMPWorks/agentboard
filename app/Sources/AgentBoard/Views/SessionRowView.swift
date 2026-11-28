@@ -12,6 +12,9 @@ struct SessionRowView: View {
     var resolveLive: ((Session) -> Session?)? = nil
     /// What a held row's session is now (`PopoverHold.status`).
     var holdStatus: PopoverHold.RowStatus = .current
+    /// Remote rows show the Mac's name capsule on the repo line; a popover
+    /// list grouped by machine turns it off (its sub-header names the Mac).
+    var showsMachineName: Bool = true
 
     @State private var isHovering = false
 
@@ -121,25 +124,56 @@ struct SessionRowView: View {
         }
     }
 
+    @ViewBuilder
     private var repoLine: some View {
+        if compact {
+            // A tight row first drops the Mac's name capsule (the chip in
+            // the icon column still says which Mac); when the tags still
+            // leave the repo text less than a short word's width (a narrow
+            // popover, a model tag and three PRs), they move under it
+            // instead of squeezing it to one letter per line.
+            ViewThatFits(in: .horizontal) {
+                repoLineBeside(minRepoWidth: SessionRowLayout.minRepoWidth, showsMachine: showsMachineName)
+                if showsMachineName && session.isRemote {
+                    repoLineBeside(minRepoWidth: SessionRowLayout.minRepoWidth, showsMachine: false)
+                }
+                VStack(alignment: .trailing, spacing: 2) {
+                    repoText.frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 6) { repoTags(showsMachine: false) }
+                }
+            }
+        } else {
+            repoLineBeside(minRepoWidth: nil, showsMachine: showsMachineName)
+        }
+    }
+
+    private func repoLineBeside(minRepoWidth: CGFloat?, showsMachine: Bool) -> some View {
         // First-baseline alignment keeps the trailing tags on the repo's
         // first line when a long branch wraps.
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(SessionRowLayout.repoText(session))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .wrapsInPopover(compact)
+            repoText.frame(minWidth: minRepoWidth, idealWidth: minRepoWidth, alignment: .leading)
             Spacer(minLength: 4)
-            // SessionRowLayout.repoTags order: the PR buttons last, so they
-            // never move with the optional tags.
-            ForEach(SessionRowLayout.repoTags(for: session), id: \.self) { tag in
-                switch tag {
-                case .machine: machineTag
-                case .tmux: tmuxTag
-                case .background: backgroundTag
-                case .model: modelTag
-                case .prs: PRLinkButtons(session: session, onOverflow: showDetail)
-                }
+            repoTags(showsMachine: showsMachine)
+        }
+    }
+
+    private var repoText: some View {
+        Text(SessionRowLayout.repoText(session))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .wrapsInPopover(compact)
+    }
+
+    /// SessionRowLayout.repoTags order: the PR buttons last, so they never
+    /// move with the optional tags.
+    private func repoTags(showsMachine: Bool) -> some View {
+        ForEach(SessionRowLayout.repoTags(for: session, showsMachineName: showsMachine), id: \.self) { tag in
+            switch tag {
+            case .machine: machineTag
+            case .tmux: tmuxTag
+            case .background: backgroundTag
+            case .model: modelTag
+            case .prs: PRLinkButtons(session: session, onOverflow: showDetail)
             }
         }
     }

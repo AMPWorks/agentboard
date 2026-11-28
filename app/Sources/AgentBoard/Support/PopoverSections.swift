@@ -34,9 +34,29 @@ struct PopoverSections: Sendable, Equatable {
         }
     }
 
+    /// One machine's sessions inside a section: this Mac (`machine` nil)
+    /// or one other Mac, told apart by id so two Macs with one name get
+    /// two groups.
+    struct MachineGroup: Sendable, Equatable, Identifiable {
+        let kind: Kind
+        /// nil for this Mac.
+        let machine: Machine?
+        /// Newest first.
+        let sessions: [Session]
+
+        /// Unique across sections: `<kind>/<machine id, or "local">`.
+        var id: String { "\(kind.rawValue)/\(machine?.id ?? "local")" }
+        var isLocal: Bool { machine == nil }
+        /// Another Mac whose every session here is stale (its cache is old).
+        var isOffline: Bool { machine != nil && !sessions.isEmpty && sessions.allSatisfy(\.stale) }
+    }
+
     struct Section: Sendable, Equatable, Identifiable {
         let kind: Kind
+        /// Display order: the groups flattened when grouped, else newest first.
         let sessions: [Session]
+        /// Empty when the list is not grouped by machine.
+        var groups: [MachineGroup] = []
         var id: Kind { kind }
     }
 
@@ -60,16 +80,26 @@ struct PopoverSections: Sendable, Equatable {
     /// Counted whether the Updates panel is open or closed: with it closed
     /// the popover lists no updates at all (the Updates button turns red).
     let hiddenNeedsYouNotes: Int
+    /// Sections are split into one group per machine: asked for, and the
+    /// unfiltered list holds a remote session (decided before the query so
+    /// the layout does not flip while typing; a board with no remote
+    /// session never groups).
+    var groupsByMachine: Bool = false
 
-    static func make(from sessions: [Session], query: SessionSearch) -> PopoverSections {
+    static func make(from sessions: [Session], query: SessionSearch,
+                     groupByMachine: Bool = false) -> PopoverSections {
         let filtering = !query.isEmpty
+        let grouping = groupByMachine && sessions.contains(where: \.isRemote)
         let matched = filtering ? sessions.filter(query.matches) : sessions
         let kinds = Kind.allCases.filter { filtering || !$0.queryOnly }
         let built = kinds.compactMap { kind -> Section? in
             let members = matched
                 .filter { kind.contains($0.state) }
                 .sorted { $0.updatedAt > $1.updatedAt }
-            return members.isEmpty ? nil : Section(kind: kind, sessions: members)
+            guard !members.isEmpty else { return nil }
+            guard grouping else { return Section(kind: kind, sessions: members) }
+            let groups = machineGroups(kind: kind, members)
+            return Section(kind: kind, sessions: groups.flatMap(\.sessions), groups: groups)
         }
         var hidden = 0
         var hiddenAttention = 0
@@ -86,8 +116,43 @@ struct PopoverSections: Sendable, Equatable {
             snapshotIsEmpty: sessions.isEmpty,
             hiddenCount: hidden,
             hiddenNeedingAttention: hiddenAttention,
-            hiddenNeedsYouNotes: UpdatesFeed.hiddenNeedsYouNotes(from: sessions, query: query)
+            hiddenNeedsYouNotes: UpdatesFeed.hiddenNeedsYouNotes(from: sessions, query: query),
+            groupsByMachine: grouping
         )
+    }
+
+    /// `members` (newest first) split by machine: this Mac first, then the
+    /// other Macs by name (case-insensitive, numbers by value), ties by id.
+    /// Each group keeps the newest-first order.
+    static func machineGroups(kind: Kind, _ members: [Session]) -> [MachineGroup] {
+        let local = members.filter { !$0.isRemote }
+        var remote: [String: (machine: Machine, sessions: [Session])] = [:]
+        for session in members {
+            guard let machine = session.machine else { continue }
+            remote[machine.id, default: (machine, [])].sessions.append(session)
+        }
+        let others = remote.values.sorted { a, b in
+            let order = a.machine.name.compare(b.machine.name, options: [.caseInsensitive, .numeric])
+            if order != .orderedSame { return order == .orderedAscending }
+            return a.machine.id < b.machine.id
+        }
+        var groups: [MachineGroup] = []
+        if !local.isEmpty { groups.append(MachineGroup(kind: kind, machine: nil, sessions: local)) }
+        groups += others.map { MachineGroup(kind: kind, machine: $0.machine, sessions: $0.sessions) }
+        return groups
+    }
+
+    /// A machine sub-header: "MacBook Pro (local) · 2" for this Mac ("This
+    /// Mac (local) · 2" while it has no name yet), "Mac mini · 3" for
+    /// another, "Mac mini · offline · 3" when that Mac is offline. The count
+    /// follows a dot so a name's own parentheses stay clean.
+    static func machineHeader(for group: MachineGroup, localName: String?) -> String {
+        let count = group.sessions.count
+        guard let machine = group.machine else {
+            let name = localName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return "\(name.isEmpty ? "This Mac" : name) (local) · \(count)"
+        }
+        return group.isOffline ? "\(machine.name) · offline · \(count)" : "\(machine.name) · \(count)"
     }
 
     func section(_ kind: Kind) -> Section? { sections.first { $0.kind == kind } }

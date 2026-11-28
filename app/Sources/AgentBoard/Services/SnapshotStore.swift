@@ -441,9 +441,10 @@ final class SnapshotStore: ObservableObject {
     }
 
     func setPeer(_ id: String, host: String? = nil, name: String? = nil, allowOpen: Bool? = nil,
-                 dismissAddress: String? = nil) async -> String? {
+                 dismissAddress: String? = nil, alias: String? = nil, clearAlias: Bool = false) async -> String? {
         await changePeers("set machine") {
-            try await cli.peersSet(id: id, host: host, name: name, allowOpen: allowOpen, dismissAddress: dismissAddress)
+            try await cli.peersSet(id: id, host: host, name: name, allowOpen: allowOpen, dismissAddress: dismissAddress,
+                                   alias: alias, clearAlias: clearAlias)
         }
     }
 

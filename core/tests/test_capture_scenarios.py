@@ -128,6 +128,23 @@ class CaptureScenariosTest(unittest.TestCase):
         # Other scenarios are this Mac's own rows only.
         self.assertTrue(all(s["machine"] is None for s in self.fixtures()["five-sessions"]["sessions"]))
 
+    def test_the_machines_board_groups_by_machine(self):
+        snap = self.fixtures()["machines"]
+        by_state = {}
+        for s in snap["sessions"]:
+            by_state.setdefault(s["state"], set()).add(s["machine"]["id"] if s["machine"] else "local")
+        # A section with this Mac's and another Mac's sessions, and two other Macs.
+        self.assertTrue(any("local" in ids and len(ids) > 1 for ids in by_state.values()))
+        self.assertGreaterEqual(len({s["machine"]["id"] for s in snap["sessions"] if s["machine"]}), 2)
+        settings = {n: (d, q) for n, _snap, d, q, _b in self.mod.scenarios(self.sample)}
+        self.assertNotIn("groupPopoverByMachine=bool:false", settings["machines"][0])
+        self.assertIn("groupPopoverByMachine=bool:false", settings["machines-flat"][0])
+        self.assertEqual(settings["machines-filtered"][1], "machine:mini")
+        self.assertIn("popoverWidth=float:320", settings["machines-narrow"][0])
+        fixtures = self.fixtures()
+        for name in ("machines-flat", "machines-filtered", "machines-narrow"):
+            self.assertEqual(fixtures[name], snap)
+
     def test_only_filters_by_name(self):
         out = Path(self.tmp.name) / "only"
         self.assertEqual(self.mod.main([str(SAMPLE), str(out), "--only", "^empty$"]), 0)

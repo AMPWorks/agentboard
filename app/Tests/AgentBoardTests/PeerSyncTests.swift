@@ -19,6 +19,29 @@ struct PeerSyncModelTests {
         #expect(!snapshot.sessions[1].isRemote)
     }
 
+    @Test func decodesPeerOwnNameAndAlias() {
+        var peers = Fixtures.peers()
+        var peer = (peers["peers"] as! [[String: Any]])[0]
+        peer["name"] = "Studio"
+        peer["own_name"] = "Mac mini"
+        peer["alias"] = "Studio"
+        peers["peers"] = [peer, ["id": "x", "name": "Old", "own_name": 5]]
+        // The CLI puts the alias in the session's machine name too.
+        let snapshot = Fixtures.snapshot(
+            [Fixtures.remote("r1", "running", extra: ["machine": ["id": Fixtures.peerID, "name": "Studio"]])],
+            top: peers)
+        #expect(snapshot.peers.map(\.name) == ["Studio", "Old"])
+        #expect(snapshot.peers.map(\.ownName) == ["Mac mini", nil])
+        #expect(snapshot.peers.map(\.alias) == ["Studio", nil])
+        let remote = snapshot.sessions[0]
+        let group = PopoverSections.make(from: snapshot.sessions, query: SessionSearch(""), groupByMachine: true)
+            .sections[0].groups[0]
+        #expect(PopoverSections.machineHeader(for: group, localName: nil) == "Studio · 1")
+        #expect(SessionRowLayout.repoTags(for: remote).first == .machine)
+        #expect(remote.machine?.name == "Studio")
+        #expect(SessionSearch("machine:studio").matches(remote))
+    }
+
     @Test func snapshotWithoutTheNewFieldsDecodes() {
         let snapshot = Fixtures.snapshot([Fixtures.session("l1", "running")])
         #expect(snapshot.machine == nil)
@@ -258,6 +281,13 @@ struct PeerSyncRowTests {
         let tmux = Fixtures.decoded("x", extra: Fixtures.remote("t", "running", remoteOpen: "tmux"))
         #expect(SessionRowLayout.iconColumn(for: tmux).contains(.machine))
         #expect(SessionRowLayout.repoTags(for: tmux).first == .machine)
+        // Grouped by machine, the sub-header names the Mac: no name capsule,
+        // the chip and the other tags stay, in order.
+        let named = SessionRowLayout.repoTags(for: tmux)
+        let unnamed = SessionRowLayout.repoTags(for: tmux, showsMachineName: false)
+        #expect(!unnamed.contains(.machine))
+        #expect(unnamed == named.filter { $0 != .machine })
+        #expect(SessionRowLayout.iconColumn(for: tmux).contains(.machine))
         #expect(SessionActionHelp.focusTitle(tmux) == "Attach on Mini")
         let screen = Fixtures.decoded("x", extra: Fixtures.remote("s", "running", remoteOpen: "screen"))
         #expect(SessionActionHelp.focusTitle(screen) == "Screen Share to Mini")
@@ -482,5 +512,29 @@ struct AdvertisedAddressTests {
         #expect(MachinesDisplay.isLocalName(" Mini.Local "))
         #expect(!MachinesDisplay.isLocalName("mini.vpn"))
         #expect(!MachinesDisplay.isLocalName("local"))
+    }
+}
+
+@Suite("AgentBoard CLI peers arguments")
+struct AgentBoardCLITests {
+    @Test func aliasEditTrimsAndAnEmptyFieldClears() {
+        for empty in ["", "  ", "\n", " \t\n "] {
+            let edit = AgentBoardCLI.aliasEdit(empty)
+            #expect(edit.alias == nil && edit.clear)
+        }
+        let edit = AgentBoardCLI.aliasEdit(" Studio \n")
+        #expect(edit.alias == "Studio" && !edit.clear)
+    }
+
+    @Test func peersSetArguments() {
+        #expect(AgentBoardCLI.peersSetArguments(id: "i", alias: "Studio") == ["set", "--id", "i", "--alias=Studio"])
+        #expect(AgentBoardCLI.peersSetArguments(id: "i", alias: "-x") == ["set", "--id", "i", "--alias=-x"])
+        #expect(AgentBoardCLI.peersSetArguments(id: "i", clearAlias: true) == ["set", "--id", "i", "--clear-alias"])
+        #expect(AgentBoardCLI.peersSetArguments(id: "i", alias: "x", clearAlias: true)
+                == ["set", "--id", "i", "--clear-alias"])
+        #expect(AgentBoardCLI.peersSetArguments(id: "i", host: "mini.vpn", name: "Mini", allowOpen: false,
+                                                dismissAddress: "old.vpn")
+                == ["set", "--id", "i", "--host=mini.vpn", "--name", "Mini", "--allow-open", "off",
+                    "--dismiss-address=old.vpn"])
     }
 }

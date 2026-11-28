@@ -401,6 +401,8 @@ def _clean_peer(entry) -> dict | None:
         and _FINGERPRINT_RE.match(fp) else None,
         "dismissed_address": dismissed if valid_host(dismissed := entry.get("dismissed_address"))
         else None,
+        # The name this Mac shows for it, set here only; sync never changes it.
+        "alias": clean_name(entry.get("alias")),
     }
 
 
@@ -421,6 +423,20 @@ def configured_peers(config) -> list:
 
 def find_peer(config, peer_id) -> dict | None:
     return next((p for p in configured_peers(config) if p["id"] == peer_id), None)
+
+
+def own_name(peer, cache) -> str:
+    """The name a paired Mac gives itself: the one its last synced line
+    carried (its cache's `machine.name`), else the name saved at pairing."""
+    machine = (cache or {}).get("machine")
+    cached = clean_name(machine.get("name")) if isinstance(machine, dict) else None
+    return cached or peer["name"]
+
+
+def display_name(peer, cache) -> str:
+    """The name this board shows for a paired Mac: its alias when one is set
+    here, else its own name (`own_name`)."""
+    return peer.get("alias") or own_name(peer, cache)
 
 
 # -- pairing code -----------------------------------------------------------------
@@ -747,6 +763,13 @@ def add_peer(code, home=None, host=None, name=None, allow_open=None, bin_path=No
         # a later host or name edit.
         "fingerprint": parsed["fingerprint"],
     }
+    # A name set here survives pairing again, like the switch and the host.
+    # `--name` other than the code's is a rename, so it is the alias: the
+    # name the Mac sends on its first sync would otherwise replace it.
+    if name and clean_name(name) != parsed["name"]:
+        peer["alias"] = clean_name(name)
+    elif previous and previous.get("alias"):
+        peer["alias"] = previous["alias"]
 
     replaced = []
 
@@ -842,15 +865,19 @@ def remove_peer(peer_id=None, home=None, dry_run=False) -> int:
 
 
 def set_peer(peer_id, home=None, host=None, name=None, allow_open=None, bin_path=None,
-             dismiss_address=None) -> dict:
-    """Change a paired Mac's host, name or allow-opening switch, or stop
-    suggesting an address it advertises (`dismiss_address`)."""
+             dismiss_address=None, alias=None, clear_alias=False) -> dict:
+    """Change a paired Mac's host, name or allow-opening switch, stop
+    suggesting an address it advertises (`dismiss_address`), or set or clear
+    the name this Mac shows for it (`alias`, `clear_alias`). `name` is only
+    the fallback shown until its first sync tells its own name."""
     if host is not None and not valid_host(host):
         raise PeerError(f"invalid host: {host!r}")
     if dismiss_address is not None and not valid_host(dismiss_address):
         raise PeerError(f"invalid address: {dismiss_address!r}")
     if name is not None and clean_name(name) is None:
         raise PeerError(f"invalid name: {name!r}")
+    if alias is not None and not clear_alias and clean_name(alias) is None:
+        raise PeerError(f"invalid alias: {alias!r}")
     found = {}
 
     def mutate(data):
@@ -865,6 +892,10 @@ def set_peer(peer_id, home=None, host=None, name=None, allow_open=None, bin_path
                     p["allow_open"] = bool(allow_open)
                 if dismiss_address is not None:
                     p["dismissed_address"] = dismiss_address
+                if clear_alias:
+                    p.pop("alias", None)
+                elif alias is not None:
+                    p["alias"] = clean_name(alias)
                 found["peer"] = p
 
     config = load_config(home)
@@ -1309,7 +1340,7 @@ def remote_entries(config, now, home=None) -> tuple:
             # try, the normal middle of pairing), not one that expired.
             status = "never"
         stale = status != "online"
-        machine = {"id": peer["id"], "name": peer["name"]}
+        machine = {"id": peer["id"], "name": display_name(peer, cache)}
         count = 0
         for raw in sessions:
             tool, session_id = raw.get("tool"), raw.get("session_id")
@@ -1333,7 +1364,9 @@ def remote_entries(config, now, home=None) -> tuple:
         error_kind = (cache or {}).get("error_kind")
         peers.append({
             "id": peer["id"],
-            "name": peer["name"],
+            "name": machine["name"],
+            "own_name": own_name(peer, cache),
+            "alias": peer["alias"],
             "host": peer["host"],
             "status": status,
             "last_seen_at": last_seen,

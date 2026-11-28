@@ -824,6 +824,98 @@ class MergeTests(AgentBoardTestCase):
         self.assertEqual(len(snap["sessions"]), 2)
 
 
+class DisplayNameTests(AgentBoardTestCase):
+    """A paired Mac's name: its alias here, else the name its sync sends, else
+    the name saved at pairing."""
+
+    def setUp(self):
+        super().setUp()
+        from agentboard import cli
+        self.cli = cli
+        peers.ensure_machine(run=no_scutil)
+        peers.add_peer(make_code(), bin_path="/x/agentboard")
+
+    def cache(self, name="Mac mini", seen=None):
+        seen = seen or datetime.now(timezone.utc)
+        data = peers.validate_line(export_line(machine={"id": PEER_ID, "name": name}))
+        peers.write_cache(PEER_ID, {"peer_id": PEER_ID, "status": "online", "error": None,
+                                    "received_at": peers.now_iso(seen),
+                                    "last_seen_at": peers.now_iso(seen), **data})
+
+    def names(self):
+        """(session machine.name, peers[].name, own_name, alias) from the snapshot."""
+        snap = self.cli.build_snapshot(self.conn)
+        remote = next(e for e in snap["sessions"] if e["machine"])
+        [peer] = snap["peers"]
+        return remote["machine"]["name"], peer["name"], peer["own_name"], peer["alias"]
+
+    def test_the_synced_name_wins_over_the_paired_one(self):
+        self.cache("Mac mini")
+        self.assertEqual(self.names(), ("Mac mini", "Mac mini", "Mac mini", None))
+
+    def test_no_cache_shows_the_paired_name(self):
+        _entries, [peer] = peers.remote_entries(peers.load_config(), NOW)
+        self.assertEqual((peer["name"], peer["own_name"], peer["alias"]), ("Mini", "Mini", None))
+
+    def test_a_synced_name_clean_name_rejects_falls_back(self):
+        self.cache("Mac mini")
+        cache = peers.read_cache(PEER_ID)
+        cache["machine"]["name"] = "bad\nname"
+        peers.write_cache(PEER_ID, cache)
+        self.assertEqual(self.names()[:3], ("Mini", "Mini", "Mini"))
+
+    def test_alias_wins_and_clearing_goes_back_to_the_synced_name(self):
+        self.cache("Mac mini")
+        peers.set_peer(PEER_ID, alias="  Studio ")
+        self.assertEqual(self.names(), ("Studio", "Studio", "Mac mini", "Studio"))
+        # A later sync line rewrites the cache; the alias stays.
+        self.cache("Renamed mini")
+        self.assertEqual(self.names(), ("Studio", "Studio", "Renamed mini", "Studio"))
+        self.assertEqual(peers.find_peer(peers.load_config(), PEER_ID)["alias"], "Studio")
+        peers.set_peer(PEER_ID, clear_alias=True)
+        self.assertEqual(self.names(), ("Renamed mini", "Renamed mini", "Renamed mini", None))
+        self.assertNotIn("alias", peers.load_config()["peers"][0])
+
+    def test_a_bad_alias_is_refused(self):
+        for bad in ("", "   ", "a" * 65, "tab\there"):
+            with self.assertRaises(peers.PeerError):
+                peers.set_peer(PEER_ID, alias=bad)
+        self.assertIsNone(peers.find_peer(peers.load_config(), PEER_ID)["alias"])
+
+    def test_a_malformed_alias_in_config_is_ignored(self):
+        self.cache("Mac mini")
+        for bad in (5, "", "x\u0000y", ["Studio"]):
+            peers.update_config(lambda d: d["peers"][0].__setitem__("alias", bad))
+            self.assertEqual(self.names(), ("Mac mini", "Mac mini", "Mac mini", None))
+
+    def test_pairing_again_keeps_the_alias(self):
+        peers.set_peer(PEER_ID, alias="Studio")
+        peers.add_peer(make_code(), bin_path="/x/agentboard")
+        self.assertEqual(peers.find_peer(peers.load_config(), PEER_ID)["alias"], "Studio")
+
+    def test_add_with_a_name_of_its_own_sets_the_alias(self):
+        # Before aliases, `add --name` was the name shown for good; a sync
+        # sending the Mac's own name must not replace it.
+        peers.add_peer(make_code(), name="Custom", bin_path="/x/agentboard")
+        self.cache("Mac mini")
+        self.assertEqual(self.names(), ("Custom", "Custom", "Mac mini", "Custom"))
+        # The code's own name is not a rename: the alias set above is kept.
+        peers.add_peer(make_code(), name="Mini", bin_path="/x/agentboard")
+        self.assertEqual(self.names()[3], "Custom")
+        peers.set_peer(PEER_ID, clear_alias=True)
+        peers.add_peer(make_code(), name="Mini", bin_path="/x/agentboard")
+        self.assertIsNone(self.names()[3])
+
+    def test_errors_name_the_displayed_name(self):
+        from agentboard import peer_cli
+        self.cache("Mac mini", seen=datetime.now(timezone.utc) - timedelta(minutes=5))
+        with self.assertRaisesRegex(peer_cli.PeerUnavailable, "^Mac mini is offline"):
+            peer_cli._remote_target(PEER_ID, "claude", "r1")
+        peers.set_peer(PEER_ID, alias="Studio")
+        with self.assertRaisesRegex(peer_cli.PeerUnavailable, "^Studio is offline"):
+            peer_cli._remote_target(PEER_ID, "claude", "r1")
+
+
 class RemoteActionTests(AgentBoardTestCase):
     def setUp(self):
         super().setUp()
@@ -1229,6 +1321,20 @@ class PeersCliTests(AgentBoardTestCase):
         self.assertIn(listing["remote_login"], ("on", "off", "unknown"))
         [item] = listing["peers"]
         self.assertEqual((item["id"], item["status"], item["authorized"]), (PEER_ID, "never", True))
+        self.assertEqual((item["name"], item["own_name"], item["alias"]), ("Mini", "Mini", None))
+
+        result = self.run_shim("peers", "set", "--id", PEER_ID, "--alias=Studio")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["alias"], "Studio")
+        [item] = json.loads(self.run_shim("peers", "list", "--json").stdout)["peers"]
+        self.assertEqual((item["name"], item["own_name"], item["alias"]), ("Studio", "Mini", "Studio"))
+        result = self.run_shim("peers", "set", "--id", PEER_ID, "--alias=-x", "--clear-alias")
+        self.assertEqual(result.returncode, 2)
+        result = self.run_shim("peers", "set", "--id", PEER_ID, "--alias=")
+        self.assertEqual(result.returncode, 1)
+        result = self.run_shim("peers", "set", "--id", PEER_ID, "--clear-alias")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(json.loads(result.stdout)["alias"])
 
         result = self.run_shim("peers", "remove", "--id", PEER_ID)
         self.assertEqual(result.returncode, 0, result.stderr)

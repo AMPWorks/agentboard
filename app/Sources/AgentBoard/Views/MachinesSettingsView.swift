@@ -114,6 +114,7 @@ struct MachinesSettingsSection: View {
     @ObservedObject var store: SnapshotStore
     @AppStorage(SettingsKeys.showRemoteSessions) private var showRemote: Bool = true
     @AppStorage(SettingsKeys.notifyRemoteSessions) private var notifyRemote: Bool = true
+    @AppStorage(SettingsKeys.groupPopoverByMachine) private var groupByMachine: Bool = true
     @AppStorage(MenuBarIconSettings.remoteModeKey) private var remoteIconMode: String = RemoteIconMode.separate.rawValue
     @State private var name = ""
     /// The address field's unsaved edit; nil shows the saved address.
@@ -147,6 +148,9 @@ struct MachinesSettingsSection: View {
                 .onChange(of: showRemote) { _, _ in store.applyRemoteFilter() }
                 .help(SettingsCatalog.showRemoteSessions.help)
                 .settingsAnchor(SettingsCatalog.showRemoteSessions)
+            Toggle(SettingsCatalog.groupPopoverByMachine.label, isOn: $groupByMachine)
+                .help(SettingsCatalog.groupPopoverByMachine.help)
+                .settingsAnchor(SettingsCatalog.groupPopoverByMachine)
             Toggle(SettingsCatalog.notifyRemoteSessions.label, isOn: $notifyRemote)
                 .help(SettingsCatalog.notifyRemoteSessions.help)
                 .settingsAnchor(SettingsCatalog.notifyRemoteSessions)
@@ -309,6 +313,7 @@ private struct PeerRow: View {
     @ObservedObject var store: SnapshotStore
     let remove: () -> Void
     @State private var host = ""
+    @State private var alias = ""
     @FocusState private var addressFocused: Bool
 
     var body: some View {
@@ -356,6 +361,10 @@ private struct PeerRow: View {
                     }
                 }
             }
+            TextField(SettingsCatalog.peerDisplayName.label, text: $alias, prompt: Text(peer.ownName ?? peer.name))
+                .onSubmit { saveAlias() }
+                .help(SettingsCatalog.peerDisplayName.help)
+                .settingsAnchor(SettingsCatalog.peerDisplayName, scrolls: false)
             TextField("Address", text: $host)
                 .focused($addressFocused)
                 .onSubmit { Task { _ = await store.setPeer(peer.id, host: host.trimmingCharacters(in: .whitespaces)) } }
@@ -372,8 +381,18 @@ private struct PeerRow: View {
             }
         }
         .padding(.vertical, 2)
-        .onAppear { host = peer.host }
+        .onAppear {
+            host = peer.host
+            alias = peer.alias ?? ""
+        }
         .onChange(of: peer.host) { _, newValue in host = newValue }
+        .onChange(of: peer.alias) { _, newValue in alias = newValue ?? "" }
+    }
+
+    /// An empty field goes back to the Mac's own name.
+    private func saveAlias() {
+        let edit = AgentBoardCLI.aliasEdit(alias)
+        Task { _ = await store.setPeer(peer.id, alias: edit.alias, clearAlias: edit.clear) }
     }
 }
 

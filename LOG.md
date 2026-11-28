@@ -1191,3 +1191,33 @@ so one update's x drops only that note and a mark done leaves other sessions' no
 on a snapshot change keeps the list shown before it; and while new updates are pending, Clear all
 becomes "Clear these" and a grouped row's x narrows to its listed notes, so nothing is dismissed
 unseen.
+
+## 2026-11-28 02:59:38 UTC — The popover groups sessions by machine; Macs can be renamed here
+
+With paired Macs the popover mixed this Mac's rows with the others' by time, marked only by a
+small chip and a name capsule that drops out of tight rows. Each section is now split by
+machine: this Mac first under `<name> (local) · n`, then each other Mac under its chip and
+`<name> · n` (`· offline ·` when all its rows there are stale), by name then id in every section.
+Online-first or recency order was rejected: a Mac sleeping or a session finishing would reorder
+groups, the movement the list hold prevents. Section totals stay; grouped rows keep the chip and
+drop the capsule. A colour or badge per Mac was rejected: colour means state, shape means
+remote, a hue per Mac does not scale or survive colour blindness, and a text header also reads in
+VoiceOver.
+
+Grouping is a pure step in `PopoverSections.make`, so the hold, Update list and the filter are
+unchanged. It turns on only when the unfiltered list holds a remote session, so one Mac looks as
+before (pixel-identical capture) and typing never flips the layout. A toggle (Machines → Group
+the popover by machine, default on) keeps the flat list, since grouping gives up strict time
+order. The dashboard keeps its capsule and `machine:` search; sub-headers are not pinned, as the
+measured `VStack` that auto-expand reads would need to become lazy.
+
+The 320-point capture showed a row with a model tag and three PRs squeezing its repo text to a
+letter per line (on main it vanished): the repo line now drops the capsule, then moves the tags
+under the text once it would get under 72 points.
+
+A paired Mac's name was fixed at pairing; sync ignored the name it sends. The board now shows a
+local alias when set (Settings → Machines per Mac, `peers set --alias`, `alias` on the peer
+entry, kept when re-pairing, never touched by sync), else the name the Mac sends, else the paired
+name; `peers[]` gains additive `own_name` and `alias`. Macs stay told apart by id. `add --name`
+unlike the code's sets the alias; an older `set --name` is not migrated (the config can't tell
+it from the code's) and gives way to the synced name; `--alias` sets it again.

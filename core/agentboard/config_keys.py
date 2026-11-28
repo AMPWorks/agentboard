@@ -91,9 +91,10 @@ CONFIG_KEYS = (
         "`host` and `user` where ssh reaches it, `allow_open` whether it may open sessions "
         "on this Mac, `public_key` and `host_key` its AgentBoard key and pinned ssh host key, "
         "`fingerprint` its pairing code's fingerprint when it was added, `dismissed_address` "
-        "an address it advertised that you chose not to use.",
+        "an address it advertised that you chose not to use, `alias` the name this Mac shows "
+        "for it (set here only; sync never changes it).",
         fields=("id", "name", "host", "user", "allow_open", "public_key", "host_key", "fingerprint",
-                "dismissed_address"),
+                "dismissed_address", "alias"),
     ),
     ConfigKey(
         "peer_address", "string", "automatic",

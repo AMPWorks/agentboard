@@ -30,6 +30,7 @@ struct MenuBarView: View {
     @AppStorage(PopoverSizing.autoExpandKey) private var autoExpand: Bool = false
     @AppStorage(PopoverSizing.widthKey) private var storedWidth: Double = 0
     @AppStorage(PopoverSizing.autoWidthKey) private var autoWidth: Bool = true
+    @AppStorage(SettingsKeys.groupPopoverByMachine) private var groupByMachine: Bool = true
     @State private var placer = PopoverWindowPlacer()
     /// The placer's anchor (the icon's screen and position), mirrored so the
     /// width updates when it changes; `place` positions from the same value.
@@ -82,7 +83,8 @@ struct MenuBarView: View {
     /// The notice counts the needs_you notes the query hides whether the
     /// Updates panel is open or closed: nothing else lists them.
     private var sections: PopoverSections {
-        PopoverSections.make(from: shownSessions, query: SessionSearch(store.popoverQuery))
+        PopoverSections.make(from: shownSessions, query: SessionSearch(store.popoverQuery),
+                              groupByMachine: groupByMachine)
     }
 
     private var updatesMode: UpdatesPanelMode { UpdatesPanelMode.parse(updatesModeRaw) }
@@ -95,7 +97,8 @@ struct MenuBarView: View {
 
     var body: some View {
         let sessions = shownSessions
-        let sections = PopoverSections.make(from: sessions, query: SessionSearch(store.popoverQuery))
+        let sections = PopoverSections.make(from: sessions, query: SessionSearch(store.popoverQuery),
+                                             groupByMachine: groupByMachine)
         let query = SessionSearch(store.popoverQuery)
         let mode = updatesMode
         let shown = updatesShown
@@ -727,18 +730,36 @@ struct MenuBarView: View {
                 .padding(.horizontal, 10)
                 .padding(.top, 4)
                 .help(Self.sectionHelp(section.kind))
-            ForEach(section.sessions) { session in
-                row(session)
-            }
+            sectionRows(section, in: sections, inset: 10)
         }
         .id(section.kind)
     }
 
+    /// A section's rows: under one sub-header per machine when the list is
+    /// grouped by machine, else as one list.
+    @ViewBuilder
+    private func sectionRows(_ section: PopoverSections.Section, in sections: PopoverSections,
+                             inset: CGFloat) -> some View {
+        if sections.groupsByMachine {
+            ForEach(section.groups) { group in
+                MachineGroupHeader(group: group, store: store, inset: inset)
+                ForEach(group.sessions) { session in
+                    row(session, showsMachineName: false)
+                }
+            }
+        } else {
+            ForEach(section.sessions) { session in
+                row(session)
+            }
+        }
+    }
+
     /// A popover row: its click and menus act on the live session with
     /// the same key; a held row whose session changed is dimmed.
-    private func row(_ session: Session) -> some View {
+    private func row(_ session: Session, showsMachineName: Bool = true) -> some View {
         SessionRowView(session: session, store: store, resolveLive: resolveLive,
-                       holdStatus: hold.status(of: session, live: store.snapshot.sessions))
+                       holdStatus: hold.status(of: session, live: store.snapshot.sessions),
+                       showsMachineName: showsMachineName)
             .padding(.horizontal, 4)
     }
 
@@ -765,9 +786,7 @@ struct MenuBarView: View {
             }
         )
         return DisclosureGroup(isExpanded: expanded) {
-            ForEach(section.sessions) { session in
-                row(session)
-            }
+            sectionRows(section, in: sections, inset: 0)
         } label: {
             // Auto-expand fits the header, so the section is never out of
             // sight, but not its rows: expanding it never grows the popover.
@@ -967,5 +986,41 @@ private struct ResizeGripShape: Shape {
             return .frameResize(position: .bottomRight, directions: .all)
         }
         return .resizeUpDown
+    }
+}
+
+/// A machine's sub-header inside a popover section: its chip (other Macs
+/// only), then "<name> (local) · n", "<name> · n" or "<name> · offline · n".
+/// Smaller and lighter than the section header above it, one line.
+private struct MachineGroupHeader: View {
+    let group: PopoverSections.MachineGroup
+    @ObservedObject var store: SnapshotStore
+    /// Leading inset, matching the section header's.
+    let inset: CGFloat
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let machine = group.machine {
+                MachineChipView(label: store.snapshot.chipLabel(for: machine), offline: group.isOffline, size: 12)
+            }
+            Text(PopoverSections.machineHeader(for: group, localName: store.snapshot.machine?.name))
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.leading, inset)
+        .padding(.trailing, 10)
+        .padding(.top, 3)
+        .padding(.bottom, 1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help(help)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    private var help: String {
+        guard let first = group.sessions.first, first.isRemote else { return "Sessions running on this Mac" }
+        return SessionActionHelp.machineHelp(first, lastSeen: store.snapshot.peer(for: first)?.lastSeenAt)
     }
 }

@@ -346,13 +346,36 @@ struct AgentBoardCLI: Sendable {
     }
 
     func peersSet(id: String, host: String? = nil, name: String? = nil, allowOpen: Bool? = nil,
-                  dismissAddress: String? = nil) async throws {
+                  dismissAddress: String? = nil, alias: String? = nil, clearAlias: Bool = false) async throws {
+        _ = try await runPeers(Self.peersSetArguments(id: id, host: host, name: name, allowOpen: allowOpen,
+                                                      dismissAddress: dismissAddress, alias: alias,
+                                                      clearAlias: clearAlias))
+    }
+
+    /// What the name field on a paired Mac's row saves: its text trimmed (as
+    /// the CLI's `clean_name` trims it), and an empty field clears the alias.
+    static func aliasEdit(_ text: String) -> (alias: String?, clear: Bool) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? (nil, true) : (trimmed, false)
+    }
+
+    /// `clearAlias` wins over `alias` (the CLI refuses both at once). Values
+    /// that may start with "-" go as `--opt=value`, so the CLI's own check
+    /// sees them instead of argparse taking them for an option.
+    static func peersSetArguments(id: String, host: String? = nil, name: String? = nil, allowOpen: Bool? = nil,
+                                  dismissAddress: String? = nil, alias: String? = nil,
+                                  clearAlias: Bool = false) -> [String] {
         var args = ["set", "--id", id]
         if let host { args.append("--host=\(host)") }
         if let name { args += ["--name", name] }
         if let allowOpen { args += ["--allow-open", allowOpen ? "on" : "off"] }
         if let dismissAddress { args.append("--dismiss-address=\(dismissAddress)") }
-        _ = try await runPeers(args)
+        if clearAlias {
+            args.append("--clear-alias")
+        } else if let alias {
+            args.append("--alias=\(alias)")
+        }
+        return args
     }
 
     func peersSetSelf(name: String? = nil, share: String? = nil, address: String? = nil,

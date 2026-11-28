@@ -1227,7 +1227,7 @@ that just slid under the pointer. **Held list:** while the popover is open and t
 inside its window, or one of its menus (a row's context menu, the gear menu) is tracking, the
 list is built from the sessions it showed when the hold began (`PopoverHold`, a pure value type in
 `app/Sources/AgentBoard/Support/PopoverHold.swift`). Everything above the footer derives from
-them: the sections and their header counts, the summary line, the filter notice, the Updates
+them: the sections and their header counts, the machine sub-headers, the summary line, the filter notice, the Updates
 panel and the Updates button's count and tint. Row content is held too, since a title wrapping or
 a reason line appearing changes a row's height. Relative times still tick. The footer (usage line,
 pending control), the status banner, the menu bar icon, notifications, sounds and the dashboard
@@ -1454,7 +1454,14 @@ Plan usage is never shared. Each Mac's own config, database and notes stay on it
 ### How sessions are identified
 
 Each install has a random machine id (`machine.json`) and a name (the computer name, editable
-under **This Mac**). The host name is never the identity, since it changes with the network. A
+under **This Mac**). That name is the one the other Macs show for it: each sync line carries it,
+so a rename reaches them with their next line. Each paired Mac's row in Settings → Machines has a
+**Name shown here** field that renames that Mac on this board only (an alias, stored as `alias`
+on its `peers` entry; sync never changes it, pairing again keeps it, and an empty field goes back
+to the Mac's own name). The board, the popover's sub-headers, the name capsule, chips, Settings,
+Updates rows, messages about that Mac and the `machine:` filter all use the alias when one is
+set, else the name the Mac sends, else the name saved at pairing. Machines are told apart by id,
+never by name. The host name is never the identity, since it changes with the network. A
 remote session keeps its `tool` and `session_id` and gets the key
 `<tool>:<session_id>@<machine_id>`, so the same session id on two Macs is two rows.
 On the board a remote row's state marker is a diamond instead of the round dot, in the same
@@ -1465,6 +1472,28 @@ and a digit in id order (`M1`, `M2`) when those collide too. The chip is dashed 
 offline, and the same chip marks that Mac's Updates rows, the detail header (beside the state)
 and its entry in Settings → Machines. The dashboard's color key adds the shape key
 (● this Mac, ◆ another Mac, ◇ offline) while the board has remote rows.
+
+### Grouped by machine in the popover
+
+While the board holds a session from another Mac, each popover section (Needs you, Review,
+Running, Unconcluded, and Snoozed and Done behind a query) is split by machine: this Mac's
+sessions first, under `<name> (local) · n` (`This Mac (local) · n` until this Mac has a name),
+then each other Mac's under `<name> · n`, or `<name> · offline · n` with a dashed chip when every
+session of it there is stale. Other Macs come in name order (ignoring case, numbers by value:
+"Mac 2" before "Mac 10"), ties by machine id, the same in every section, so a Mac going to sleep
+or a session finishing never reorders the groups; two Macs with one name get a sub-header each.
+Inside a group rows stay newest first. Every non-empty section gets a sub-header for each Mac it
+holds, a section with only this Mac's sessions too, so no row needs "no header means local".
+The section headers, the summary line and the filter notice keep their totals across machines.
+Grouped rows leave out the Mac's name capsule on the repo line (the sub-header names it) and
+keep the chip under the tool badge. Sub-headers are not pinned while scrolling.
+
+Whether to group is decided on the unfiltered list, so the layout does not flip while a filter is
+typed: a filter that leaves only this Mac's rows still shows them under its sub-header. A board
+with no session from another Mac (a single Mac, peers with nothing listed, or **Show sessions
+from other machines** off) shows no sub-headers. **Settings → Machines → Group the popover by
+machine** (key `groupPopoverByMachine`, on by default) turns it off for one list per section,
+newest first, with the Mac's name on other Macs' rows. The dashboard is not grouped.
 
 ### When a Mac is offline or asleep
 
@@ -1652,7 +1681,7 @@ defaults (`io.github.agentboard`). Every key core reads is registered in
 | `prune_days` | integer >= 0 | `90` | `prune` deletes sessions idle this many days (never one with an open `needs_you` note, a PR awaiting you, an active snooze or a live process) and dismissed notes older than this; `0` never deletes. |
 | `compact_days` | integer >= 0 | `7` | `prune` deletes tool-use and subagent events, and permission denials, older than this many days; `0` never compacts. |
 | `log_level` | `debug`/`info`/`warn`/`error` | `info` | The diagnostic log's level; `AGENTBOARD_LOG_LEVEL` wins over it. |
-| `peers` | list of objects | none | Your other Macs this board syncs with, written by Settings → Machines when you add a pairing code: `id` (the peer's machine id), `name`, `host` and `user` (where ssh reaches it), `allow_open` (whether it may open sessions on this Mac), `public_key` and `host_key` (its AgentBoard key and pinned ssh host key), `fingerprint` (its pairing code's fingerprint when it was added, shown in Settings), `dismissed_address` (an address it advertised that you dismissed). config.json edits hold a lock on the data directory, so two changes at once both land. See [Machines (peer sync)](#machines-peer-sync). |
+| `peers` | list of objects | none | Your other Macs this board syncs with, written by Settings → Machines when you add a pairing code: `id` (the peer's machine id), `name`, `host` and `user` (where ssh reaches it), `allow_open` (whether it may open sessions on this Mac), `public_key` and `host_key` (its AgentBoard key and pinned ssh host key), `fingerprint` (its pairing code's fingerprint when it was added, shown in Settings), `dismissed_address` (an address it advertised that you dismissed), `alias` (the name this Mac shows for it, set under Settings → Machines or `peers set --alias`; sync never changes it). config.json edits hold a lock on the data directory, so two changes at once both land. See [Machines (peer sync)](#machines-peer-sync). |
 | `peer_address` | string | automatic | The address other Macs reach this one at, put in its pairing code and sent to paired Macs: a VPN or DNS name, an IP address or the `.local` name. Absent (or not a valid host name or address), it is chosen automatically; see [Machines (peer sync)](#machines-peer-sync). Set by Settings → Machines or `peers set-self --address`/`--auto-address`. |
 | `peer_share` | `full`/`titles`/`state` | `full` | How much of this Mac's sessions its peers receive: everything, titles without prompt, message, note or cwd text, or state and project name only. |
 | `peer_stale_days` | integer >= 0 | `7` | A peer's last-known sessions stay on the board, dimmed, this many days after it was last reached. |
@@ -1702,7 +1731,7 @@ agentboard logs [--since 1h|ISO-8601] [--grep TEXT] [--lines N] [--app]
 agentboard peers list [--json]
 agentboard peers add --code CODE [--host H] [--name N] [--allow-open on|off] [--dry-run]
 agentboard peers remove --id ID | --all [--dry-run]
-agentboard peers set --id ID [--host H] [--name N] [--allow-open on|off] [--dismiss-address A]
+agentboard peers set --id ID [--host H] [--name N] [--allow-open on|off] [--dismiss-address A] [--alias A | --clear-alias]
 agentboard peers set-self [--name N] [--share full|titles|state] [--address A | --auto-address]
 agentboard peer-sync [--once]
 agentboard peer-gate <peer_id>          (forced command; reads SSH_ORIGINAL_COMMAND)
@@ -1727,7 +1756,16 @@ Remote Control link in the browser; `--via` is ignored for tmux and ended sessio
 `current_host` (the address an already-paired Mac is reached at, else null). `peers set-self
 --address A` sets the advertised address (refused unless it is a host name or IP address starting
 with a letter or digit), `--auto-address` goes back to Automatic; `peers set --dismiss-address A`
-stops suggesting an address a paired Mac advertises.
+stops suggesting an address a paired Mac advertises. `peers set --alias A` shows a paired Mac
+under the name `A` on this Mac only (1 to 64 printable characters, else refused; pass it as
+`--alias=A` when it starts with `-`), `--clear-alias` goes back to its own name; `--name N` only
+sets the fallback name shown until that Mac's first sync tells its own (renaming is `--alias`).
+`peers add --name N` with a name other than the code's sets it as the alias. A name set with
+`set --name` before this release is replaced by the Mac's own name after its first sync; set it
+again with `--alias`.
+Each entry of `peers list --json`'s and the snapshot's `peers` carries `name` (what the board
+shows), `own_name` (the name the Mac gives itself: the one its last sync line carried, else the
+one saved at pairing) and `alias` (null when unset).
 
 `hook`, `map-codex` and `backfill --session` are what the hooks run; you never need to call them
 yourself. `prune` is the retention sweep described under [Data](#data): `--days` and `--compact-days`

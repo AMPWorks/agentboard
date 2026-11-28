@@ -273,7 +273,13 @@ def scenarios(sample):
     for session in machines["sessions"]:
         if session["stale"]:
             machines["counts"][session["state"]] -= 1
+    # Grouped by machine (the default): this Mac first in each section, then
+    # each other Mac under its sub-header.
     add("machines", machines, fixed)
+    add("machines-flat", machines, fixed + ["groupPopoverByMachine=bool:false"])
+    add("machines-filtered", machines, fixed, query="machine:mini")
+    # The long machine name's sub-header truncates instead of widening the list.
+    add("machines-narrow", machines, ["popoverAutoWidth=bool:false", "popoverWidth=float:320"])
     # A white window right behind the panel: dim text (path lines, the usage
     # footer, an offline Mac's faded rows) must stay readable over it.
     bright = [board.session(i, MIX[i % len(MIX)],
