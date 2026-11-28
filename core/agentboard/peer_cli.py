@@ -118,8 +118,9 @@ def cmd_peers(args):
         if action == "set":
             allow = None if args.allow_open is None else args.allow_open == "on"
             peer = peers.set_peer(args.id, host=args.host, name=args.name, allow_open=allow,
-                                  dismiss_address=args.dismiss_address)
-            _emit({k: peer[k] for k in ("id", "name", "host", "user", "allow_open")})
+                                  dismiss_address=args.dismiss_address, alias=args.alias,
+                                  clear_alias=args.clear_alias)
+            _emit({k: peer[k] for k in ("id", "name", "host", "user", "allow_open", "alias")})
             return 0
         if action == "set-self":
             if args.address is not None or args.auto_address:
@@ -221,6 +222,8 @@ def _remote_target(machine_id, tool, session_id, now=None):
     if peer is None:
         raise PeerUnavailable(f"no paired machine with id {machine_id}")
     cache = peers.read_cache(machine_id)
+    # Every message names the Mac as the board does (its alias, else its own name).
+    peer = dict(peer, name=peers.display_name(peer, cache))
     status, last_seen = peers.peer_status(cache, now)
     if status != "online":
         raise PeerUnavailable(f"{peer['name']} is {status if status != 'never' else 'not connected yet'}")

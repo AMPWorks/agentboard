@@ -3956,7 +3956,13 @@ def build_parser():
     q = peers_sub.add_parser("set")
     q.add_argument("--id", required=True)
     q.add_argument("--host", default=None)
-    q.add_argument("--name", default=None)
+    q.add_argument("--name", default=None,
+                   help="the name shown until the peer's first sync tells its own")
+    alias = q.add_mutually_exclusive_group()
+    alias.add_argument("--alias", default=None,
+                       help="show the peer under this name on this Mac only; sync never changes it")
+    alias.add_argument("--clear-alias", dest="clear_alias", action="store_true",
+                       help="show the peer's own name again")
     q.add_argument("--allow-open", dest="allow_open", choices=["on", "off"], default=None)
     q.add_argument("--dismiss-address", dest="dismiss_address", default=None,
                    help="stop suggesting this address the peer advertises")

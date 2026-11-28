@@ -313,6 +313,7 @@ private struct PeerRow: View {
     @ObservedObject var store: SnapshotStore
     let remove: () -> Void
     @State private var host = ""
+    @State private var alias = ""
     @FocusState private var addressFocused: Bool
 
     var body: some View {
@@ -360,6 +361,10 @@ private struct PeerRow: View {
                     }
                 }
             }
+            TextField(SettingsCatalog.peerDisplayName.label, text: $alias, prompt: Text(peer.ownName ?? peer.name))
+                .onSubmit { saveAlias() }
+                .help(SettingsCatalog.peerDisplayName.help)
+                .settingsAnchor(SettingsCatalog.peerDisplayName, scrolls: false)
             TextField("Address", text: $host)
                 .focused($addressFocused)
                 .onSubmit { Task { _ = await store.setPeer(peer.id, host: host.trimmingCharacters(in: .whitespaces)) } }
@@ -376,8 +381,24 @@ private struct PeerRow: View {
             }
         }
         .padding(.vertical, 2)
-        .onAppear { host = peer.host }
+        .onAppear {
+            host = peer.host
+            alias = peer.alias ?? ""
+        }
         .onChange(of: peer.host) { _, newValue in host = newValue }
+        .onChange(of: peer.alias) { _, newValue in alias = newValue ?? "" }
+    }
+
+    /// An empty field goes back to the Mac's own name.
+    private func saveAlias() {
+        let trimmed = alias.trimmingCharacters(in: .whitespaces)
+        Task {
+            if trimmed.isEmpty {
+                _ = await store.setPeer(peer.id, clearAlias: true)
+            } else {
+                _ = await store.setPeer(peer.id, alias: trimmed)
+            }
+        }
     }
 }
 

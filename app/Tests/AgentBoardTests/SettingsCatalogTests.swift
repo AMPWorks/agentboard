@@ -64,7 +64,7 @@ struct SettingsCatalogGroupingTests {
 
     @Test func fallbacksAreAlwaysShownRowsOnTheSameTab() {
         let withFallback = SettingsCatalog.items.filter { $0.fallback != nil }
-        #expect(withFallback.map(\.id) == ["pairedMachines", "fixturePath", "revealHookErrorsLog"])
+        #expect(withFallback.map(\.id) == ["pairedMachines", "peerDisplayName", "fixturePath", "revealHookErrorsLog"])
         for item in withFallback {
             let fallback = SettingsCatalog.item(id: item.fallback!)
             #expect(fallback?.tab == item.tab, "\(item.id)")

@@ -155,7 +155,7 @@ enum SettingsCatalog {
 
     static let thisMacName = SettingsItem(
         id: "thisMacName", tab: .machines, section: "Machines", label: "This Mac's name",
-        help: "How this Mac is named on your other Macs' boards; press Return to save")
+        help: "The name your other Macs show for this one (unless one of them renames it there); press Return to save")
     static let thisMacAddress = SettingsItem(
         id: "thisMacAddress", tab: .machines, section: "Machines", label: "Address others use to reach this Mac",
         help: "The address your other Macs connect to, put in this Mac's pairing code: a VPN or DNS name or an IP address works from anywhere, a .local name only on the same network. Press Return to save")
@@ -173,6 +173,10 @@ enum SettingsCatalog {
     static let pairedMachines = SettingsItem(
         id: "pairedMachines", tab: .machines, section: "Machines", label: "Paired machines",
         help: "Each paired Mac's status, the host ssh reaches it by, whether it may open sessions on this Mac (shell access as you), and Remove to stop syncing with it",
+        fallback: "addMachine")
+    static let peerDisplayName = SettingsItem(
+        id: "peerDisplayName", tab: .machines, section: "Machines", label: "Name shown here",
+        help: "Name shown here for this Mac; only this Mac sees it; leave empty to use the Mac's own name. Press Return to save",
         fallback: "addMachine")
     static let addMachine = SettingsItem(
         id: "addMachine", tab: .machines, section: "Machines", label: "Add machine…",
@@ -230,7 +234,7 @@ enum SettingsCatalog {
         popoverAutoExpand, popoverAutoWidth, resetSize,
         notifyOnNeedsYou, notifyOnTurnFinished,
     ] + sounds + [
-        thisMacName, thisMacAddress, shareLevel, sharingSettings, copyPairingCode, pairedMachines, addMachine,
+        thisMacName, thisMacAddress, shareLevel, sharingSettings, copyPairingCode, pairedMachines, peerDisplayName, addMachine,
         showRemoteSessions, groupPopoverByMachine, notifyRemoteSessions, remoteIconMode,
         cliPath, useFixture, fixturePath,
         verboseLogging, openLog, revealHookErrorsLog,
