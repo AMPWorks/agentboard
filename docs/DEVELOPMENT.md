@@ -115,7 +115,10 @@ everything; also what `AGENTBOARD_USE_FIXTURE=1` loads from the app bundle).
 many needing you, all running, Done sessions behind a query, the Updates panel at each text size,
 default, tall and auto-expand heights, full width, long titles and branches at 460 and 320 points,
 every permission mode, the "Snapshot failed" banner, and `bright-backdrop` (a mixed board with
-long paths, an offline Mac's faded rows and the usage footer over a plain white window), each in
+long paths, an offline Mac's faded rows and the usage footer over a plain white window), and
+paired Macs: `machines` (grouped by machine, the default), `machines-flat` (the same board with
+`groupPopoverByMachine` off), `machines-filtered` (the query `machine:mini`) and `machines-narrow`
+(320 points, where the long Mac name's sub-header truncates), each in
 light and dark. It builds the
 fixtures with `scripts/capture_scenarios.py` from `app/Fixtures/snapshot.json` (time-shifted to
 now, so only fixture projects appear), runs the bare binary under a unique name with an empty

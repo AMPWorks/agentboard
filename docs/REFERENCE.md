@@ -1227,7 +1227,7 @@ that just slid under the pointer. **Held list:** while the popover is open and t
 inside its window, or one of its menus (a row's context menu, the gear menu) is tracking, the
 list is built from the sessions it showed when the hold began (`PopoverHold`, a pure value type in
 `app/Sources/AgentBoard/Support/PopoverHold.swift`). Everything above the footer derives from
-them: the sections and their header counts, the summary line, the filter notice, the Updates
+them: the sections and their header counts, the machine sub-headers, the summary line, the filter notice, the Updates
 panel and the Updates button's count and tint. Row content is held too, since a title wrapping or
 a reason line appearing changes a row's height. Relative times still tick. The footer (usage line,
 pending control), the status banner, the menu bar icon, notifications, sounds and the dashboard
@@ -1465,6 +1465,28 @@ and a digit in id order (`M1`, `M2`) when those collide too. The chip is dashed 
 offline, and the same chip marks that Mac's Updates rows, the detail header (beside the state)
 and its entry in Settings → Machines. The dashboard's color key adds the shape key
 (● this Mac, ◆ another Mac, ◇ offline) while the board has remote rows.
+
+### Grouped by machine in the popover
+
+While the board holds a session from another Mac, each popover section (Needs you, Review,
+Running, Unconcluded, and Snoozed and Done behind a query) is split by machine: this Mac's
+sessions first, under `<name> (local) · n` (`This Mac (local) · n` until this Mac has a name),
+then each other Mac's under `<name> · n`, or `<name> · offline · n` with a dashed chip when every
+session of it there is stale. Other Macs come in name order (ignoring case, numbers by value:
+"Mac 2" before "Mac 10"), ties by machine id, the same in every section, so a Mac going to sleep
+or a session finishing never reorders the groups; two Macs with one name get a sub-header each.
+Inside a group rows stay newest first. Every non-empty section gets a sub-header for each Mac it
+holds, a section with only this Mac's sessions too, so no row needs "no header means local".
+The section headers, the summary line and the filter notice keep their totals across machines.
+Grouped rows leave out the Mac's name capsule on the repo line (the sub-header names it) and
+keep the chip under the tool badge. Sub-headers are not pinned while scrolling.
+
+Whether to group is decided on the unfiltered list, so the layout does not flip while a filter is
+typed: a filter that leaves only this Mac's rows still shows them under its sub-header. A board
+with no session from another Mac (a single Mac, peers with nothing listed, or **Show sessions
+from other machines** off) shows no sub-headers. **Settings → Machines → Group the popover by
+machine** (key `groupPopoverByMachine`, on by default) turns it off for one list per section,
+newest first, with the Mac's name on other Macs' rows. The dashboard is not grouped.
 
 ### When a Mac is offline or asleep
 

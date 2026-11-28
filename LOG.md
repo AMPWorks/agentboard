@@ -1191,3 +1191,39 @@ so one update's x drops only that note and a mark done leaves other sessions' no
 on a snapshot change keeps the list shown before it; and while new updates are pending, Clear all
 becomes "Clear these" and a grouped row's x narrows to its listed notes, so nothing is dismissed
 unseen.
+
+## 2026-11-28 02:59:38 UTC — The popover groups sessions by machine; Macs can be renamed here
+
+With paired Macs the popover mixed this Mac's rows with the others' inside each section, ordered
+by time, and the only cue was the small chip under the tool badge and a name capsule that drops
+out of tight rows. Each section is now split by machine: this Mac first under
+`<name> (local) · n`, then one group per other Mac under its chip and `<name> · n` (`· offline ·`
+when every session of it there is stale). Other Macs sort by name (case-insensitive, numbers by
+value), ties by id, the same in every section; online-first or recency order was rejected because
+a Mac sleeping or a session finishing would reorder groups, the movement the list hold exists to
+prevent. Section headers, the summary line and the filter notice keep their totals; a sub-header
+carries its group's count. Grouped rows drop the name capsule and keep the chip.
+
+The grouping is a pure function in `PopoverSections.make`, so the held list, Update list and the
+filter needed no change. It turns on only when the unfiltered list holds a remote session, so a
+single Mac looks exactly as before (a capture of a board without remote sessions is pixel-identical
+to main's) and typing a filter never flips the layout. A coloured edge or badge per machine was
+rejected: colour already means state and shape means remote or offline, a hue per Mac does not
+scale past a few and fails without colour vision, and a text header also reads in VoiceOver. A
+Settings toggle (Machines → Group the popover by machine, default on) keeps the flat,
+newest-first list, since grouping gives up strict time order across Macs. The dashboard is not
+grouped: it keeps its capsule, its `machine:` search and a selection-driven list that sections
+would complicate. Sub-headers are not pinned: the list is a measured `VStack` that auto-expand
+reads, and pinned headers need a lazy stack.
+
+The narrow capture showed a row with a model tag and three PRs squeezing its repo text to a
+letter per line at 320 points (on main the text vanished instead). The popover's repo line now
+tries the tags beside the text, then without the Mac's name capsule, then moves the tags under
+the text once it would get less than 72 points.
+
+A paired Mac's name was fixed at pairing; sync ignored the name the Mac sends. The board now shows
+a local alias when one is set here (Settings → Machines, per paired Mac; `peers set --alias`,
+stored as `alias` on the peer entry, kept when pairing again, never touched by sync), else the
+name the Mac's last line carried, else the one saved at pairing. The snapshot's `peers[]` gains
+`own_name` and `alias` (additive). Machines stay told apart by id, so two Macs given one name
+still get two groups. This Mac's own name stays shared: it is what the other Macs show.
