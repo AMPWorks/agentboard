@@ -352,6 +352,13 @@ struct AgentBoardCLI: Sendable {
                                                       clearAlias: clearAlias))
     }
 
+    /// What the name field on a paired Mac's row saves: its text trimmed (as
+    /// the CLI's `clean_name` trims it), and an empty field clears the alias.
+    static func aliasEdit(_ text: String) -> (alias: String?, clear: Bool) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? (nil, true) : (trimmed, false)
+    }
+
     /// `clearAlias` wins over `alias` (the CLI refuses both at once). Values
     /// that may start with "-" go as `--opt=value`, so the CLI's own check
     /// sees them instead of argparse taking them for an option.

@@ -517,6 +517,15 @@ struct AdvertisedAddressTests {
 
 @Suite("AgentBoard CLI peers arguments")
 struct AgentBoardCLITests {
+    @Test func aliasEditTrimsAndAnEmptyFieldClears() {
+        for empty in ["", "  ", "\n", " \t\n "] {
+            let edit = AgentBoardCLI.aliasEdit(empty)
+            #expect(edit.alias == nil && edit.clear)
+        }
+        let edit = AgentBoardCLI.aliasEdit(" Studio \n")
+        #expect(edit.alias == "Studio" && !edit.clear)
+    }
+
     @Test func peersSetArguments() {
         #expect(AgentBoardCLI.peersSetArguments(id: "i", alias: "Studio") == ["set", "--id", "i", "--alias=Studio"])
         #expect(AgentBoardCLI.peersSetArguments(id: "i", alias: "-x") == ["set", "--id", "i", "--alias=-x"])

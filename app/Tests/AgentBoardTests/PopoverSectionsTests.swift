@@ -290,6 +290,22 @@ struct PopoverSectionsTests {
         }
     }
 
+    @Test func unconcludedAndQueryOnlySectionsGroupToo() {
+        let sessions = Fixtures.snapshot([
+            session("u1", "unconcluded"),
+            remote("mu", "unconcluded", machine: "mini", name: "Mini"),
+            session("d1", "done"),
+            remote("md", "done", machine: "mini", name: "Mini"),
+            remote("ms", "snoozed", machine: "mini", name: "Mini"),
+        ]).sessions
+        #expect(groups(grouped(sessions)) == ["unconcluded/local:u1", "unconcluded/mini:mu"])
+        // Every fixture session is claude, so this query lists Snoozed and Done.
+        #expect(groups(grouped(sessions, "claude")) == [
+            "unconcluded/local:u1", "unconcluded/mini:mu", "snoozed/mini:ms",
+            "done/local:d1", "done/mini:md",
+        ])
+    }
+
     @Test func otherMacsSortByNameThenId() {
         let sessions = Fixtures.snapshot([
             remote("a", "running", machine: "z1", name: "Beta"),

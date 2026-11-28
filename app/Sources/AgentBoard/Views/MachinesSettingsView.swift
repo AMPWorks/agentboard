@@ -391,14 +391,8 @@ private struct PeerRow: View {
 
     /// An empty field goes back to the Mac's own name.
     private func saveAlias() {
-        let trimmed = alias.trimmingCharacters(in: .whitespaces)
-        Task {
-            if trimmed.isEmpty {
-                _ = await store.setPeer(peer.id, clearAlias: true)
-            } else {
-                _ = await store.setPeer(peer.id, alias: trimmed)
-            }
-        }
+        let edit = AgentBoardCLI.aliasEdit(alias)
+        Task { _ = await store.setPeer(peer.id, alias: edit.alias, clearAlias: edit.clear) }
     }
 }
 

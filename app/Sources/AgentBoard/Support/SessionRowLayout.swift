@@ -153,15 +153,16 @@ enum SessionRowLayout {
         count == 1 ? "1 task" : "\(count) tasks"
     }
 
+    /// The narrowest the repo text gets beside the repo line's tags in the
+    /// popover; with less room the tags go under it.
+    static let minRepoWidth: CGFloat = 72
+
     /// The PR buttons are always last, at the row's trailing edge, so they
     /// sit in the same place whether or not the row has a tmux or model tag
     /// (an optional tag after them used to push them left). A popover list
     /// grouped by machine passes `showsMachineName: false`: the sub-header
     /// names the Mac, so the row leaves out its name capsule (the icon
     /// column's chip stays).
-    /// The narrowest the repo text gets beside the repo line's tags in the
-    /// popover; with less room the tags go under it.
-    static let minRepoWidth: CGFloat = 72
 
     static func repoTags(for session: Session, showsMachineName: Bool = true) -> [RepoTag] {
         var tags: [RepoTag] = []
