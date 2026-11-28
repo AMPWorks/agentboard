@@ -114,6 +114,7 @@ struct MachinesSettingsSection: View {
     @ObservedObject var store: SnapshotStore
     @AppStorage(SettingsKeys.showRemoteSessions) private var showRemote: Bool = true
     @AppStorage(SettingsKeys.notifyRemoteSessions) private var notifyRemote: Bool = true
+    @AppStorage(SettingsKeys.groupPopoverByMachine) private var groupByMachine: Bool = true
     @AppStorage(MenuBarIconSettings.remoteModeKey) private var remoteIconMode: String = RemoteIconMode.separate.rawValue
     @State private var name = ""
     /// The address field's unsaved edit; nil shows the saved address.
@@ -147,6 +148,9 @@ struct MachinesSettingsSection: View {
                 .onChange(of: showRemote) { _, _ in store.applyRemoteFilter() }
                 .help(SettingsCatalog.showRemoteSessions.help)
                 .settingsAnchor(SettingsCatalog.showRemoteSessions)
+            Toggle(SettingsCatalog.groupPopoverByMachine.label, isOn: $groupByMachine)
+                .help(SettingsCatalog.groupPopoverByMachine.help)
+                .settingsAnchor(SettingsCatalog.groupPopoverByMachine)
             Toggle(SettingsCatalog.notifyRemoteSessions.label, isOn: $notifyRemote)
                 .help(SettingsCatalog.notifyRemoteSessions.help)
                 .settingsAnchor(SettingsCatalog.notifyRemoteSessions)

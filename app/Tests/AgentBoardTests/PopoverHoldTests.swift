@@ -422,4 +422,32 @@ struct PopoverHoldTests {
         #expect(shown[0].notes.map(\.id) == [2])
         #expect(shown[0].notesCount == 1)
     }
+
+    @Test func aHeldListKeepsItsMachineGroups() {
+        func remote(_ id: String, machine: String, name: String, updated: String) -> [String: Any] {
+            Fixtures.session("claude:\(id)@\(machine)", "running", alive: true, extra: [
+                "session_id": id, "updated_at": updated, "machine": ["id": machine, "name": name],
+            ])
+        }
+        func grouping(_ sessions: [Session]) -> [String] {
+            PopoverSections.make(from: sessions, query: SessionSearch(""), groupByMachine: true)
+                .sections.flatMap { $0.groups.map { "\($0.id):\($0.sessions.map(\.key).joined(separator: ","))" } }
+        }
+        let start = sessions([
+            session("l", updated: "2026-10-15T00:01:00Z"),
+            remote("r", machine: "mini", name: "Mini", updated: "2026-10-15T00:02:00Z"),
+        ])
+        // The remote session left, and a new Mac's session arrived.
+        let live = sessions([
+            session("l", updated: "2026-10-15T00:01:00Z"),
+            remote("n", machine: "air", name: "Air", updated: "2026-10-15T00:03:00Z"),
+        ])
+        var hold = holding(start)
+        let before = grouping(hold.displayed(live: start))
+        #expect(before == ["running/local:l", "running/mini:claude:r@mini"])
+        #expect(grouping(hold.displayed(live: live)) == before)
+        #expect(hold.pending(live: live, query: "") == PopoverHold.Pending(added: 1, gone: 1))
+        hold.release(live: live)
+        #expect(grouping(hold.displayed(live: live)) == ["running/local:l", "running/air:claude:n@air"])
+    }
 }

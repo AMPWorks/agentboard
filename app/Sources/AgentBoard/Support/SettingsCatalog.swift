@@ -185,6 +185,10 @@ enum SettingsCatalog {
         id: "notifyRemoteSessions", tab: .machines, section: "Machines", label: "Notify for sessions on other machines",
         help: "Let sessions on your paired Macs notify, play sounds and flash the menu bar icon; their rows show either way",
         keys: [SettingsKeys.notifyRemoteSessions])
+    static let groupPopoverByMachine = SettingsItem(
+        id: "groupPopoverByMachine", tab: .machines, section: "Machines", label: "Group the popover by machine",
+        help: "On: each popover section lists this Mac's sessions first, then each other Mac's, under a header naming the Mac. Off: one list per section, newest first, with the Mac's name on other Macs' rows",
+        keys: [SettingsKeys.groupPopoverByMachine])
     static let remoteIconMode = SettingsItem(
         id: "remoteIconMode", tab: .machines, section: "Machines", label: "Other Macs in the menu bar icon",
         help: "Separate marker: the icon and its count are this Mac's, and a diamond at its corner shows another Mac's session needs you. Merged: other Macs' sessions color, count and flash the icon like this Mac's. Not shown: the icon ignores other Macs",
@@ -227,7 +231,7 @@ enum SettingsCatalog {
         notifyOnNeedsYou, notifyOnTurnFinished,
     ] + sounds + [
         thisMacName, thisMacAddress, shareLevel, sharingSettings, copyPairingCode, pairedMachines, addMachine,
-        showRemoteSessions, notifyRemoteSessions, remoteIconMode,
+        showRemoteSessions, groupPopoverByMachine, notifyRemoteSessions, remoteIconMode,
         cliPath, useFixture, fixturePath,
         verboseLogging, openLog, revealHookErrorsLog,
     ]

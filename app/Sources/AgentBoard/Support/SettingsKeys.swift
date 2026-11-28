@@ -47,6 +47,7 @@ enum SettingsKeys {
         PopoverSizing.autoWidthKey,
         SettingsKeys.showRemoteSessions,
         SettingsKeys.notifyRemoteSessions,
+        SettingsKeys.groupPopoverByMachine,
         SettingsKeys.settingsLastTab,
     ]
 
@@ -60,6 +61,10 @@ enum SettingsKeys {
     /// Let sessions on paired Macs notify, play sounds and flash the menu
     /// bar icon (default on). Their rows still show either way.
     static let notifyRemoteSessions = "notifyRemoteSessions"
+    /// Split each popover section into one group per machine, this Mac
+    /// first, each under a sub-header (default on). Off keeps one
+    /// time-ordered list with the Mac's name on remote rows.
+    static let groupPopoverByMachine = "groupPopoverByMachine"
 
     /// Show the plan-usage lines (one per usage source) in the popover
     /// footer and the dashboard sidebar (default on).

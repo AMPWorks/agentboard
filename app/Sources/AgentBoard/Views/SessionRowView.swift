@@ -12,6 +12,9 @@ struct SessionRowView: View {
     var resolveLive: ((Session) -> Session?)? = nil
     /// What a held row's session is now (`PopoverHold.status`).
     var holdStatus: PopoverHold.RowStatus = .current
+    /// Remote rows show the Mac's name capsule on the repo line; a popover
+    /// list grouped by machine turns it off (its sub-header names the Mac).
+    var showsMachineName: Bool = true
 
     @State private var isHovering = false
 
@@ -132,7 +135,7 @@ struct SessionRowView: View {
             Spacer(minLength: 4)
             // SessionRowLayout.repoTags order: the PR buttons last, so they
             // never move with the optional tags.
-            ForEach(SessionRowLayout.repoTags(for: session), id: \.self) { tag in
+            ForEach(SessionRowLayout.repoTags(for: session, showsMachineName: showsMachineName), id: \.self) { tag in
                 switch tag {
                 case .machine: machineTag
                 case .tmux: tmuxTag

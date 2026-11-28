@@ -258,6 +258,13 @@ struct PeerSyncRowTests {
         let tmux = Fixtures.decoded("x", extra: Fixtures.remote("t", "running", remoteOpen: "tmux"))
         #expect(SessionRowLayout.iconColumn(for: tmux).contains(.machine))
         #expect(SessionRowLayout.repoTags(for: tmux).first == .machine)
+        // Grouped by machine, the sub-header names the Mac: no name capsule,
+        // the chip and the other tags stay, in order.
+        let named = SessionRowLayout.repoTags(for: tmux)
+        let unnamed = SessionRowLayout.repoTags(for: tmux, showsMachineName: false)
+        #expect(!unnamed.contains(.machine))
+        #expect(unnamed == named.filter { $0 != .machine })
+        #expect(SessionRowLayout.iconColumn(for: tmux).contains(.machine))
         #expect(SessionActionHelp.focusTitle(tmux) == "Attach on Mini")
         let screen = Fixtures.decoded("x", extra: Fixtures.remote("s", "running", remoteOpen: "screen"))
         #expect(SessionActionHelp.focusTitle(screen) == "Screen Share to Mini")
